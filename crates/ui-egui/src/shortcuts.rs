@@ -279,7 +279,8 @@ fn key_event(app: &mut FigApp, key: Key, physical: Option<Key>, m: Modifiers, re
     if app.ui.layers_focus && !m.command && !m.alt && crate::layers::key_nav(app, key, m.shift) {
         return true;
     }
-    // Arrow nudges; with nothing selected the arrows pan the view.
+    // Arrow nudges, Alt held too (measuring stays on while the selection moves); with nothing
+    // selected the arrows pan the view.
     let (dx, dy) = match key {
         Key::ArrowLeft => (-1.0, 0.0),
         Key::ArrowRight => (1.0, 0.0),
@@ -287,7 +288,7 @@ fn key_event(app: &mut FigApp, key: Key, physical: Option<Key>, m: Modifiers, re
         Key::ArrowDown => (0.0, 1.0),
         _ => (0.0, 0.0),
     };
-    if (dx, dy) != (0.0, 0.0) && !m.alt {
+    if (dx, dy) != (0.0, 0.0) {
         if app.session.selection().is_empty() {
             app.run("view.pan", json!({"dx": dx, "dy": dy, "big": m.shift}));
         } else if m.command {

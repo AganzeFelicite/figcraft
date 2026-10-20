@@ -234,7 +234,12 @@ Or in a project's `.mcp.json`:
   `text.setVariations {variations, replace?}` merges instead. `text.fonts {family, style?, axes: true}`
   lists a font's axes and named instances (named instances are also valid `fontStyle` values).
   `text.missingFonts` lists the families the document names that aren't installed
-  (`{families: [{family, layers}]}`); their text draws in a fallback font.
+  (`{families: [{family, layers}]}`); their text draws in a fallback font. Fonts are indexed once
+  per process: after installing one, `text.rescanFonts` picks it up (`{added: [families]}`), and
+  `text.loadFont {path | data (base64)}` adds a font file without installing it (`{families}`).
+  Text boxes keep the size they were measured at: both refit the open document's auto-sizing text
+  in the new families (`refitted: [ids]`), and `text.refit {ids?}` does it for any text, e.g. a
+  file saved while its fonts were missing.
   OpenType features: `features {"liga": false, "tnum": true}`.
   Decorations: `textDecorationStyle` (`solid`, `dotted`, `wavy`), `textDecorationThickness` and
   `textDecorationOffset` (`auto`, px, or `"10%"` of the font size; the offset runs from the baseline
@@ -267,7 +272,11 @@ Or in a project's `.mcp.json`:
   `style.duplicate {style}` adds "<name> copy" right below, `style.renameFolder {folder, name}`.
 - **Variables**: `variable.bind` refuses a variable of a type the field doesn't take (a colour on
   `width`); scopes only filter pickers. `variable.delete` / `variable.deleteCollection` unbind the
-  layers using them (they keep their last value) and give aliases to them their values.
+  layers using them (they keep their last value) and give aliases to them their values. An
+  explicit edit that changes a bound field's value (`node.set`, `transform.resize`,
+  `object.opacityKeys`, `text.style`, `text.set`, the text size, weight and
+  tracking shortcuts, a canvas drag) detaches that field's variable; fields the edit
+  left as they were stay bound.
   `variable.addMode {from}` duplicates a mode, `variable.moveMode {collection, mode, to}` reorders
   (index 0 is the default mode, which layers on Auto follow). `variable.update {codeSyntax: {WEB?,
   iOS?, ANDROID?}}` sets code names (`""` clears); generated CSS uses the Web one.
@@ -290,7 +299,7 @@ Or in a project's `.mcp.json`:
 | `create_node {type, x, y, width, height, parent, index, name, text, path, props}` | Create a frame, rectangle, ellipse, polygon, star, line, arrow, text, vector, section, component or slice; returns `{id, node}`. |
 | `set_properties {ids, props}` | `node.set` on layers (geometry, fills, strokes, effects, corner radius, auto layout, sizing, constraints, masks (`isMask`, `maskType: alpha\|vector\|luminance`), handoff status (`devStatus: none\|readyForDev\|completed`; marking again clears "Changed"), a section's `sectionContentsHidden`, text…); returns the updated layers. |
 | `inspect_document {depth, allPages}` | The document as JSON (layer tree, styles, selection, history). |
-| `get_node {id, depth}` | One layer as JSON. |
+| `get_node {id, depth}` | One layer as JSON; `pluginData` (`{key: value}`, values as strings) when the layer or page has layer data written with `set_properties {props: {pluginData}}`. |
 | `select {ids}` | Replace the selection (`[]` deselects). |
 | `export {ids, format, scale \| size, path?, bleed?, cropMarks?, bleedMarks?, cmyk?, contentsOnly?, includeBoundingBox?, svgOutlineText?, svgIdAttribute?, svgSimplifyStroke?}` | png, jpg, svg, webp, pdf, or `fig`: the whole file as `.fig`, experimental (see Exporting `.fig` files below); `size` is `2x`, `512w` or `512h`. The image covers what the layers paint (shadows towards their offset, strokes, unclipped children, a mask group's mask; hidden layers take no room; a slice is its area with everything under it); `contentsOnly: false` also draws every other layer showing in that area, `includeBoundingBox` exports the layers' own boxes; SVG: `svgOutlineText: false` keeps `<text>`, `svgIdAttribute` writes unique ids from layer names, `svgSimplifyStroke: false` writes every stroke as an outline. The same options go in export settings (`export.add` / `export.update`). PDF: frames one page each (sized in points), anything else together on one page; print options: `bleed` (points or a length like `"3mm"`, `"0.125in"`), crop and bleed marks, CMYK colour (see Exports below), also taken by `file.export`, `file.exportLayers`, `file.exportFramesPdf` and stored per export setting by `export.add` / `export.update`; `run_command` `file.exportFramesPdf {page?, path?}` writes every top-level frame of a page. Without `path`, images come back as MCP image content, SVG as text. Layers' own export settings: `run_command` with `export.add` / `export.update {index, size?, suffix?, format?}` / `export.remove` and `file.exportLayers {ids?, dir?, assets?}` (every layer once per setting, named `<layer><suffix>.<format>`, a slash in a layer name making a folder; `assets: true` exports the Inspect tab's assets instead: icons as SVG, images as PNG). |
 | `screenshot {ids?, scale?, maxSize?, window?}` | PNG of the page (with background) or of layers, scaled to fit `maxSize` (default 1600). `window: true` captures the app window in front when attached, a window id (see Windows below) that window. |
@@ -417,10 +426,17 @@ on; `key` resolves keys the way the canvas does. Commands behind keys:
   nested layers), Escape or a click drops it.
 - `pref.reduceMotion {on?}`: reduced motion (the interface's own animations off; the system's
   accessibility setting turns it on too). Prototype transitions still play.
+- `pref.uiScale {scale?}`: how large the whole interface is drawn, relative to the system's display
+  scale: 1 (the default) is the system's own size on every screen, 1.25 means 125 %, not 125; from
+  0.75 to 3 (outside the range it stops at the nearest end; `"auto"` is 1). Omit `scale` to read it.
+  The canvas zoom is separate. A window too small for a size above 100 % draws a smaller one until
+  it is larger; the choice is kept. In the browser the interface always follows the browser's zoom.
 - `pref.autoSave {on?}`: files that have a path save themselves a few seconds after they change
   (off by default; the desktop app's timer does it, so scripts still call `file.save`).
-- `pref.language {language: system|en|cs|ru|es|es-419|fr|de|pt-BR|ja|ko|zh-Hans|…}`: the app's interface language, applied live ("system":
-- `pref.language {language: system|en|es|es-419|fr|de|pt-BR|ja|ko|sv|zh-Hans|…}`: the app's interface language, applied live ("system":
+- `pref.startOnHome {on?}`: the desktop app starts on the Home screen instead of in a new file
+  (off by default; files named on the command line still open, and `--control` starts in a new
+  file anyway, so control callers have a document).
+- `pref.language {language: system|en|cs|ru|es|es-419|fr|de|pt-BR|ja|ka|ko|sv|zh-Hans|…}`: the app's interface language, applied live ("system":
   the OS or browser language; a language without a catalog shows English). Command ids, labels and
   every result stay English.
 

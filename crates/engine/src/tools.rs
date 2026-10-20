@@ -1300,7 +1300,7 @@ impl Session {
                         for i in &ids {
                             let parent = doc.get(*i)?.parent.unwrap_or(page);
                             let idx = doc.index_in_parent(*i).map(|x| x + 1);
-                            copies.push(doc.duplicate_into(*i, parent, idx)?);
+                            copies.push(crate::components::copy_in_file(doc, *i, parent, idx)?);
                         }
                         moving = copies;
                         *sel = moving.clone();

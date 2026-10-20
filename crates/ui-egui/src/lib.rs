@@ -61,6 +61,7 @@ pub mod tabs;
 pub mod theme;
 pub mod toolbar;
 pub mod typography;
+pub mod ui_scale;
 pub mod variable_ui;
 pub mod variables_panel;
 pub mod vector_panel;
@@ -146,6 +147,8 @@ mod live_tests;
 #[cfg(test)]
 mod live_text_tests;
 #[cfg(test)]
+mod measure_nudge_tests;
+#[cfg(test)]
 mod menu_aim_tests;
 #[cfg(test)]
 mod menu_input_tests;
@@ -155,6 +158,8 @@ mod missing_fonts_tests;
 mod online_tests;
 #[cfg(test)]
 mod open_issues_tests;
+#[cfg(test)]
+mod padding_individual_tests;
 #[cfg(test)]
 mod palette_tests;
 #[cfg(test)]
@@ -204,6 +209,8 @@ mod text_enter_tests;
 #[cfg(test)]
 mod titlebar_tests;
 #[cfg(test)]
+mod ui_scale_tests;
+#[cfg(test)]
 mod variables_export_ui_tests;
 #[cfg(test)]
 mod variables_rename_tests;
@@ -235,6 +242,11 @@ pub use control::{ControlReply, ControlRequest};
 pub trait Services {
     fn pick_open(&mut self, _title: &str, _exts: &[&str]) -> DialogFuture {
         Box::pin(std::future::ready(None))
+    }
+    /// Pick a file and read it, where the platform hands over a file's name and contents rather
+    /// than a path to it (the browser). `None`: the platform picks paths ([`Services::pick_open`]).
+    fn pick_open_contents(&mut self, _title: &str, _exts: &[&str]) -> Option<ContentsFuture> {
+        None
     }
     fn pick_save(&mut self, _title: &str, _name: &str, _exts: &[&str]) -> DialogFuture {
         Box::pin(std::future::ready(None))
@@ -290,14 +302,61 @@ pub trait Services {
 }
 
 pub type DialogFuture = Pin<Box<dyn Future<Output = Option<PathBuf>>>>;
-type DialogDone = Box<dyn FnOnce(&mut FigApp, PathBuf)>;
+/// A picked file's name and contents ([`Services::pick_open_contents`]); `None` when the picker
+/// was cancelled, `Err` with what to tell the user when the file couldn't be read.
+pub type ContentsFuture = Pin<Box<dyn Future<Output = Option<Result<(String, Vec<u8>), String>>>>>;
+/// A dropped file's contents, read once they arrive (`Err`: what to tell the user when they
+/// couldn't be read).
+pub type ReadFuture = Pin<Box<dyn Future<Output = Result<Vec<u8>, String>>>>;
+type PickFuture = Pin<Box<dyn Future<Output = Option<Picked>>>>;
+type DialogDone = Box<dyn FnOnce(&mut FigApp, Picked)>;
+
+/// What a dialog picked: a path, or a file's name and contents where there are no paths, or why
+/// the picked file couldn't be read.
+enum Picked {
+    Path(PathBuf),
+    Contents(String, Vec<u8>),
+    Unreadable(String),
+}
+
+impl Picked {
+    /// The file as `file.open` and `file.import` take it (`Err`: what to tell the user instead).
+    fn file_params(self) -> Result<Value, String> {
+        match self {
+            Picked::Path(p) => Ok(json!({"path": p.to_string_lossy()})),
+            Picked::Contents(name, bytes) => {
+                use base64::Engine as _;
+                Ok(json!({"data": base64::engine::general_purpose::STANDARD.encode(&bytes), "name": name}))
+            }
+            Picked::Unreadable(why) => Err(why),
+        }
+    }
+}
+
+/// What the user is told about a file whose contents couldn't be read.
+pub fn unreadable(name: &str) -> String {
+    i18n::trf("Couldn't read {name}.", &[("name", &name)])
+}
+
+/// The largest file read in the browser: wasm has at most 4 GiB of memory, and a file's contents
+/// are held about three times on their way to `file.open` (the bytes, base64, decoded again).
+/// As large as one member of a `.figcraft` file may be.
+const MAX_BROWSER_FILE: f64 = (512u64 << 20) as f64;
+
+/// Checks a file of `size` bytes before the browser reads it (`Err`: what to tell the user).
+pub fn browser_can_read(name: &str, size: f64) -> Result<(), String> {
+    if size.is_nan() || size > MAX_BROWSER_FILE {
+        return Err(i18n::trf("{name} is too large to open in the browser (over 512 MB).", &[("name", &name)]));
+    }
+    Ok(())
+}
 
 /// A native dialog in flight. The app keeps working while it is open, so its result goes to the
 /// file and window it was opened for, not to whichever is in front when it closes.
 struct PendingDialog {
-    future: DialogFuture,
-    /// The path picked, kept until the window that holds `doc` draws.
-    path: Option<PathBuf>,
+    future: PickFuture,
+    /// What was picked, kept until the window that holds `doc` draws.
+    picked: Option<Picked>,
     done: DialogDone,
     /// The file it acts on (`None`: none, such as Open).
     doc: Option<u64>,
@@ -431,6 +490,9 @@ pub struct UiState {
     pub last_right_tab: RightTab,
     pub left_tab: LeftTab,
     pub pages_open: bool,
+    /// Pages panel search: open, and the case-insensitive name filter.
+    pub page_search: bool,
+    pub page_filter: String,
     /// The height asked for the pages list (`None`: a share of the panel).
     pub pages_height: Option<f32>,
     pub expanded: BTreeSet<NodeId>,
@@ -459,6 +521,9 @@ pub struct UiState {
     pub menu_input: Option<dialogs::MenuInput>,
     /// File ▸ Rename: the file name in the left panel starts its inline rename on the next frame.
     pub rename_file: bool,
+    /// What the interface size drew last frame and whether the window held it back. Set by
+    /// [`FigApp::logic`] for the main window.
+    pub ui_scale: ui_scale::Plan,
     pub shortcuts_panel: bool,
     /// The Keyboard shortcuts panel's tab and search text.
     pub shortcuts_tab: figcraft_engine::keymap::Group,
@@ -500,6 +565,10 @@ pub struct UiState {
     /// The layers panel has the keyboard: arrow keys move through its rows instead of nudging
     /// (set by a click on a row, cleared by a press on the canvas).
     pub layers_focus: bool,
+    /// The file (its `uid`) whose pages list has the keyboard: Delete with no layers selected deletes
+    /// its current page (set by a click on a page row or the add-page button, cleared by a click on a
+    /// layer row or a press on the canvas).
+    pub pages_focus: Option<u64>,
     pub layers_seen_sel: Vec<NodeId>,
     pub dark: bool,
     pub follow_system: bool,
@@ -595,6 +664,8 @@ impl Default for UiState {
             last_right_tab: RightTab::Design,
             left_tab: LeftTab::File,
             pages_open: true,
+            page_search: false,
+            page_filter: String::new(),
             pages_height: None,
             expanded: BTreeSet::new(),
             rename: None,
@@ -612,6 +683,7 @@ impl Default for UiState {
             preferences: false,
             menu_input: None,
             rename_file: false,
+            ui_scale: ui_scale::plan(1.0, None, None),
             shortcuts_panel: false,
             shortcuts_tab: figcraft_engine::keymap::Group::Essential,
             shortcuts_query: String::new(),
@@ -634,6 +706,7 @@ impl Default for UiState {
             layer_filter: String::new(),
             layer_anchor: None,
             layers_focus: false,
+            pages_focus: None,
             layers_seen_sel: Vec::new(),
             dark: false,
             follow_system: false,
@@ -780,6 +853,11 @@ impl FigApp {
     fn failed(&mut self, id: &str, e: &figcraft_engine::EngineError) {
         let msg = e.to_string();
         log::warn!("{id}: {msg}");
+        self.show_error(msg);
+    }
+
+    /// Show an error as a toast, kept as the last error.
+    pub(crate) fn show_error(&mut self, msg: String) {
         self.toast(msg.clone());
         self.ui.last_error = Some(msg);
     }
@@ -1032,7 +1110,7 @@ impl FigApp {
         let resp = ui.interact(rect, id, egui::Sense::click_and_drag());
         if resp.hovered() || resp.dragged() {
             ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
-            ui.painter().vline(x, rows, egui::Stroke::new(2.0, theme::Tokens::get(ui.ctx()).accent));
+            ui.painter().vline(x, rows, egui::Stroke::new(2.0, theme::ACCENT));
         }
         if resp.double_clicked() {
             return Some(PANEL_DEFAULT);
@@ -1099,16 +1177,11 @@ impl FigApp {
 
     pub fn open_dialog(&mut self) {
         // Opening needs no file in front: it goes ahead even if that file closed meanwhile.
-        self.start_dialog(
-            |services| services.pick_open(i18n::tr("Open"), OPEN_EXTENSIONS),
-            false,
-            |app, p| {
-                let ps = p.to_string_lossy().to_string();
-                if app.run_user("file.open", json!({"path": ps})).is_some() {
-                    app.ui.home = false;
-                }
-            },
-        );
+        self.pick_file(i18n::tr("Open"), OPEN_EXTENSIONS, false, |app, file| {
+            if app.run_user("file.open", file).is_some() {
+                app.ui.home = false;
+            }
+        });
     }
 
     pub fn import_dialog(&mut self, place: bool) {
@@ -1118,10 +1191,33 @@ impl FigApp {
             &["svg", "png", "jpg", "jpeg", "webp", "gif", "tif", "tiff", "figcraft", "fig"]
         };
         let title = if place { i18n::tr("Place image") } else { i18n::tr("Import") };
-        self.pick_open(title, exts, move |app, p| {
-            let ps = p.to_string_lossy().to_string();
-            app.run_user("file.import", json!({"path": ps}));
+        self.pick_file(title, exts, true, |app, file| {
+            app.run_user("file.import", file);
         });
+    }
+
+    /// Pick a file to open or import; `done` gets it as `file.open` and `file.import` take it (a
+    /// path, or the name and contents where the platform has no paths). `pin`: as
+    /// [`FigApp::pick_open`]'s file in front.
+    fn pick_file(&mut self, title: &str, exts: &[&str], pin: bool, done: impl FnOnce(&mut FigApp, Value) + 'static) {
+        self.start_pick(
+            |services| -> PickFuture {
+                match services.pick_open_contents(title, exts) {
+                    Some(read) => {
+                        Box::pin(async move { read.await.map(|r| r.map_or_else(Picked::Unreadable, |(name, bytes)| Picked::Contents(name, bytes))) })
+                    }
+                    None => {
+                        let pick = services.pick_open(title, exts);
+                        Box::pin(async move { pick.await.map(Picked::Path) })
+                    }
+                }
+            },
+            pin,
+            move |app, picked| match picked.file_params() {
+                Ok(file) => done(app, file),
+                Err(why) => app.show_error(why),
+            },
+        );
     }
 
     /// Pick a file to open. `done` runs with the file in front now back in front (and not at all
@@ -1142,12 +1238,28 @@ impl FigApp {
 
     /// Open a native dialog from the window drawing now, for the file in front (`pin`).
     fn start_dialog(&mut self, start: impl FnOnce(&mut dyn Services) -> DialogFuture, pin: bool, done: impl FnOnce(&mut FigApp, PathBuf) + 'static) {
+        self.start_pick(
+            |services| -> PickFuture {
+                let pick = start(services);
+                Box::pin(async move { pick.await.map(Picked::Path) })
+            },
+            pin,
+            move |app, picked| {
+                if let Picked::Path(p) = picked {
+                    done(app, p);
+                }
+            },
+        );
+    }
+
+    /// [`FigApp::start_dialog`] for any kind of pick.
+    fn start_pick(&mut self, start: impl FnOnce(&mut dyn Services) -> PickFuture, pin: bool, done: impl FnOnce(&mut FigApp, Picked) + 'static) {
         if self.pending_dialog.is_some() {
             return;
         }
         let doc = if pin { self.session.ds().ok().filter(|d| self.shows(d.uid)).map(|d| d.uid) } else { None };
         let future = start(self.services.as_mut());
-        self.pending_dialog = Some(PendingDialog { future, path: None, done: Box::new(done), doc, window: self.windows.current });
+        self.pending_dialog = Some(PendingDialog { future, picked: None, done: Box::new(done), doc, window: self.windows.current });
         if let Some(ctx) = &self.ui_context {
             ctx.request_repaint();
         }
@@ -1157,12 +1269,12 @@ impl FigApp {
     /// that file in front; then the tab in front before comes back (unless the dialog opened a file).
     fn poll_dialog(&mut self, ctx: &egui::Context) {
         let Some(d) = &mut self.pending_dialog else { return };
-        if d.path.is_none() {
+        if d.picked.is_none() {
             let waker = Waker::from(Arc::new(RepaintWaker(ctx.clone())));
-            let Poll::Ready(path) = d.future.as_mut().poll(&mut TaskContext::from_waker(&waker)) else { return };
-            d.path = path;
+            let Poll::Ready(picked) = d.future.as_mut().poll(&mut TaskContext::from_waker(&waker)) else { return };
+            d.picked = picked;
         }
-        let (doc, origin, picked) = (d.doc, d.window, d.path.is_some());
+        let (doc, origin, picked) = (d.doc, d.window, d.picked.is_some());
         let index = doc.map(|u| self.session.docs.iter().position(|ds| ds.uid == u));
         // Cancelled, or its file closed meanwhile.
         if !picked || index == Some(None) {
@@ -1178,12 +1290,12 @@ impl FigApp {
             ctx.request_repaint_of(windows::viewport(window));
             return;
         }
-        let Some(PendingDialog { path: Some(path), done, .. }) = self.pending_dialog.take() else { return };
+        let Some(PendingDialog { picked: Some(picked), done, .. }) = self.pending_dialog.take() else { return };
         let before = self.session.ds().ok().map(|d| d.uid);
         if let Some(Some(i)) = index {
             self.session.active = i;
         }
-        done(self, path);
+        done(self, picked);
         if doc.is_some()
             && self.session.ds().ok().map(|d| d.uid) == doc
             && let Some(i) = before.and_then(|u| self.session.docs.iter().position(|d| d.uid == u))
@@ -1197,11 +1309,11 @@ impl FigApp {
         self.session.prefs.reduce_motion || self.services.reduce_motion()
     }
 
-    /// The CJK scripts the UI shows: the language's, the language picker's (Preferences open),
+    /// The CJK and Bengali scripts the UI shows: the language's, the language picker's (Preferences open),
     /// typed text's, and those in the open file's names and comments (read when it changes, not
     /// mid-drag). Nothing is checked once every script has a face.
     fn cjk_needed(&mut self, ctx: &egui::Context, installed: u8) -> u8 {
-        if installed == cjk::KANA | cjk::HANGUL | cjk::HAN {
+        if installed == cjk::ALL {
             return installed;
         }
         let mut need = i18n::current().map_or(0, |l| cjk::language(l.code));
@@ -1260,6 +1372,16 @@ impl FigApp {
                 self.script_fonts = Some((cjk, lang));
                 theme::install_fonts(ctx, true, cjk);
             }
+        }
+        // egui's zoom is for the whole app and multiplies each window's own system scale, so the
+        // size is the same relative to every screen; the main window, whose size can hold a size
+        // back, sets it. The browser keeps its own zoom.
+        if ctx.viewport_id() == egui::ViewportId::ROOT {
+            let window_px = ctx.content_rect().size() * ctx.pixels_per_point();
+            let size = if cfg!(target_arch = "wasm32") { 1.0 } else { self.session.prefs.ui_scale };
+            let plan = ui_scale::plan(size, ctx.native_pixels_per_point(), Some((window_px.x, window_px.y)));
+            ctx.set_zoom_factor(plan.zoom);
+            self.ui.ui_scale = plan;
         }
         let dark = match self.session.prefs.theme.as_str() {
             "dark" => true,
@@ -1390,7 +1512,7 @@ impl FigApp {
         // What happened in a live session (the network woke us for it).
         if self.session.live_poll() {
             if let Some(m) = self.session.message.take() {
-                self.toast(m);
+                self.toast(live::failure_text(&m));
             }
             self.background_done(&ctx);
         }
@@ -1681,6 +1803,8 @@ impl FigApp {
             "importReport": self.ui.import_report.as_ref().map(import_report::Report::inspect),
         });
         state["homeSearch"] = json!(self.ui.home_view.file_query);
+        // Set apart from the literal above, which is at the macro recursion limit.
+        state["uiScale"] = json!({"choice": self.session.prefs.ui_scale, "zoom": self.ui.ui_scale.zoom, "drawn": self.ui.ui_scale.drawn, "limited": self.ui.ui_scale.limited});
         state["pendingOpens"] = json!(self.ui.pending_opens.len());
         state["missingFonts"] = json!(self.ui.missing_fonts.as_ref().map(missing_fonts::Shown::inspect));
         state
@@ -1695,17 +1819,22 @@ pub(crate) fn opens(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| OPEN_EXTENSIONS.iter().any(|x| x.eq_ignore_ascii_case(e)))
 }
 
-/// The contents of a dropped file that has no file on disk to read by path.
+/// Reads the contents of dropped file `name` that has no file on disk to read by path.
 #[cfg(not(target_arch = "wasm32"))]
-pub(crate) fn dropped_bytes(f: &egui::DroppedFileHandle) -> Option<Vec<u8>> {
-    f.bytes().ok()
+pub(crate) fn dropped_bytes(f: &egui::DroppedFileHandle, name: &str) -> ReadFuture {
+    Box::pin(std::future::ready(f.bytes().map_err(|_| unreadable(name))))
 }
 
-/// The contents of a dropped file that has no file on disk to read by path.
+/// Reads the contents of dropped file `name`; the browser hands them over asynchronously.
 #[cfg(target_arch = "wasm32")]
-pub(crate) fn dropped_bytes(_f: &egui::DroppedFileHandle) -> Option<Vec<u8>> {
-    // Browser drops arrive asynchronously; not supported yet.
-    None
+pub(crate) fn dropped_bytes(f: &egui::DroppedFileHandle, name: &str) -> ReadFuture {
+    let (f, name) = (f.clone(), name.to_string());
+    Box::pin(async move {
+        if let Some(file) = f.web_file() {
+            browser_can_read(&name, file.size())?;
+        }
+        f.bytes_async().await.map_err(|_| unreadable(&name))
+    })
 }
 
 /// While files are dragged over the window: a tinted, outlined `rect` with `label` in its middle,
@@ -1718,11 +1847,11 @@ pub(crate) fn drop_overlay(ctx: &egui::Context, rect: egui::Rect, label: &str) {
     let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, egui::Id::new("drop_overlay")));
     let area = rect.shrink(4.0);
     painter.rect_filled(area, egui::CornerRadius::same(8), t.accent.gamma_multiply(0.12));
-    painter.rect_stroke(area, egui::CornerRadius::same(8), egui::Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
+    painter.rect_stroke(area, egui::CornerRadius::same(8), egui::Stroke::new(2.0, theme::ACCENT), egui::StrokeKind::Inside);
     let galley = painter.layout_no_wrap(label.to_owned(), theme::semibold(14.0), t.text);
     let pill = egui::Rect::from_center_size(area.center(), galley.size() + egui::vec2(32.0, 16.0));
     painter.rect_filled(pill, egui::CornerRadius::same(8), t.panel);
-    painter.rect_stroke(pill, egui::CornerRadius::same(8), egui::Stroke::new(1.0, t.accent), egui::StrokeKind::Inside);
+    painter.rect_stroke(pill, egui::CornerRadius::same(8), egui::Stroke::new(1.0, theme::ACCENT), egui::StrokeKind::Inside);
     painter.galley(pill.center() - galley.size() / 2.0, galley, t.text);
     // Hovering sends no pointer events on every platform: keep the overlay current.
     ctx.request_repaint();
