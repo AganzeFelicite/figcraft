@@ -1547,6 +1547,9 @@ fn paint_row(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, p: &Paint,
         let sw = Rect::from_min_size(pos2(r.min.x + 4.0, r.center().y - 8.0), vec2(16.0, 16.0));
         widgets::paint_swatch(ui.painter(), sw, p);
         let sresp = ui.interact(sw.expand(2.0), Id::new(("swatch", fills, i)), Sense::click());
+        if app.ui.picker.as_ref() == Some(&crate::colorpicker::PickerTarget::Paint { fills, index: i, ids: ids.clone() }) {
+            app.ui.picker_button = Some(sresp.rect);
+        }
         if sresp.clicked() {
             app.toggle_picker(crate::colorpicker::PickerTarget::Paint { fills, index: i, ids: ids.clone() }, Some(sresp.rect.min.y));
         }

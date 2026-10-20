@@ -490,6 +490,9 @@ pub struct UiState {
     pub picker: Option<colorpicker::PickerTarget>,
     /// The colour picker's popover while it is open (its place survives a drag).
     pub picker_popover: Option<popover::Popover>,
+    /// The control that opened the picker, refreshed every frame it is drawn (the panel scrolls):
+    /// a press in it is held out of the popover's closing, so its own click toggles the picker.
+    pub picker_button: Option<egui::Rect>,
     pub context_menu: Option<(egui::Pos2, Vec<NodeId>)>,
     /// The context menu was asked for from the keyboard (`view.contextMenu`): it opens at the
     /// focused layer row or the canvas selection and takes the keyboard.
@@ -635,6 +638,7 @@ impl Default for UiState {
             preview: None,
             picker: None,
             picker_popover: None,
+            picker_button: None,
             context_menu: None,
             key_menu: false,
             key_box: None,

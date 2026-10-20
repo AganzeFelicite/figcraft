@@ -465,8 +465,14 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
     let pos = beside.unwrap_or(pos2(screen.max.x - app.ui.right_width - 260.0, 140.0));
     // The colour picker's own header — title 16 in, the X 8 in from the right — is the shared
     // popover chrome now; the picker keeps its body.
-    let mut pop = app.ui.picker_popover.take().unwrap_or_else(|| Popover::new("color_picker", tr("Custom")).pad(0.0).close_on_outside(false));
-    let closed = pop.show(ctx, Open::At(pos), Hold::default(), |ui| {
+    let mut pop = app.ui.picker_popover.take().unwrap_or_else(|| Popover::new("color_picker", tr("Custom")).pad(0.0));
+    // Closing is the shared widget's: the X, Escape and a press outside it. Presses in the panel
+    // beside it keep it (swatches and fields there switch the colour it edits); the control that
+    // opened it is held too, so pressing it again reaches its own toggle.
+    let panel = Rect::from_min_max(pos2(screen.max.x - app.ui.right_width, screen.min.y), screen.max);
+    let mut held: Vec<Rect> = vec![panel];
+    held.extend(app.ui.picker_button);
+    let closed = pop.show(ctx, Open::At(pos), Hold { rects: &held, escape: false }, |ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
         // Paint type.
         if !matches!(
@@ -855,10 +861,20 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
 
 /// The colour picker closes (its X, Escape, or another popover took over): pending edits commit
 /// and the picker with its popover go.
+/// Escape with the picker open closes it (the selection stays).
+pub fn close_if_open(app: &mut FigApp) -> bool {
+    if app.ui.picker.is_none() {
+        return false;
+    }
+    close(app);
+    true
+}
+
 pub fn close(app: &mut FigApp) {
     finish(app);
     app.ui.picker = None;
     app.ui.picker_popover = None;
+    app.ui.picker_button = None;
 }
 
 /// Swatches wrapped in rows inset 16 points from both sides of the picker.
