@@ -58,6 +58,24 @@ fn a_confined_app_writes_only_inside_its_write_root() {
 }
 
 #[test]
+fn a_confined_app_saves_only_inside_its_write_root() {
+    // #836: saving over the control channel, both as a new file and to the current one.
+    let (mut app, d) = confined_app("save");
+    let p = |rel: &str| d.0.join(rel).to_string_lossy().into_owned();
+    for cmd in ["file.saveAs", "file.save"] {
+        let e = handle(&mut app, "engine.execute", json!({"command": cmd, "params": {"path": p("outside/a.figcraft")}})).unwrap_err();
+        assert!(e.contains("automation path rejected"), "{cmd}: {e}");
+        let e = handle(&mut app, "engine.execute", json!({"command": cmd, "params": {"path": p("out/../outside/b.figcraft")}})).unwrap_err();
+        assert!(e.contains("automation path rejected"), "{cmd}: {e}");
+    }
+    assert_eq!(std::fs::read_dir(d.0.join("outside")).unwrap().count(), 0, "nothing written outside the root");
+    handle(&mut app, "engine.execute", json!({"command": "file.saveAs", "params": {"path": p("out/in.figcraft")}})).unwrap();
+    assert!(d.0.join("out/in.figcraft").is_file());
+    // Saving again goes to the same file, inside the root.
+    handle(&mut app, "engine.execute", json!({"command": "file.save", "params": {}})).unwrap();
+}
+
+#[test]
 fn window_captures_are_written_through_the_roots_or_returned() {
     let (app, d) = confined_app("capture");
     let img = egui::ColorImage::filled([3, 2], egui::Color32::RED);

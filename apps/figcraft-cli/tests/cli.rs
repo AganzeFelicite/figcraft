@@ -172,3 +172,98 @@ fn commands_json_lists_everything() {
     let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
     assert!(v.as_array().unwrap().len() > 200);
 }
+
+/// The automation roots confine the file subcommands too, not just `mcp` (#833): a read outside a
+/// root, and a write outside a write root, are refused and leave no file behind. Without the flags
+/// the same commands behave as they always did.
+#[test]
+fn file_subcommands_are_confined_to_automation_roots() {
+    let d = tmp("file-roots");
+    let _ = std::fs::remove_dir_all(&d);
+    for sub in ["in", "out"] {
+        std::fs::create_dir_all(d.join(sub)).unwrap();
+    }
+    let p = |rel: &str| d.join(rel).to_string_lossy().into_owned();
+    let out_of = |o: &std::process::Output| String::from_utf8_lossy(&o.stderr).into_owned();
+
+    // A document to work on, made unconfined.
+    std::fs::write(d.join("in/make.json"), br#"[{"command":"shape.rectangle","params":{"x":0,"y":0,"width":40,"height":20}}]"#).unwrap();
+    let made = bin().args(["run", &p("in/make.json"), "--out", &p("in/doc.figcraft")]).output().unwrap();
+    assert!(made.status.success(), "{}", out_of(&made));
+
+    // Inside the roots: renders as usual.
+    let ok = bin()
+        .args(["render", &p("in/doc.figcraft"), "-o", &p("out/ok.png"), "--automation-read-root", &p("in"), "--automation-write-root", &p("out")])
+        .output()
+        .unwrap();
+    assert!(ok.status.success(), "{}", out_of(&ok));
+    assert!(d.join("out/ok.png").is_file());
+
+    // A write outside the write root is refused, and nothing is written.
+    let escaped = d.join("escaped.png");
+    let refused = bin()
+        .args([
+            "render",
+            &p("in/doc.figcraft"),
+            "-o",
+            &escaped.to_string_lossy(),
+            "--automation-read-root",
+            &p("in"),
+            "--automation-write-root",
+            &p("out"),
+        ])
+        .output()
+        .unwrap();
+    assert!(!refused.status.success());
+    assert!(out_of(&refused).contains("may be written"), "{}", out_of(&refused));
+    assert!(!escaped.exists(), "the refused render wrote a file anyway");
+
+    // No write root at all: writing is refused outright, reading still works.
+    let no_write = bin().args(["render", &p("in/doc.figcraft"), "-o", &p("out/no.png"), "--automation-read-root", &p("in")]).output().unwrap();
+    assert!(!no_write.status.success());
+    assert!(out_of(&no_write).contains("no folder may be written"), "{}", out_of(&no_write));
+
+    // A read outside every root is refused: `info` on the document with only `out` readable.
+    let read_refused = bin().args(["info", &p("in/doc.figcraft"), "--automation-read-root", &p("out")]).output().unwrap();
+    assert!(!read_refused.status.success());
+    assert!(out_of(&read_refused).contains("may be read"), "{}", out_of(&read_refused));
+
+    // `convert` and `run` take them as well, and a root that is not a folder is refused.
+    let missing = bin().args(["convert", &p("in/doc.figcraft"), &p("out/c.svg"), "--automation-read-root", &p("missing")]).output().unwrap();
+    assert!(!missing.status.success());
+    assert!(out_of(&missing).contains("automation-read-root"), "{}", out_of(&missing));
+
+    // Unconfined, the same render still writes wherever it is told.
+    let plain = bin().args(["render", &p("in/doc.figcraft"), "-o", &escaped.to_string_lossy()]).output().unwrap();
+    assert!(plain.status.success(), "{}", out_of(&plain));
+    assert!(escaped.is_file());
+    let _ = std::fs::remove_dir_all(&d);
+}
+
+/// An output path that is a symbolic link is written through, to its target, as `std::fs::write`
+/// always did. Routing the CLI's writes through `file_access` for #833 would otherwise have
+/// replaced the link with a regular file, because that write stages the bytes and renames them
+/// into place.
+#[cfg(unix)]
+#[test]
+fn an_unconfined_write_follows_a_symbolic_link() {
+    let d = tmp("symlink-out");
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(d.join("real")).unwrap();
+    let p = |rel: &str| d.join(rel).to_string_lossy().into_owned();
+    std::fs::write(d.join("in.json"), br#"[{"command":"shape.rectangle","params":{"x":0,"y":0,"width":40,"height":20}}]"#).unwrap();
+    let made = bin().args(["run", &p("in.json"), "--out", &p("doc.figcraft")]).output().unwrap();
+    assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
+
+    let target = d.join("real/target.png");
+    std::fs::write(&target, b"placeholder").unwrap();
+    let link = d.join("link.png");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let out = bin().args(["render", &p("doc.figcraft"), "-o", &link.to_string_lossy()]).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink(), "the link is still a link");
+    let written = std::fs::read(&target).unwrap();
+    assert!(written.starts_with(b"\x89PNG"), "the target holds the render, not the placeholder");
+    let _ = std::fs::remove_dir_all(&d);
+}

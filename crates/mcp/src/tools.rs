@@ -147,7 +147,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "type": {"type": "string", "enum": ["frame", "rectangle", "ellipse", "polygon", "star", "line", "arrow", "text", "vector", "section", "component", "slice"], "description": "Layer type"},
                     "x": num("Left, relative to the parent frame (default 0)"),
                     "y": num("Top, relative to the parent frame (default 0)"),
-                    "width": num("Width (default 100; text hugs its content unless width is set, which makes it wrap)"),
+                    "width": num("Width (default 100; text hugs its content unless width is set, which makes it wrap; for a vector with path, width/height scale the path, one alone keeping its proportion, and without them the path's own box is used)"),
                     "height": num("Height (default 100; ignored for lines/arrows and auto-height text)"),
                     "parent": id_schema("Parent frame/group/component id (default: the current page)"),
                     "index": int("Z-index among the parent's children (default: on top)"),

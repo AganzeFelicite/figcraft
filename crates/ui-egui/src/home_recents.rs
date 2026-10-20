@@ -738,8 +738,8 @@ fn file_icon(ui: &Ui, t: &Tokens, center: egui::Pos2, path: &str) {
     let r = Rect::from_center_size(center, vec2(16.0, 16.0));
     match FileKind::of(Path::new(path)) {
         FileKind::FigCraft | FileKind::Fig => {
-            ui.painter().rect_filled(r, CornerRadius::same(4), ACCENT);
-            icons::paint(ui.painter(), r.shrink(3.0), Icon::Logo, Color32::WHITE);
+            ui.painter().rect_filled(r, CornerRadius::same(4), t.accent);
+            icons::paint(ui.painter(), r.shrink(3.0), Icon::Logo, t.accent_on);
         }
         kind => {
             ui.painter().rect_filled(r, CornerRadius::same(4), t.field);

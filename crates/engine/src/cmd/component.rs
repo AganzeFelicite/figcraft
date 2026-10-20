@@ -472,6 +472,7 @@ fn detach(s: &mut Session, p: &Value) -> Result<Value> {
         // Own layers lose their link (slot content stays as it is); nested instances stay
         // instances of their own mains.
         let nested = unlink_layers(doc, i, Some(i));
+        keep_main_modes(doc, i)?;
         let n = doc.get_mut(i)?;
         n.kind = NodeKind::Frame;
         n.source = None;
@@ -489,6 +490,19 @@ fn detach(s: &mut Session, p: &Value) -> Result<Value> {
     }
     s.set_selection(out.clone());
     Ok(json!({"ids": out}))
+}
+
+/// Make the variable modes instance `i` takes from its main its own (it's being detached).
+fn keep_main_modes(doc: &mut Document, i: NodeId) -> Result<()> {
+    let modes = match doc.get(i)?.kind {
+        NodeKind::Instance { component, .. } => doc.node(component).map(|m| m.var_modes.clone()).unwrap_or_default(),
+        _ => return Ok(()),
+    };
+    let own = &mut doc.get_mut(i)?.var_modes;
+    for (c, m) in modes {
+        own.entry(c).or_insert(m);
+    }
+    Ok(())
 }
 
 fn reset_instance(s: &mut Session, p: &Value) -> Result<Value> {
@@ -608,7 +622,7 @@ fn make_slot(s: &mut Session, p: &Value) -> Result<Value> {
     let owner = Owner::resolve(doc, id).ok_or_else(|| bad(cmd, "the frame isn't inside a component"))?;
     let name = string(p, "name").unwrap_or_else(|| fresh_prop_name(doc, &owner, &n.name));
     let preferred = get(p, "preferred").cloned().unwrap_or(Value::Null);
-    add_prop(s, &json!({"id": id, "layer": id, "name": name, "type": "slot", "preferred": preferred}))
+    add_prop_for(cmd, s, &json!({"id": id, "layer": id, "name": name, "type": "slot", "preferred": preferred}))
 }
 
 fn remove_slot(s: &mut Session, p: &Value) -> Result<Value> {
@@ -1039,7 +1053,12 @@ fn valid_prop_name(cmd: &str, name: &str) -> Result<String> {
 }
 
 fn add_prop(s: &mut Session, p: &Value) -> Result<Value> {
-    let cmd = "component.addProperty";
+    add_prop_for("component.addProperty", s, p)
+}
+
+/// Add a component property for command `cmd`, which errors name (`component.makeSlot` adds its
+/// slot property here).
+fn add_prop_for(cmd: &str, s: &mut Session, p: &Value) -> Result<Value> {
     let target = targets(s, p).first().copied().ok_or_else(|| bad(cmd, "select a component"))?;
     let name = valid_prop_name(cmd, &req_string(cmd, p, "name")?)?;
     let t = req_string(cmd, p, "type")?;
