@@ -561,6 +561,16 @@ fn is_ancestor_holds_for_very_deep_chains() {
 }
 
 #[test]
+fn text_insert_at_run_boundary_keeps_runs_disjoint() {
+    let mut t = TextData::new("0123456789");
+    t.restyle(0, 5, |s| s.font_size = 20.0);
+    t.restyle(5, 10, |s| s.font_size = 30.0);
+    t.replace_range(5, 5, "xx");
+    let runs: Vec<(usize, usize)> = t.runs.iter().map(|r| (r.start, r.end)).collect();
+    assert_eq!(runs, vec![(0, 7), (7, 12)]);
+}
+
+#[test]
 fn many_small_vector_subpaths_build_and_stroke_without_rescans() {
     // Many closed subpaths whose last point repeats the start (#F-332), a long open chain (#F-334)
     // and a big rounded polygon (#F-333): each used to scan the whole network per step.

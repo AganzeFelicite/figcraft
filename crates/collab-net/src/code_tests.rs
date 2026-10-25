@@ -87,7 +87,10 @@ fn a_local_share_is_joined_by_its_code_and_edits_sync() {
     let mut late = session("Cy");
     late.execute("collab.join", &json!({"code": shown})).unwrap();
     pump(&mut [&mut late], "the refusal", |s| matches!(s[0].live().status, Status::Failed { .. }));
-    assert!(late.live().status.label().contains("Couldn't join"), "{:?}", late.live().status);
+    // The port is free again: another program's host may have taken it, and that host refuses
+    // the code's secret.
+    let label = late.live().status.label();
+    assert!(label.contains("Couldn't join") || label.contains("The host refused"), "{label}");
 }
 
 #[test]

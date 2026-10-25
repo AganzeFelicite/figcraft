@@ -264,3 +264,16 @@ fn a_filled_open_curve_is_closed_for_its_fill() {
     };
     assert_eq!(d.nodes().map(loops).sum::<usize>(), 1);
 }
+
+#[test]
+fn matrix_keeps_small_scale_precision() {
+    assert_eq!(matrix(Affine::scale(0.0375)), "matrix(0.0375 0 0 0.0375 0 0)");
+    assert_eq!(matrix(Affine::scale(0.0001)), "matrix(0.0001 0 0 0.0001 0 0)");
+}
+
+#[test]
+fn matrix_snaps_rotation_noise_and_tiny_values() {
+    let r = Affine::rotate(std::f64::consts::FRAC_PI_2);
+    assert_eq!(matrix(r), "matrix(0 1 -1 0 0 0)");
+    assert_eq!(matrix(Affine::scale(1e-320)), "matrix(0 0 0 0 0 0)");
+}

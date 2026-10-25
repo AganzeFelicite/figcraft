@@ -123,8 +123,11 @@ fn two_files_are_hosted_and_joined_independently() {
     host.execute("doc.switch", &json!({"index": 0})).unwrap();
     assert_eq!(host.live_summary()["link"], a["link"]);
     assert_eq!(host.live_summary()["document"], 0);
+    // Each joined file opens in front when its welcome arrives, and the two joins race: the file
+    // whose welcome came last is in front.
+    assert_eq!(guest.ds().unwrap().uid, guest.docs[2].uid, "the file that arrived last is in front");
+    guest.execute("doc.switch", &json!({"index": guest.docs.iter().position(|d| d.uid == gb).unwrap()})).unwrap();
     // An edit in A reaches the guest's copy of A only, while B is in front at the guest.
-    assert_eq!(guest.ds().unwrap().uid, gb, "the file joined last is in front");
     let in_a = rect(&mut host);
     host.execute("doc.switch", &json!({"index": 1})).unwrap();
     let in_b = rect(&mut host);

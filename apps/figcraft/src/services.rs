@@ -2,8 +2,8 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use figcraft_engine::{Prefs, Session};
 use figcraft_ui_egui::{DialogFuture, FigApp, Services};
@@ -20,6 +20,8 @@ pub struct Desktop {
     language: Option<String>,
     /// Recovery copies of unsaved files (written at once after a panic).
     recovery: crate::recovery::Shared,
+    /// The folder of the last file or folder a dialog picked, where the next one starts.
+    last_folder: Arc<Mutex<Option<PathBuf>>>,
 }
 
 pub fn config_dir() -> Option<PathBuf> {
@@ -54,7 +56,15 @@ impl Desktop {
         let reduce_motion = Arc::new(AtomicBool::new(false));
         let flag = reduce_motion.clone();
         std::thread::spawn(move || flag.store(system_reduce_motion(), Ordering::Relaxed));
-        Self { clipboard: arboard::Clipboard::new().ok(), dir, prefs, reduce_motion, language: system_language(), recovery }
+        Self {
+            clipboard: arboard::Clipboard::new().ok(),
+            dir,
+            prefs,
+            reduce_motion,
+            language: system_language(),
+            recovery,
+            last_folder: Arc::default(),
+        }
     }
 }
 
@@ -262,19 +272,57 @@ fn save_filters<'a>(exts: &'a [&'a str]) -> Vec<(&'static str, &'a [&'a str])> {
     }
 }
 
+/// The folder to start the next dialog in once `path` was picked: the file's folder, or the folder
+/// picked itself.
+pub(crate) fn folder_to_remember(path: &Path, is_folder: bool) -> Option<PathBuf> {
+    let folder = if is_folder { Some(path) } else { path.parent() };
+    folder.filter(|f| !f.as_os_str().is_empty()).map(Path::to_path_buf)
+}
+
+/// The remembered folder, unless it is gone since: then the system's own choice.
+pub(crate) fn start_folder(last: Option<PathBuf>) -> Option<PathBuf> {
+    last.filter(|f| f.is_dir())
+}
+
+impl Desktop {
+    /// A dialog that starts in the last folder used. The Linux portal does not remember it between
+    /// dialogs as macOS and Windows do.
+    fn dialog_in_last_folder(&self, title: &str) -> rfd::AsyncFileDialog {
+        let dialog = dialog(title);
+        match start_folder(self.last_folder.lock().ok().and_then(|l| l.clone())) {
+            Some(folder) => dialog.set_directory(folder),
+            None => dialog,
+        }
+    }
+}
+
+/// `pick`, with the folder of what it picks kept in `last` for the next dialog.
+pub(crate) fn remembering(last: Arc<Mutex<Option<PathBuf>>>, pick: DialogFuture, is_folder: bool) -> DialogFuture {
+    Box::pin(async move {
+        let path = pick.await?;
+        if let (Some(folder), Ok(mut last)) = (folder_to_remember(&path, is_folder), last.lock()) {
+            *last = Some(folder);
+        }
+        Some(path)
+    })
+}
+
 impl Services for Desktop {
     fn pick_open(&mut self, title: &str, exts: &[&str]) -> DialogFuture {
-        picked(dialog(title).add_filter("Supported files", exts).pick_file())
+        let pick = picked(self.dialog_in_last_folder(title).add_filter("Supported files", exts).pick_file());
+        remembering(self.last_folder.clone(), pick, false)
     }
     fn pick_save(&mut self, title: &str, name: &str, exts: &[&str]) -> DialogFuture {
-        let mut dialog = dialog(title).set_file_name(name);
+        let mut dialog = self.dialog_in_last_folder(title).set_file_name(name);
         for (label, extensions) in save_filters(exts) {
             dialog = dialog.add_filter(label, extensions);
         }
-        picked(dialog.save_file())
+        let pick = picked(dialog.save_file());
+        remembering(self.last_folder.clone(), pick, false)
     }
     fn pick_folder(&mut self, title: &str) -> DialogFuture {
-        picked(dialog(title).pick_folder())
+        let pick = picked(self.dialog_in_last_folder(title).pick_folder());
+        remembering(self.last_folder.clone(), pick, true)
     }
     fn clipboard_set_text(&mut self, s: &str) {
         if let Some(c) = self.clipboard.as_mut() {

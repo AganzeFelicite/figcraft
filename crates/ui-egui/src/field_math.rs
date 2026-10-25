@@ -102,7 +102,15 @@ impl Parser<'_> {
         }
         let v = digits.parse::<f64>().ok().filter(|v| v.is_finite())?;
         // The unit: letters (px, pt, ms, x), a degree sign, and a percent sign where that is one.
-        while self.chars.next_if(|c| c.is_ascii_alphabetic() || *c == '°' || (*c == '%' && self.percent_unit)).is_some() {}
+        // It may follow spaces ("3 px").
+        let percent_unit = self.percent_unit;
+        let is_unit = |c: &char| c.is_ascii_alphabetic() || *c == '°' || (*c == '%' && percent_unit);
+        let mut ahead = self.chars.clone();
+        while ahead.next_if(|c| c.is_whitespace()).is_some() {}
+        if ahead.peek().is_some_and(is_unit) {
+            self.space();
+        }
+        while self.chars.next_if(is_unit).is_some() {}
         Some(v)
     }
 
@@ -160,4 +168,18 @@ pub fn eval(text: &str, cur: Option<f64>) -> Option<f64> {
 pub fn stepped(from: f64, steps: f64, step: f64) -> f64 {
     let v = from + steps * step;
     if v.is_finite() { (v * 1e6).round() / 1e6 } else { from }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unit_after_a_space() {
+        assert_eq!(parse("3px", true), Some(Typed::Value(3.0)));
+        assert_eq!(parse("3 px", true), Some(Typed::Value(3.0)));
+        assert_eq!(parse("10 °", true), Some(Typed::Value(10.0)));
+        assert_eq!(parse("50 %", true), Some(Typed::Value(50.0)));
+        assert_eq!(parse("3 px + 2 px", true), Some(Typed::Value(5.0)));
+    }
 }

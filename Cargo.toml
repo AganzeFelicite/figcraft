@@ -6,7 +6,7 @@ exclude = ["plugins"]
 # default-members = ["crates/*", "apps/figcraft", "apps/figcraft-cli", "xtask"]
 
 [workspace.package]
-version = "0.11.1"
+version = "0.11.2"
 edition = "2024"
 license = "MIT OR Apache-2.0"
 rust-version = "1.95"
@@ -122,7 +122,8 @@ codegen-units = 4
 # wasm32-unknown-unknown always aborts on panic, so panic = "abort" changes nothing there.
 [profile.web-release]
 inherits = "release"
-opt-level = "s"
+# "z", not "s": 1.9 MB smaller (24.0 MiB -> 22.2 MiB after wasm-opt, 0.11.1), back under the gate.
+opt-level = "z"
 lto = "fat"
 codegen-units = 1
 debug = false

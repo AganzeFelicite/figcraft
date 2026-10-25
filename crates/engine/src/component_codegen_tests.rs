@@ -44,6 +44,18 @@ fn button_set(s: &mut Session) -> (NodeId, NodeId, NodeId) {
 }
 
 #[test]
+fn strict_mode_reserved_words_are_not_parameter_names() {
+    let mut s = Session::new();
+    let (c, title, _) = card(&mut s);
+    ex(&mut s, "component.addProperty", json!({"id": c, "name": "Protected", "type": "text", "layer": title}));
+    let react = code(&mut s, c, "react");
+    assert!(react.contains("protectedValue"), "React renames the property:\n{react}");
+    for bad in ["  protected?", "  protected =", "{protected}"] {
+        assert!(!react.contains(bad), "reserved word used as a binding ({bad:?}):\n{react}");
+    }
+}
+
+#[test]
 fn components_take_their_properties_as_parameters() {
     let mut s = Session::new();
     let (c, _, _) = card(&mut s);

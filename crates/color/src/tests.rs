@@ -116,6 +116,15 @@ fn infinite_channels_clamp() {
 }
 
 #[test]
+fn hex_allows_at_most_one_leading_hash() {
+    assert!(Color::from_hex("##ff0000").is_none());
+    assert!(Color::from_hex("###fff").is_none());
+    assert!(Color::from_hex_or_name("##ff0000").is_none());
+    assert_eq!(Color::from_hex("#ff0000").unwrap().to_hex(), "FF0000");
+    assert_eq!(Color::from_hex("ff0000").unwrap().to_hex(), "FF0000");
+}
+
+#[test]
 fn malformed_alpha_or_extra_args_rejected() {
     assert_eq!(Color::parse_css("rgba(0,0,0,abc)"), None);
     assert_eq!(Color::parse_css("hsla(0,0%,0%,abc)"), None);

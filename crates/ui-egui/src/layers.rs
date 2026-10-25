@@ -991,6 +991,7 @@ fn layers(app: &mut FigApp, ui: &mut Ui) {
                 }
                 let pos = ui.input(|i| i.pointer.hover_pos()).unwrap_or(r.center());
                 app.ui.context_menu = Some((pos, vec![row.id]));
+                app.ui.context_menu_shown = false;
             }
             // Drag to reorder.
             if resp.drag_started() && !crate::menus::dev_mode_refuses(app, "node.reparent") {

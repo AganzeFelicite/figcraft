@@ -556,7 +556,7 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
         }
         // Leaving the canvas: nothing is hovered there any more.
         if !app.canvas.dragging && std::mem::take(&mut app.canvas.hovering) {
-            app.session.vector_pointer_left();
+            app.session.pointer_left();
         }
         // A pan whose button was released off the canvas is over.
         if !ctx.input(|i| i.pointer.button_down(egui::PointerButton::Middle) || i.pointer.primary_down()) {
@@ -654,7 +654,7 @@ fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
     } else {
         // Something over the canvas took the pointer.
         if std::mem::take(&mut app.canvas.hovering) {
-            app.session.vector_pointer_left();
+            app.session.pointer_left();
         }
         None
     };
@@ -702,6 +702,7 @@ pub fn open_context_menu(app: &mut FigApp, pos: Pos2, deep: bool) {
         }
     }
     app.ui.context_menu = Some((pos, app.session.selection()));
+    app.ui.context_menu_shown = false;
 }
 
 fn stroke(c: Color32, w: f32) -> Stroke {
@@ -1484,7 +1485,9 @@ fn hatch(polys: &[Vec<Pos2>], gap: f32) -> Vec<[Pos2; 2]> {
 }
 
 /// The layers that get canvas labels and layout grids, in z-order: the page's visible top-level
-/// layers and, inside sections whose contents show, their visible children (sections nest).
+/// layers and, inside sections whose contents show, their visible children (sections nest). A
+/// section comes after its children, so its title pill draws over (and takes clicks from) the
+/// labels of frames near its top-left (#1150).
 fn boards(doc: &Document, page: NodeId) -> Vec<NodeId> {
     fn walk(doc: &Document, id: NodeId, depth: usize, out: &mut Vec<NodeId>) {
         let Some(n) = doc.node(id) else { return };
@@ -1493,10 +1496,10 @@ fn boards(doc: &Document, page: NodeId) -> Vec<NodeId> {
             if !cn.visible {
                 continue;
             }
-            out.push(*c);
             if matches!(cn.kind, NodeKind::Section { contents_hidden: false }) && depth < 32 {
                 walk(doc, *c, depth + 1, out);
             }
+            out.push(*c);
         }
     }
     let mut out = Vec::new();
