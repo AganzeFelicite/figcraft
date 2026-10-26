@@ -1040,6 +1040,7 @@ impl<'a> Mapper<'a> {
     /// FigJam notes and shapes keep their paints and text on generated template children,
     /// not on the outer node. Keep the saved layout as ordinary editable layers (including a
     /// note's author), without applying the background's opacity or transform to the wrapper.
+    /// When no generated text survives, retain usable outer text alongside successful children.
     fn board_snapshot(&mut self, o: &mut Obj, v: &View<'a>, own: &str, rest_id: &str, depth: usize) -> Option<Vec<Value>> {
         if !matches!(own, "STICKY" | "SHAPE_WITH_TEXT") || v.get("nodeGenerationData").is_none() {
             return None;
@@ -1078,11 +1079,19 @@ impl<'a> Mapper<'a> {
             layer.insert("name".into(), json!(chars.map_or_else(|| "Background".into(), |c| c.chars().take(40).collect::<String>())));
             self.common(&mut layer, &child, ty, Affine::IDENTITY, None);
             if local_id == 0 {
+                // Network decoding is only enabled for vectors; choose that type before
+                // geometry sees a saved network, then restore the rectangle if it is unusable.
+                if child.get("vectorData").is_some() {
+                    layer.insert("type".into(), json!("VECTOR"));
+                }
                 self.geometry(&mut layer, &child);
                 if layer.contains_key("fillGeometry") || layer.contains_key("strokeGeometry") || layer.contains_key("vectorNetworkRef") {
                     layer.insert("type".into(), json!("VECTOR"));
-                } else if own == "SHAPE_WITH_TEXT" && !matches!(v.str("shapeWithTextType"), None | Some("SQUARE" | "ROUNDED_RECTANGLE")) {
-                    self.warn("shape generated outline is missing or damaged; using its rectangle");
+                } else {
+                    layer.insert("type".into(), json!("RECTANGLE"));
+                    if own == "SHAPE_WITH_TEXT" && !matches!(v.str("shapeWithTextType"), None | Some("SQUARE" | "ROUNDED_RECTANGLE")) {
+                        self.warn("shape generated outline is missing or damaged; using its rectangle");
+                    }
                 }
                 o.insert("fills".into(), json!([]));
                 o.insert("strokes".into(), json!([]));
@@ -1094,6 +1103,9 @@ impl<'a> Mapper<'a> {
             }
             self.count += 1;
             children.push(Value::Object(layer));
+        }
+        if depth < MAX_DEPTH && !children.iter().any(|child| child.get("type").and_then(Value::as_str) == Some("TEXT")) {
+            children.extend(self.inner_text(o, v, rest_id, own == "STICKY"));
         }
         Some(children)
     }
