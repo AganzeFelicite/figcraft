@@ -506,7 +506,26 @@ pub fn layout(text: &TextData, box_width: Option<f64>, box_height: Option<f64>) 
             && i > line_start
             && !it.is_space()
         {
-            let brk = last_break.filter(|b| *b >= line_start).map(|b| b + 1).unwrap_or(i);
+            let mut brk = last_break.filter(|b| *b >= line_start).map(|b| b + 1).unwrap_or(i);
+            // Even an emergency break inside a word keeps a letter with its trailing mark and a
+            // leading vowel with the consonant after it (#1219). Back up to such a boundary, or,
+            // when the line's first character is in one, carry it over to the next line with it.
+            let safe = |k: usize| -> bool {
+                let (Some(a), Some(b)) = (items.get(k.wrapping_sub(1)), items.get(k)) else { return true };
+                let at = b.char_start;
+                let Some(&before) = at.checked_sub(1).and_then(|c| chars.get(c)) else { return true };
+                // A break can only fall between two glyphs that are not the same cluster.
+                a.char_end <= at
+                    && cluster_start.get(at).copied().unwrap_or(true)
+                    && crate::breaks::safe_emergency_break(before, chars.get(at).copied().unwrap_or(before))
+            };
+            if !safe(brk) {
+                // Capped: a malformed run of thousands of marks must not make layout quadratic.
+                let carry = (brk + 1..items.len().min(brk + 257))
+                    .take_while(|&k| items.get(k).is_some_and(|it| it.ch != '\n' && it.ch != LINE_SEPARATOR))
+                    .find(|&k| safe(k));
+                brk = (line_start + 2..brk).rev().find(|&k| safe(k)).or(carry).unwrap_or(brk);
+            }
             lines.push((line_start, brk, false, para));
             line_start = brk;
             i = brk;
