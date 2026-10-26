@@ -40,6 +40,9 @@ pub trait Services {
     fn clipboard_get_image(&mut self) -> Option<(u32, u32, Vec<u8>)> {
         None
     }
+    fn clipboard_get_png(&mut self) -> Option<Vec<u8>> {
+        None
+    }
     fn open_url(&mut self, _url: &str) {}
     /// Show the file at `path` in the platform's file manager (Finder, Explorer), selected where the
     /// platform can.

@@ -9,6 +9,8 @@ use super::{CommandSpec, ok};
 use crate::params::*;
 use crate::{Result, Session, bad, spec};
 
+pub const PLACED_IMAGE_MAX_SIDE: f64 = 4096.0;
+
 /// Frame presets shown by the Frame tool (category, name, width, height).
 pub const FRAME_PRESETS: &[(&str, &str, f64, f64)] = &[
     ("Phone", "iPhone 16", 393.0, 852.0),
@@ -443,13 +445,12 @@ pub fn place_image(s: &mut Session, p: &Value) -> Result<Value> {
     let parent = crate::params::opt_id(cmd, p, "parent")?.unwrap_or(page);
     let ds = s.ds_mut()?;
     let doc = ds.doc_mut();
+    let density = figcraft_format::pixel_density(&bytes);
     let (hash, iw, ih) = figcraft_format::add_image(doc, bytes).map_err(|e| bad(cmd, e.to_string()))?;
     let profile = figcraft_render::images::profile_name(&hash, doc.images.get(&hash));
-    let (iw, ih) = (f64::from(iw), f64::from(ih));
-    // Fit large images into 1000 px like Figma does when placing.
-    let k = (1000.0 / iw.max(ih)).min(1.0);
-    let w = num(p, "width").unwrap_or(iw * k);
-    let h = num(p, "height").unwrap_or(if num(p, "width").is_some() { w * ih / iw.max(1.0) } else { ih * k });
+    let (placed_w, placed_h) = figcraft_format::placed_size(iw, ih, density, PLACED_IMAGE_MAX_SIDE);
+    let w = num(p, "width").unwrap_or(placed_w);
+    let h = num(p, "height").unwrap_or(if num(p, "width").is_some() { w * f64::from(ih) / f64::from(iw).max(1.0) } else { placed_h });
     let nid = doc.alloc_id();
     let name = string(p, "name").unwrap_or_else(|| "Image".into());
     let mut node = Node::new(nid, NodeKind::Rectangle, name, w, h);

@@ -372,6 +372,8 @@ mod pen_overlay_tests;
 #[cfg(test)]
 mod pixel_preview_tests;
 #[cfg(test)]
+mod placed_image_size_tests;
+#[cfg(test)]
 mod playground_tests;
 #[cfg(test)]
 mod plugin_data_tests;
