@@ -163,6 +163,43 @@ fn styled_vector_mask_unions_region_windings_and_excludes_unpainted_regions() {
 }
 
 #[test]
+fn inherited_paint_frames_keep_overlapping_regions_in_vector_masks() {
+    use figcraft_geom::{Affine, Point, Shape};
+
+    let mut d = Document::new("inherited region mask");
+    let page = d.first_page().unwrap();
+    let group = d.create(page, NodeKind::Group, "Mask group", 0.0, 0.0, 40.0, 20.0).unwrap();
+    let mut network = VectorNetwork::default();
+    for x in [0.0, 10.0] {
+        let v = network.vertices.len();
+        let s = network.segments.len();
+        network.vertices.extend([(x, 0.0), (x + 20.0, 0.0), (x + 20.0, 20.0), (x, 20.0)].map(|(x, y)| Vertex::new(x, y)));
+        network.segments.extend((0..4).map(|i| Segment::line(v + i, v + (i + 1) % 4)));
+        network.regions.push(Region {
+            loops: vec![(s..s + 4).collect()],
+            winding: WindingRule::EvenOdd,
+            fills: None,
+            paint_space: Some(figcraft_doc::RegionPaintSpace { width: 20.0, height: 20.0, transform: Affine::translate((x, 0.0)) }),
+        });
+    }
+    let mask = d.create(group, NodeKind::Vector { network }, "Mask", 0.0, 0.0, 30.0, 20.0).unwrap();
+    let n = d.get_mut(mask).unwrap();
+    n.fills = vec![Paint::solid(Color::BLACK)];
+    n.is_mask = true;
+    n.mask_type = figcraft_doc::MaskType::Vector;
+    let (outline, rule) = node_outline(&d, d.node(mask).unwrap()).unwrap();
+    assert_eq!(rule, FillRule::Winding);
+    assert_ne!(outline.winding(Point::new(15.0, 10.0)), 0, "independent inherited regions retain their overlap");
+    let content = d.create(group, NodeKind::Rectangle, "Content", 0.0, 0.0, 40.0, 20.0).unwrap();
+    d.get_mut(content).unwrap().fills = vec![Paint::solid(Color::BLACK)];
+    let pix = render_view(&d, page, &view(40, 20), &Options { background: Some(Color::WHITE), ..Default::default() }).unwrap();
+    for x in [5, 15, 25] {
+        assert_eq!(px(&pix, x, 10), [0, 0, 0, 255]);
+    }
+    assert_eq!(px(&pix, 35, 10), [255, 255, 255, 255]);
+}
+
+#[test]
 fn zoom_scales() {
     let (d, p, _) = doc_with_rect(Color::BLACK);
     let v = View { origin: (0.0, 0.0), scale: 2.0, width: 200, height: 200 };

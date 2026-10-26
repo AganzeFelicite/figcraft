@@ -65,6 +65,22 @@ fn ordinary_hit_uses_region_paints_without_layer_fill() {
 }
 
 #[test]
+fn inherited_paint_frames_use_per_region_hit_testing() {
+    let mut d = Document::new("inherited region hit");
+    let p = page(&d);
+    let mut network = VectorNetwork::from_points(&[Point::new(0.0, 0.0), Point::new(10.0, 0.0), Point::new(10.0, 10.0), Point::new(0.0, 10.0)], true);
+    network.regions[0].winding = WindingRule::EvenOdd;
+    network.regions.push(network.regions[0].clone());
+    let id = d.create(p, NodeKind::Vector { network }, "V", 0.0, 0.0, 10.0, 10.0).unwrap();
+    assert_eq!(d.hit_test(p, Point::new(5.0, 5.0), 0.0, None), None, "legacy even-odd loops cancel");
+    let NodeKind::Vector { network } = &mut d.get_mut(id).unwrap().kind else { panic!("expected vector") };
+    network.regions[0].paint_space = Some(crate::RegionPaintSpace { width: 10.0, height: 10.0, transform: figcraft_geom::Affine::IDENTITY });
+    assert!(network.regions.iter().all(|region| region.fills.is_none()));
+    assert_eq!(d.hit_test(p, Point::new(5.0, 5.0), 0.0, None), Some(id), "paint-framed regions inherit the node fill independently");
+    assert_eq!(d.hit_test(p, Point::new(15.0, 5.0), 0.0, None), None);
+}
+
+#[test]
 fn explicitly_unfilled_regions_keep_the_stroke_only_selection_band() {
     let mut d = Document::new("stroke selection");
     let p = page(&d);

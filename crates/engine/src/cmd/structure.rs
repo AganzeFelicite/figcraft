@@ -387,9 +387,19 @@ fn flatten(s: &mut Session, p: &Value) -> Result<Value> {
         .as_ref()
         .filter(|node| matches!(node.kind, NodeKind::Group | NodeKind::Line) && node.fills.is_empty())
         .map(|_| vec![Paint::solid(Color::DEFAULT_SHAPE)]);
+    let output_fills = first
+        .as_ref()
+        .map(|node| {
+            if matches!(node.kind, NodeKind::Group | NodeKind::Line) && node.fills.is_empty() {
+                fallback_fills.clone().unwrap_or_default()
+            } else {
+                node.fills.clone()
+            }
+        })
+        .unwrap_or_default();
     let mut net = VectorNetwork::default();
     for id in &ids {
-        collect_flatten_parts(doc, *id, pw, fallback_fills.as_deref(), &mut net, 0)?;
+        collect_flatten_parts(doc, *id, pw, fallback_fills.as_deref(), &output_fills, &mut net, 0)?;
     }
     let Some(bb) = net.bounds() else {
         return Err(EngineError::Disabled("vector.flatten".into(), "nothing to flatten".into()));
@@ -400,11 +410,7 @@ fn flatten(s: &mut Session, p: &Value) -> Result<Value> {
     let mut v = Node::new(vid, NodeKind::Vector { network: net }, name, bb.width(), bb.height());
     v.transform = Affine::translate((bb.x0, bb.y0));
     if let Some(f) = first {
-        v.fills = if matches!(f.kind, NodeKind::Group | NodeKind::Line) && f.fills.is_empty() {
-            vec![Paint::solid(Color::DEFAULT_SHAPE)]
-        } else {
-            f.fills.clone()
-        };
+        v.fills = output_fills;
         v.strokes = f.strokes.clone();
         v.stroke = StrokeProps { align: StrokeAlign::Center, ..f.stroke.clone() };
         v.effects = f.effects.clone();
@@ -424,6 +430,7 @@ fn collect_flatten_parts(
     id: NodeId,
     parent_world: Affine,
     fallback_fills: Option<&[Paint]>,
+    output_fills: &[Paint],
     net: &mut VectorNetwork,
     depth: usize,
 ) -> Result<()> {
@@ -438,17 +445,15 @@ fn collect_flatten_parts(
             && node.fills.iter().any(|paint| paint.visible)
             && let Some(path) = figcraft_doc::geometry::shape_path(node)
         {
-            let mut frame = VectorNetwork::from_path(&path);
-            for region in &mut frame.regions {
-                region.fills = Some(node.fills.clone());
-            }
-            append_flatten_part(doc, id, node, parent_world, fallback_fills, frame, net);
+            let frame = VectorNetwork::from_path(&path);
+            let into_parent = parent_world.inverse() * doc.world_transform(id);
+            append_flatten_part(node, fallback_fills, output_fills, into_parent, frame, net);
         }
         for child in &node.children {
             if !doc.node(*child).is_some_and(|child| child.visible) {
                 continue;
             }
-            collect_flatten_parts(doc, *child, parent_world, fallback_fills, net, depth + 1)?;
+            collect_flatten_parts(doc, *child, parent_world, fallback_fills, output_fills, net, depth + 1)?;
         }
         return Ok(());
     }
@@ -473,29 +478,30 @@ fn collect_flatten_parts(
                 if rule == figcraft_render::FillRule::EvenOdd {
                     region.winding = WindingRule::EvenOdd;
                 }
-                region.fills = Some(if node.fills.is_empty() { fallback_fills.unwrap_or(&node.fills).to_vec() } else { node.fills.clone() });
             }
             part
         }
     };
-    append_flatten_part(doc, id, node, parent_world, fallback_fills, part, net);
+    let into_parent = parent_world.inverse() * doc.world_transform(id);
+    append_flatten_part(node, fallback_fills, output_fills, into_parent, part, net);
     Ok(())
 }
 
 fn append_flatten_part(
-    doc: &Document,
-    id: NodeId,
     node: &Node,
-    parent_world: Affine,
     fallback_fills: Option<&[Paint]>,
+    output_fills: &[Paint],
+    into_parent: Affine,
     mut part: VectorNetwork,
     net: &mut VectorNetwork,
 ) {
-    let into_parent = parent_world.inverse() * doc.world_transform(id);
     for region in &mut part.regions {
         let (width, height, paint_transform) = region.paint_frame(node.width, node.height);
         if region.fills.is_none() {
-            region.fills = Some(if node.fills.is_empty() { fallback_fills.unwrap_or(&node.fills).to_vec() } else { node.fills.clone() });
+            let effective = if node.fills.is_empty() { fallback_fills.unwrap_or(&node.fills) } else { &node.fills };
+            if effective != output_fills {
+                region.fills = Some(effective.to_vec());
+            }
         }
         region.paint_space = Some(RegionPaintSpace { width, height, transform: paint_transform });
     }
@@ -700,11 +706,28 @@ fn simplify(s: &mut Session, p: &Value) -> Result<Value> {
         if let NodeKind::Vector { network } = &mut n.kind {
             let source = network.clone();
             let mut net = VectorNetwork::default();
-            for (index, region) in source.regions.iter().enumerate() {
-                let Some(path) = source.region_path(index) else { continue };
+            let legacy = source.regions.iter().all(|region| region.fills.is_none() && region.paint_space.is_none());
+            if legacy && !source.regions.is_empty() {
+                let winding = if source.regions.iter().any(|region| region.winding == WindingRule::EvenOdd) {
+                    WindingRule::EvenOdd
+                } else {
+                    WindingRule::NonZero
+                };
+                let path = source.fill_path();
                 let path = figcraft_geom::kurbo::simplify::simplify_bezpath(path.iter(), tol, &Default::default());
-                let path = figcraft_pathops::simplify_with_rule(&path, region.winding == WindingRule::EvenOdd).unwrap_or(path);
-                append_region_path(&mut net, &path, region, region.winding);
+                let (path, output_winding) = match figcraft_pathops::simplify_with_rule(&path, winding == WindingRule::EvenOdd) {
+                    Ok(path) => (path, WindingRule::EvenOdd),
+                    Err(_) => (path, winding),
+                };
+                let combined = Region { winding: output_winding, ..Default::default() };
+                append_region_path(&mut net, &path, &combined, output_winding);
+            } else {
+                for (index, region) in source.regions.iter().enumerate() {
+                    let Some(path) = source.region_path(index) else { continue };
+                    let path = figcraft_geom::kurbo::simplify::simplify_bezpath(path.iter(), tol, &Default::default());
+                    let path = figcraft_pathops::simplify_with_rule(&path, region.winding == WindingRule::EvenOdd).unwrap_or(path);
+                    append_region_path(&mut net, &path, region, region.winding);
+                }
             }
             if !source.regions.is_empty() {
                 let mut used = vec![false; source.segments.len()];
@@ -803,18 +826,15 @@ fn offset_path(s: &mut Session, p: &Value) -> Result<Value> {
             let (paint_width, paint_height, paint_transform) = source.regions[0].paint_frame(n.width, n.height);
             for region in &mut part.regions {
                 region.winding = WindingRule::EvenOdd;
-                region.fills = Some(n.fills.clone());
+                region.fills = source.regions[0].fills.clone();
                 region.paint_space = Some(RegionPaintSpace { width: paint_width, height: paint_height, transform: paint_transform });
             }
             append_network(&mut net, part);
         } else {
             for (index, region) in source.regions.iter().enumerate() {
                 let Some(path) = source.region_path(index) else { continue };
-                let (paint_width, paint_height, paint_transform) = region.paint_frame(n.width, n.height);
                 let mut paint_region = region.clone();
-                if paint_region.fills.is_none() {
-                    paint_region.fills = Some(n.fills.clone());
-                }
+                let (paint_width, paint_height, paint_transform) = region.paint_frame(n.width, n.height);
                 paint_region.paint_space = Some(RegionPaintSpace { width: paint_width, height: paint_height, transform: paint_transform });
                 let path = figcraft_pathops::simplify_with_rule(&path, region.winding == WindingRule::EvenOdd)
                     .map_err(|error| bad("vector.offset", error.to_string()))?;

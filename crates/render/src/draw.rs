@@ -326,7 +326,7 @@ fn node_outline_at(doc: &Document, n: &Node, depth: usize) -> Option<(BezPath, F
             Some((p, FillRule::Winding))
         }
         NodeKind::Vector { network } => {
-            if network.regions.iter().any(|r| r.fills.is_some()) {
+            if network.regions.iter().any(|r| r.fills.is_some() || r.paint_space.is_some()) {
                 let rounded = network.rounded();
                 let net = rounded.as_ref().unwrap_or(network);
                 let mut areas = BezPath::new();

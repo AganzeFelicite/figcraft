@@ -1820,7 +1820,19 @@ impl<'a> Mapper<'a> {
                 if r.style != 0 {
                     match style(r.style) {
                         Some(s) => {
-                            if let Some(fills) = s.get("fillPaints") {
+                            let fills = s.get("fillPaints").and_then(|own_fills| {
+                                if own_fills.list().iter().any(paint_bound) {
+                                    return Some(own_fills);
+                                }
+                                let linked_style = style_link(&View::of(s), "styleIdForFill", "inheritFillStyleID")
+                                    .and_then(|id| self.nodes.get(&id).copied())
+                                    .filter(|style| style.get("styleType").and_then(Kv::str).is_some());
+                                match linked_style {
+                                    Some(style) => style.get("fillPaints"),
+                                    None => Some(own_fills),
+                                }
+                            });
+                            if let Some(fills) = fills {
                                 if let Kv::Array(source_paints) = fills {
                                     let paint_cost = source_paints.iter().fold(source_paints.len(), |cost, paint| {
                                         cost.saturating_add(paint.get("stops").map(Kv::list).unwrap_or_default().len())

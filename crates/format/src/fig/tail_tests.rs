@@ -282,6 +282,27 @@ fn region_canvas(fill_paints: Option<Vec<Kv<'static>>>, style_id: u32) -> Vec<u8
     canvas(&schema(), &message)
 }
 
+fn region_canvas_with_link(own: Option<Kv<'static>>, link_target: Option<u64>, linked_fill: Kv<'static>) -> Vec<u8> {
+    let mut message = tail_message();
+    let Kv::Array(nodes) = field_mut(&mut message, "nodeChanges").unwrap() else { panic!() };
+    let wave = nodes.iter_mut().find(|node| node.get("name").and_then(Kv::str) == Some("Wave")).unwrap();
+    let vector_data = field_mut(wave, "vectorData").unwrap();
+    let Kv::Array(styles) = field_mut(vector_data, "styleOverrideTable").unwrap() else { panic!() };
+    let Kv::Object(fields) = styles.first_mut().unwrap() else { panic!() };
+    if let Some(own) = own {
+        fields.push(("fillPaints", arr(vec![own])));
+    }
+    if let Some(target) = link_target {
+        fields.push(("styleIdForFill", o(vec![("guid", g(target))])));
+    }
+    nodes.push(node(50, None, "RECTANGLE", "Linked Fill", vec![("styleType", e("FILL")), ("fillPaints", arr(vec![linked_fill]))]));
+    let mut network = network::decode(&square_blob()).unwrap();
+    network.regions[0].style = 1;
+    let Kv::Array(blobs) = field_mut(&mut message, "blobs").unwrap() else { panic!() };
+    *field_mut(blobs.get_mut(1).unwrap(), "bytes").unwrap() = Kv::Bytes(network::encode(&network));
+    canvas(&schema(), &message)
+}
+
 fn field_mut<'a, 's>(value: &'a mut Kv<'s>, name: &str) -> Option<&'a mut Kv<'s>> {
     if let Kv::Object(fields) = value {
         return fields.iter_mut().find(|(key, _)| *key == name).map(|(_, field)| field);
@@ -332,6 +353,45 @@ fn vector_region_missing_and_empty_paints_remain_distinct() {
     assert_eq!(network_of(&inherited, "Wave").regions[0].fills, None);
     let (empty, _) = import(&region_canvas(Some(Vec::new()), 1), "Empty region").unwrap();
     assert_eq!(network_of(&empty, "Wave").regions[0].fills, Some(Vec::new()));
+}
+
+#[test]
+fn vector_region_linked_fill_uses_style_paints_without_recording_definition() {
+    let linked = solid(0.9, 0.1, 0.2);
+    let own = solid(0.1, 0.2, 0.9);
+    let wire = region_canvas_with_link(Some(own), Some(50), linked);
+    let (doc, _) = import(&wire, "Linked region style").unwrap();
+    let fills = network_of(&doc, "Wave").regions[0].fills.as_ref().unwrap();
+    let figcraft_doc::color::PaintKind::Solid { color } = &fills[0].kind else { panic!("{fills:?}") };
+    assert_eq!((color.r, color.g, color.b), (0.9, 0.1, 0.2));
+    assert!(doc.nodes().all(|node| node.name != "Linked Fill"), "style lookup must not add a style as a layer");
+    let archive = Archive::open(&wire).unwrap();
+    let (schema, message) = decode_canvas(&archive.canvas).unwrap();
+    let message = schema.decode_message(schema.find("Message").unwrap(), &message).unwrap();
+    let (rest, _, _) = map::to_rest(&message, "Linked region style", crate::rest::MAX_NODES);
+    assert!(rest.get("styles").is_none(), "regional link must not populate the layer styles map");
+}
+
+#[test]
+fn vector_region_variable_bound_own_fill_wins_over_linked_style() {
+    let own =
+        o(vec![("type", e("SOLID")), ("color", o(vec![("r", f(0.1)), ("g", f(0.2)), ("b", f(0.9)), ("a", f(1.0))])), ("colorVar", alias_data(41))]);
+    let (doc, _) = import(&region_canvas_with_link(Some(own), Some(50), solid(0.9, 0.1, 0.2)), "Bound region style").unwrap();
+    let fills = network_of(&doc, "Wave").regions[0].fills.as_ref().unwrap();
+    let figcraft_doc::color::PaintKind::Solid { color } = &fills[0].kind else { panic!("{fills:?}") };
+    assert_eq!((color.r, color.g, color.b), (0.1, 0.2, 0.9));
+}
+
+#[test]
+fn vector_region_missing_fills_inherit_and_unresolved_link_keeps_own_fill() {
+    let (inherited, _) = import(&region_canvas_with_link(None, Some(50), solid(0.9, 0.1, 0.2)), "Inherited linked region").unwrap();
+    assert_eq!(network_of(&inherited, "Wave").regions[0].fills, None);
+
+    let own = solid(0.1, 0.2, 0.9);
+    let (fallback, _) = import(&region_canvas_with_link(Some(own), Some(999), solid(0.9, 0.1, 0.2)), "Unresolved linked region").unwrap();
+    let fills = network_of(&fallback, "Wave").regions[0].fills.as_ref().unwrap();
+    let figcraft_doc::color::PaintKind::Solid { color } = &fills[0].kind else { panic!("{fills:?}") };
+    assert_eq!((color.r, color.g, color.b), (0.1, 0.2, 0.9));
 }
 
 #[test]

@@ -74,7 +74,7 @@ fn hits_node_itself(doc: &Document, id: NodeId, n: &Node, pt: Point, tol: f64, o
         NodeKind::Frame | NodeKind::Component { .. } | NodeKind::ComponentSet { .. } | NodeKind::Instance { .. } | NodeKind::Section { .. } => {
             n.local_rect().inflate(tol_l, tol_l).contains(lp)
         }
-        NodeKind::Vector { network } if network.regions.iter().any(|r| r.fills.is_some()) => {
+        NodeKind::Vector { network } if network.regions.iter().any(|r| r.fills.is_some() || r.paint_space.is_some()) => {
             let rounded = network.rounded();
             let net = rounded.as_ref().unwrap_or(network);
             if !outline {
