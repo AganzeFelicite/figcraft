@@ -22,7 +22,7 @@ use crate::widgets::{self, FIELD_H, FieldEdit, Lead, PAD};
 
 /// The interaction whose editor popover is open: (layer, index).
 fn editor_id() -> Id {
-    Id::new("proto_editor")
+    Id::unique("proto_editor")
 }
 
 pub fn open_editor(ctx: &egui::Context, target: Option<(NodeId, usize)>) {
@@ -38,6 +38,39 @@ pub fn open_editor(ctx: &egui::Context, target: Option<(NodeId, usize)>) {
 
 pub fn editor(ctx: &egui::Context) -> Option<(NodeId, usize)> {
     ctx.data(|d| d.get_temp(editor_id()))
+}
+
+/// Delete the selected interaction (when one is active in the Prototype tab).
+/// Returns true if an interaction was deleted.
+pub fn delete_selected_interaction(app: &mut FigApp, ctx: &egui::Context) -> bool {
+    if app.ui.right_tab != crate::RightTab::Prototype {
+        return false;
+    }
+    let Some((node, index)) = editor(ctx) else { return false };
+    let Ok(ds) = app.session.ds() else { return false };
+    if ds.doc.node(node).and_then(|n| n.interactions.get(index)).is_none() {
+        open_editor(ctx, None);
+        return false;
+    }
+    open_editor(ctx, None);
+    // Delete went to the interaction, so a later one doesn't go to the Pages list.
+    app.ui.pages_focus = None;
+    let ids = targets_for(app, node);
+    app.run("proto.interaction.remove", json!({"ids": ids, "index": index}));
+    true
+}
+
+/// Close the interaction editor if open. Returns true if it was open.
+pub fn close_editor(ctx: &egui::Context) -> bool {
+    if capturing(ctx) || crate::variable_ui::picker_open(ctx) {
+        return false;
+    }
+    if editor(ctx).is_some() {
+        open_editor(ctx, None);
+        true
+    } else {
+        false
+    }
 }
 
 const TRIGGERS: [&str; 10] = [
@@ -345,17 +378,17 @@ fn flow_row(app: &mut FigApp, ui: &mut Ui, f: &proto::Flow) {
     let (r, _) = ui.allocate_exact_size(vec2(w, 32.0), Sense::hover());
     let button = |dx: f32| Rect::from_center_size(pos2(dx, r.center().y), vec2(24.0, 24.0));
     let play = button(r.min.x + PAD + 8.0);
-    if icon_button(ui, Id::new(("flow_play", f.start)), play, Icon::Play, tr("Present this flow")) {
+    if icon_button(ui, Id::unique(("flow_play", f.start)), play, Icon::Play, tr("Present this flow")) {
         app.run("proto.present", json!({"start": f.start}));
     }
     let name_rect = Rect::from_min_max(pos2(play.max.x + 6.0, r.center().y - 9.0), pos2(r.max.x - 64.0, r.center().y + 9.0));
-    if let Some(n) = widgets::text_field_inline(ui, Id::new(("flow_name", f.start)), &f.name, name_rect, regular(11.0)) {
+    if let Some(n) = widgets::text_field_inline(ui, Id::unique(("flow_name", f.start)), &f.name, name_rect, regular(11.0)) {
         app.run("proto.flow.rename", json!({"start": f.start, "name": n}));
     }
-    if icon_button(ui, Id::new(("flow_preview", f.start)), button(r.max.x - 44.0), Icon::Preview, tr("Preview this flow")) {
+    if icon_button(ui, Id::unique(("flow_preview", f.start)), button(r.max.x - 44.0), Icon::Preview, tr("Preview this flow")) {
         app.run("proto.preview", json!({"start": f.start}));
     }
-    if icon_button(ui, Id::new(("flow_rm", f.start)), button(r.max.x - 20.0), Icon::Minus, tr("Remove starting point")) {
+    if icon_button(ui, Id::unique(("flow_rm", f.start)), button(r.max.x - 20.0), Icon::Minus, tr("Remove starting point")) {
         app.run("proto.flow.remove", json!({"start": f.start}));
     }
 }
@@ -393,6 +426,8 @@ fn flows_overview(app: &mut FigApp, ui: &mut Ui, doc: &Document, page: NodeId) {
     }
 }
 
+/// Draw prototype settings: device and rotation, device colour, custom size, responsive
+/// toggle and page background, running `proto.settings`.
 fn settings(app: &mut FigApp, ui: &mut Ui, doc: &Document, page: NodeId) {
     if widgets::section_header(ui, tr("Prototype settings"), &[(Icon::Preview, tr("Open prototype preview"))], false).is_some() {
         app.run("proto.preview", json!({}));
@@ -446,7 +481,7 @@ fn settings(app: &mut FigApp, ui: &mut Ui, doc: &Document, page: NodeId) {
     }
     row(ui, 32.0, |ui| {
         let clicked = widgets::checkbox(ui, settings.responsive, tr("Responsive"));
-        ui.interact(ui.min_rect(), Id::new("proto_responsive_tip"), Sense::hover()).on_hover_text(tr(RESPONSIVE_TIP));
+        ui.interact(ui.min_rect(), Id::unique("proto_responsive_tip"), Sense::hover()).on_hover_text(tr(RESPONSIVE_TIP));
         if clicked {
             app.run("proto.settings", json!({"responsive": !settings.responsive}));
         }
@@ -454,7 +489,7 @@ fn settings(app: &mut FigApp, ui: &mut Ui, doc: &Document, page: NodeId) {
     widgets::sublabels(ui, tr("Background"), None);
     row(ui, 32.0, |ui| {
         widgets::swatch(ui, &Paint::solid(bg), 16.0);
-        if let Some(h) = widgets::text_field(ui, Id::new("proto_bg"), &bg.to_hex(), 96.0, "")
+        if let Some(h) = widgets::text_field(ui, Id::unique("proto_bg"), &bg.to_hex(), 96.0, "")
             && let Some(c) = figcraft_color::Color::from_hex_or_name(&h)
         {
             app.run("proto.settings", json!({"background": c.to_css_hex()}));
@@ -506,7 +541,7 @@ fn custom_size(app: &mut FigApp, ui: &mut Ui, model: Option<proto::Device>) {
     row(ui, 32.0, |ui| {
         for (key, lead, v) in [("width", "W", d.width), ("height", "H", d.height)] {
             if let Some(FieldEdit::Set(x) | FieldEdit::Scrub(x, true)) =
-                widgets::number_field(ui, Id::new(("proto_custom", key)), Lead::Text(lead), Some(v), "", col, 1.0)
+                widgets::number_field(ui, Id::unique(("proto_custom", key)), Lead::Text(lead), Some(v), "", col, 1.0)
                 && let Some(x) = proto::PrototypeSettings::custom_side(x)
                 && x != v
             {
@@ -519,6 +554,7 @@ fn custom_size(app: &mut FigApp, ui: &mut Ui, model: Option<proto::Device>) {
     });
 }
 
+/// Show, create or preview the flow starting at `frame` and edit its description.
 fn flow_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, page: NodeId, frame: NodeId) {
     let flows = flows_of(doc, page);
     let mine = flows.iter().find(|f| f.start == frame).cloned();
@@ -537,7 +573,7 @@ fn flow_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, page: NodeId, fra
     if let Some(f) = mine {
         flow_row(app, ui, &f);
         row(ui, 32.0, |ui| {
-            if let Some(d) = widgets::text_field(ui, Id::new(("flow_desc", frame)), &f.description, ui.available_width(), tr("Add a description"))
+            if let Some(d) = widgets::text_field(ui, Id::unique(("flow_desc", frame)), &f.description, ui.available_width(), tr("Add a description"))
                 && d != f.description
             {
                 app.run("proto.flow.rename", json!({"start": frame, "description": d}));
@@ -546,6 +582,8 @@ fn flow_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, page: NodeId, fra
     }
 }
 
+/// List a node's interactions, add a default click navigation (or Back), open the editor
+/// popover and remove interactions.
 fn interactions(app: &mut FigApp, ui: &mut Ui, doc: &Document, page: NodeId, node: &Node) {
     let t = Tokens::get(ui.ctx());
     let id = node.id;
@@ -564,7 +602,7 @@ fn interactions(app: &mut FigApp, ui: &mut Ui, doc: &Document, page: NodeId, nod
         let w = ui.available_width();
         let (r, _) = ui.allocate_exact_size(vec2(w, 44.0), Sense::hover());
         let body = Rect::from_min_max(pos2(r.min.x + PAD - 6.0, r.min.y + 2.0), pos2(r.max.x - 40.0, r.max.y - 2.0));
-        let resp = ui.interact(body, ui.id().with(("proto_it", id, i)), Sense::click());
+        let resp = ui.interact(body, ui.scope_id().with(("proto_it", id, i)), Sense::click());
         let active = open == Some((id, i));
         if active {
             ui.painter().rect_filled(body, CornerRadius::same(5), t.selected_row);
@@ -585,7 +623,7 @@ fn interactions(app: &mut FigApp, ui: &mut Ui, doc: &Document, page: NodeId, nod
             open_editor(ui.ctx(), if active { None } else { Some((id, i)) });
         }
         let rm = Rect::from_center_size(pos2(r.max.x - 20.0, r.center().y), vec2(24.0, 24.0));
-        if icon_button(ui, ui.id().with(("proto_rm", id, i)), rm, Icon::Minus, tr("Remove interaction")) {
+        if icon_button(ui, ui.scope_id().with(("proto_rm", id, i)), rm, Icon::Minus, tr("Remove interaction")) {
             open_editor(ui.ctx(), None);
             app.run("proto.interaction.remove", json!({"ids": targets_for(app, id), "index": i}));
             return;
@@ -607,13 +645,11 @@ fn interactions(app: &mut FigApp, ui: &mut Ui, doc: &Document, page: NodeId, nod
 #[allow(clippy::too_many_arguments)]
 fn editor_popover(app: &mut FigApp, ctx: &egui::Context, doc: &Document, page: NodeId, node: NodeId, k: usize, it: &Interaction, at: Pos2) {
     let t = Tokens::get(ctx);
-    // Escape in a field (it cancels the edit) doesn't close the editor.
-    let typing = ctx.egui_wants_keyboard_input();
     let width = 280.0;
     let screen = ctx.content_rect();
     let pos = pos2(at.x - width, at.y.min(screen.max.y - 420.0).max(screen.min.y + 48.0));
     let mut close = false;
-    egui::Area::new(Id::new("proto_editor_area")).fixed_pos(pos).order(egui::Order::Foreground).show(ctx, |ui| {
+    egui::Area::new(Id::unique("proto_editor_area")).fixed_pos(pos).order(egui::Order::Foreground).show(ctx, |ui| {
         egui::Frame::new()
             .fill(t.panel)
             .stroke(Stroke::new(1.0, t.border))
@@ -626,7 +662,7 @@ fn editor_popover(app: &mut FigApp, ctx: &egui::Context, doc: &Document, page: N
                 let (hr, _) = ui.allocate_exact_size(vec2(width, 40.0), Sense::hover());
                 ui.painter().text(pos2(hr.min.x + PAD, hr.center().y), Align2::LEFT_CENTER, tr("Interaction"), semibold(11.0), t.text);
                 let x = Rect::from_center_size(pos2(hr.max.x - 20.0, hr.center().y), vec2(24.0, 24.0));
-                let xr = ui.interact(x, ui.id().with("proto_editor_close"), Sense::click()).tip(tr("Close"));
+                let xr = ui.interact(x, ui.scope_id().with("proto_editor_close"), Sense::click()).tip(tr("Close"));
                 if xr.hovered() {
                     ui.painter().rect_filled(x, CornerRadius::same(5), t.hover);
                 }
@@ -652,8 +688,7 @@ fn editor_popover(app: &mut FigApp, ctx: &egui::Context, doc: &Document, page: N
                 });
             });
     });
-    let escape = ctx.input(|i| i.key_pressed(egui::Key::Escape)) && !typing && !capturing(ctx) && !crate::variable_ui::picker_open(ctx);
-    if close || escape {
+    if close {
         open_editor(ctx, None);
     }
 }
@@ -666,14 +701,17 @@ fn animates(a: &Action) -> bool {
     )
 }
 
+/// Stable egui id for the prototype key-capture flag.
 fn capture_id() -> Id {
-    Id::new("proto_key_capture")
+    Id::unique("proto_key_capture")
 }
 
 fn capturing(ctx: &egui::Context) -> bool {
     ctx.data(|d| d.get_temp::<bool>(capture_id())).unwrap_or(false)
 }
 
+/// Draw an interaction's trigger controls: trigger picker, mouse/delay fields, key capture
+/// and controller-button selection, patching the interaction.
 fn trigger_rows(app: &mut FigApp, ui: &mut Ui, node: NodeId, k: usize, it: &Interaction) {
     let t = Tokens::get(ui.ctx());
     widgets::sublabels(ui, tr("Trigger"), None);
@@ -699,7 +737,7 @@ fn trigger_rows(app: &mut FigApp, ui: &mut Ui, node: NodeId, k: usize, it: &Inte
         Trigger::MouseEnter | Trigger::MouseLeave | Trigger::MouseDown | Trigger::MouseUp => {
             row(ui, 32.0, |ui| {
                 widgets::label(ui, tr("Delay"), t.text_secondary);
-                let id = Id::new(("proto_mouse_delay", node, k));
+                let id = Id::unique(("proto_mouse_delay", node, k));
                 if let Some(FieldEdit::Set(v) | FieldEdit::Scrub(v, true)) =
                     widgets::number_field(ui, id, Lead::None, Some(f64::from(it.delay_ms)), "ms", 96.0, 10.0)
                     && v.is_finite()
@@ -712,7 +750,7 @@ fn trigger_rows(app: &mut FigApp, ui: &mut Ui, node: NodeId, k: usize, it: &Inte
             row(ui, 32.0, |ui| {
                 widgets::label(ui, tr("Delay"), t.text_secondary);
                 if let Some(FieldEdit::Set(v) | FieldEdit::Scrub(v, true)) =
-                    widgets::number_field(ui, Id::new(("proto_delay", node, k)), Lead::None, Some(f64::from(*ms)), "ms", 96.0, 10.0)
+                    widgets::number_field(ui, Id::unique(("proto_delay", node, k)), Lead::None, Some(f64::from(*ms)), "ms", 96.0, 10.0)
                     && v.is_finite()
                 {
                     patch(app, node, k, json!({"trigger": {"type": "afterDelay", "ms": v.clamp(0.0, 600_000.0).round() as u32}}));
@@ -735,7 +773,7 @@ fn trigger_rows(app: &mut FigApp, ui: &mut Ui, node: NodeId, k: usize, it: &Inte
                 let id = capture_id().with("field");
                 ui.painter().rect_filled(r, CornerRadius::same(5), t.field);
                 if cap {
-                    ui.painter().rect_stroke(r, CornerRadius::same(5), Stroke::new(1.0, t.accent), StrokeKind::Inside);
+                    ui.painter().rect_stroke(r, CornerRadius::same(5), Stroke::new(1.0, ACCENT), StrokeKind::Inside);
                     ui.memory_mut(|m| m.request_focus(id));
                     let _ = ui.interact(r, id, Sense::focusable_noninteractive());
                     let pressed = ui.input(|i| {
@@ -896,7 +934,20 @@ pub(crate) fn action_fields(app: &mut FigApp, ui: &mut Ui, doc: &Document, page:
                     let w = ((ui.available_width() - 6.0) / 2.0).max(36.0);
                     for (i, (name, key)) in [("X", "proto_ov_x"), ("Y", "proto_ov_y")].into_iter().enumerate() {
                         let shown = offset.and_then(|o| o.get(i).copied());
-                        let Some(e) = widgets::number_field_bindable(ui, slot.id(key), Lead::Text(name), shown, "", w, 1.0, None, tr("Auto")).0
+                        // "Auto" is no offset (right below the layer), not 0: the word isn't taken
+                        // as a value here.
+                        let Some(e) = widgets::number_field_bindable(
+                            ui,
+                            slot.id(key),
+                            Lead::Text(name),
+                            shown,
+                            "",
+                            w,
+                            1.0,
+                            None,
+                            widgets::Empty::Text(tr("Auto")),
+                        )
+                        .0
                         else {
                             continue;
                         };
@@ -978,6 +1029,8 @@ pub(crate) fn action_fields(app: &mut FigApp, ui: &mut Ui, doc: &Document, page:
     }
 }
 
+/// Draw an interaction's animation controls: transition, direction, easing, duration and
+/// custom easing fields, plus an animated curve preview.
 fn animation_rows(app: &mut FigApp, ui: &mut Ui, node: NodeId, k: usize, it: &Interaction) {
     let t = Tokens::get(ui.ctx());
     widgets::sublabels(ui, tr("Animation"), None);
@@ -1020,7 +1073,7 @@ fn animation_rows(app: &mut FigApp, ui: &mut Ui, node: NodeId, k: usize, it: &In
                     let w = ui.available_width().max(200.0);
                     let (r, rr) = ui.allocate_exact_size(vec2(w, 26.0), Sense::click());
                     if rr.hovered() {
-                        ui.painter().rect_filled(r, CornerRadius::same(5), ACCENT);
+                        ui.painter().rect_filled(r, CornerRadius::same(5), t.menu_hover);
                     }
                     let col = if rr.hovered() { Color32::WHITE } else { t.text };
                     curve(ui.painter(), Rect::from_min_size(pos2(r.min.x + 6.0, r.min.y + 4.0), vec2(28.0, 18.0)), *e, col, None);
@@ -1039,7 +1092,7 @@ fn animation_rows(app: &mut FigApp, ui: &mut Ui, node: NodeId, k: usize, it: &In
                 ui.label(egui::RichText::new(ms).font(regular(11.0)).color(t.text_secondary))
                     .tip(tr("A spring plays until it settles: its mass, stiffness and damping set how long"));
             } else if let Some(e) =
-                widgets::number_field(ui, Id::new(("proto_dur", node, k)), Lead::None, Some(f64::from(it.duration_ms)), "ms", 72.0, 10.0)
+                widgets::number_field(ui, Id::unique(("proto_dur", node, k)), Lead::None, Some(f64::from(it.duration_ms)), "ms", 72.0, 10.0)
             {
                 match e {
                     FieldEdit::Set(v) => {
@@ -1069,7 +1122,7 @@ fn animation_rows(app: &mut FigApp, ui: &mut Ui, node: NodeId, k: usize, it: &In
         let box_r = Rect::from_min_max(pos2(r.min.x + PAD, r.min.y + 4.0), pos2(r.max.x - PAD, r.max.y - 4.0));
         ui.painter().rect_filled(box_r, CornerRadius::same(5), t.field);
         let period = it.easing.seconds(it.duration_ms).max(0.05) + CURVE_HOLD;
-        let elapsed = curve_play(ui, Id::new(("proto_curve", node, k)), Id::new((format!("{:?}", it.easing), it.duration_ms)), resp.hovered());
+        let elapsed = curve_play(ui, Id::unique(("proto_curve", node, k)), Id::unique((format!("{:?}", it.easing), it.duration_ms)), resp.hovered());
         let phase = if resp.hovered() || elapsed < period * CURVE_PLAYS {
             ui.ctx().request_repaint_after(std::time::Duration::from_millis(33));
             ((elapsed % period) / (period - CURVE_HOLD)).min(1.0)
@@ -1104,12 +1157,13 @@ fn custom_easing_fields(app: &mut FigApp, ui: &mut Ui, node: NodeId, k: usize, e
         for i in 0..count {
             let (Some(name), Some(v), Some(step)) = (names.get(i), vals.get(i), steps.get(i)) else { continue };
             let lead = if count == 4 { Lead::Text(name) } else { Lead::None };
-            let edit = widgets::number_field(ui, Id::new(("proto_ease", node, k, i)), lead, Some((v * 100.0).round() / 100.0), "", w, *step).map(
-                |e| match e {
-                    FieldEdit::Set(x) => (x, true, false),
-                    FieldEdit::Scrub(x, done) => (x, done, true),
-                },
-            );
+            let edit =
+                widgets::number_field(ui, Id::unique(("proto_ease", node, k, i)), lead, Some((v * 100.0).round() / 100.0), "", w, *step).map(|e| {
+                    match e {
+                        FieldEdit::Set(x) => (x, true, false),
+                        FieldEdit::Scrub(x, done) => (x, done, true),
+                    }
+                });
             if let Some((x, done, scrub)) = edit
                 && x.is_finite()
             {

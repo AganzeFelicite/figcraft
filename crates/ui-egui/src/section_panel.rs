@@ -48,6 +48,9 @@ pub fn status_dropdown(app: &mut FigApp, ui: &mut Ui, doc: &Document, ids: &[Nod
     });
 }
 
+/// Draw section colour and hide-contents controls, Dev status, changed-reason Resolve, the
+/// last-change note and Resize to fit; returns for an empty selection or one without a Dev
+/// status.
 pub fn section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
     let sections = !sel.is_empty() && sel.iter().all(|i| is_section(doc, *i));
     if sel.is_empty() || !sel.iter().all(|i| has_status(doc, *i)) {
@@ -89,7 +92,7 @@ pub fn section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
         // Changed since marked ready: say why to resolve it (back to Ready for dev).
         row(ui, 32.0, |ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            let id = egui::Id::new(("dev_reason", ids.first().copied()));
+            let id = egui::Id::unique(("dev_reason", ids.first().copied()));
             let draft_id = id.with("draft");
             // The typed reason stays a draft until Enter or Resolve: clicking away keeps it.
             let mut draft: String = ui.data(|d| d.get_temp(draft_id)).unwrap_or_default();

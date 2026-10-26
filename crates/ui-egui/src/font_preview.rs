@@ -32,7 +32,7 @@ fn key(style: &TextStyle, text: &str, ppp: f32) -> u64 {
 pub fn texture(ctx: &egui::Context, style: &TextStyle, text: &str, budget: &mut usize) -> Option<egui::TextureHandle> {
     let ppp = ctx.pixels_per_point();
     let k = key(style, text, ppp);
-    let cache = ctx.data_mut(|d| d.get_temp_mut_or_default::<Cache>(Id::new("font_previews")).clone());
+    let cache = ctx.data_mut(|d| d.get_temp_mut_or_default::<Cache>(Id::unique("font_previews")).clone());
     if let Some(t) = cache.0.lock().ok()?.get(&k) {
         return t.clone();
     }

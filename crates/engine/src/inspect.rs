@@ -135,11 +135,17 @@ pub fn node_json(doc: &Document, id: NodeId, depth: usize) -> Value {
         if !n.exports.is_empty() {
             o.insert("exports".into(), serde_json::to_value(&n.exports).unwrap_or(Value::Null));
         }
+        if let Some(b) = &n.board {
+            o.insert("board".into(), serde_json::to_value(b).unwrap_or(Value::Null));
+        }
         if !n.annotations.is_empty() {
             o.insert("annotations".into(), serde_json::to_value(&n.annotations).unwrap_or(Value::Null));
         }
         if !n.code_links.is_empty() {
             o.insert("codeLinks".into(), camel(serde_json::to_value(&n.code_links).unwrap_or(Value::Null)));
+        }
+        if !n.measurements.is_empty() {
+            o.insert("measurements".into(), serde_json::to_value(&n.measurements).unwrap_or(Value::Null));
         }
         let dev = crate::dev_resources::list_json(doc, n.id);
         if dev.as_array().is_some_and(|a| !a.is_empty()) {
@@ -165,6 +171,10 @@ pub fn node_json(doc: &Document, id: NodeId, depth: usize) -> Value {
             o.insert("operandOperation".into(), json!(op));
         }
     }
+    // Layer data written with `node.set {props: {pluginData}}` (pages too).
+    if !n.plugin_data.is_empty() {
+        o.insert("pluginData".into(), json!(n.plugin_data));
+    }
     match &n.kind {
         NodeKind::Text(t) => {
             o.insert("characters".into(), json!(t.characters));
@@ -178,6 +188,9 @@ pub fn node_json(doc: &Document, id: NodeId, depth: usize) -> Value {
             o.insert("letterSpacing".into(), json!(t.style.letter_spacing.label()));
             o.insert("textAlign".into(), json!(t.align_h));
             o.insert("textAutoResize".into(), json!(t.auto_resize));
+            if t.max_lines > 0 {
+                o.insert("maxLines".into(), json!(t.max_lines));
+            }
             if let Some(tp) = &t.path {
                 o.insert("textPath".into(), json!(tp));
             }
@@ -191,7 +204,7 @@ pub fn node_json(doc: &Document, id: NodeId, depth: usize) -> Value {
                 o.insert("textDecorationSkipInk".into(), json!(l.skip_ink));
                 o.insert("textDecorationColor".into(), l.color.map_or(json!("auto"), |c| json!(format!("#{}", c.to_hex()))));
             }
-            // Lists: one style for the layer, or each paragraph's type and nesting level.
+            // Lists: one style for the layer, or each paragraph's type, nesting level and start.
             if t.paragraphs.is_empty() {
                 if t.list != figcraft_doc::ListStyle::None {
                     o.insert("listStyle".into(), json!(t.list));
@@ -199,6 +212,9 @@ pub fn node_json(doc: &Document, id: NodeId, depth: usize) -> Value {
             } else {
                 o.insert("lineTypes".into(), t.paragraphs.iter().map(|p| json!(p.list)).collect());
                 o.insert("lineIndentations".into(), t.paragraphs.iter().map(|p| json!(p.indent)).collect());
+                if t.paragraphs.iter().any(|p| p.start_offset > 0) {
+                    o.insert("listStartOffsets".into(), t.paragraphs.iter().map(|p| json!(p.start_offset)).collect());
+                }
             }
             if t.list_spacing != 0.0 {
                 o.insert("listSpacing".into(), json!(t.list_spacing));
@@ -305,6 +321,7 @@ pub fn document(s: &Session, depth: usize, all_pages: bool) -> Value {
         doc.pages.iter().map(|p| if all_pages || *p == ds.page { node_json(doc, *p, depth) } else { node_json(doc, *p, 0) }).collect();
     json!({
         "name": doc.name,
+        "kind": doc.kind.id(),
         "path": ds.path,
         "dirty": ds.is_dirty(),
         "currentPage": ds.page,

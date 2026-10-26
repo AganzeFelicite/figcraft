@@ -68,6 +68,22 @@ FIGCRAFT_DEFAULT_SERVER=wss://design.example.org/ cargo build --release -p figcr
 The release workflow leaves it unset. The public server's terms are in
 [`online-sharing-terms.md`](online-sharing-terms.md).
 
+## The default font
+
+New text starts in Inter (`figcraft_doc::DEFAULT_FONT`). A distribution whose users mostly write a
+script Inter lacks (Thai, say) can name another family with `FIGCRAFT_DEFAULT_FONT` when building;
+unset or empty means Inter. Pick a family the build embeds from craft-fonts (the web build has no
+other fonts) or one its users have installed:
+
+```sh
+FIGCRAFT_DEFAULT_FONT="Noto Sans Thai" cargo build --release -p figcraft
+```
+
+Files record each text's family, so the variable only changes what new text starts in: a file
+saved by one build keeps its fonts in a build with another default. Like any other family, it
+renders only where it is available (embedded or installed); elsewhere the text falls back to the
+faces that are. The release workflow leaves it unset.
+
 ## What gets built
 
 | Platform | Artifacts | Built on |
@@ -95,13 +111,20 @@ examples from `packaging/server/` (systemd unit, Caddyfile, nginx; the Dockerfil
 the sources). Linux only for now; elsewhere operators build it with
 `cargo build --release -p figcraft-server`.
 
-**Fonts.** Every build job checks out [craft-fonts](https://github.com/storytold/craft-fonts) at
-`CRAFT_FONTS_REF` (top of `release.yml`) and builds with `CRAFT_FONTS_DIR` and
-`CRAFT_FONTS_REQUIRED=1`, so releases embed its fonts and fail rather than ship without them.
+**Fonts.** Every build job, the web one included (`web-craft-fonts`), checks out
+[craft-fonts](https://github.com/storytold/craft-fonts) at `craft-fonts-ref` (in `release.yml`) and
+builds with `CRAFT_FONTS_DIR` and `CRAFT_FONTS_REQUIRED=1`, so releases embed its fonts and fail
+rather than ship without them. The browser has no system fonts, so a web build without craft-fonts
+can't draw text.
 `crates/text/build.rs` reads both `fonts/manifest.txt` and `fonts/latin-manifest.txt`, so the pin
-must be a commit that has the Latin manifest (today `4391305`, on craft-fonts'
-`pr/latin-presentation-fonts` branch; re-pin to `main` once that lands). The web build embeds
-only Inter. Packages carry each embedded font's licence as `OFL-<family>.txt`
+must combine the Latin presentation catalog and the current core UI faces. Required web builds
+validate the emitted Inter Regular/SemiBold and Noto Sans Georgian Regular faces after filtering;
+a missing required face, style or asset fails the required web build. Excluded Adobe rows
+are skipped before resolving their asset paths.
+Native builds retain the permitted Latin presentation faces. Source Sans 3 and Source Serif 4
+are filtered on every target under FigCraft's asset policy. The web build keeps its smaller
+allowlist: Inter, Noto Sans Georgian and Archivo SemiBold when supplied. Packages carry each
+embedded font's licence as `OFL-<family>.txt`
 (`copy_font_licences` in `packaging/env.sh`; `Contents/Resources/Licenses` in the macOS app).
 
 ### macOS

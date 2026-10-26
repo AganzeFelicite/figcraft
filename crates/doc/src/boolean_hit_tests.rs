@@ -52,8 +52,9 @@ fn ordinary_hit_uses_region_paints_without_layer_fill() {
                 loops: vec![vec![0, 1, 2, 3]],
                 winding: WindingRule::NonZero,
                 fills: Some(vec![figcraft_color::Paint::solid(figcraft_color::Color::BLACK)]),
+                ..Default::default()
             },
-            Region { loops: vec![vec![0, 1, 2, 3]], winding: WindingRule::NonZero, fills: Some(Vec::new()) },
+            Region { loops: vec![vec![0, 1, 2, 3]], winding: WindingRule::NonZero, fills: Some(Vec::new()), ..Default::default() },
         ],
     };
     let id = d.create(p, NodeKind::Vector { network }, "V", 0.0, 0.0, 10.0, 10.0).unwrap();
@@ -61,6 +62,21 @@ fn ordinary_hit_uses_region_paints_without_layer_fill() {
     assert!(d.node(id).unwrap().fills.is_empty());
     assert_eq!(d.hit_test(p, Point::new(5.0, 5.0), 0.0, None), Some(id));
     assert_eq!(d.hit_test(p, Point::new(15.0, 5.0), 0.0, None), None);
+}
+
+#[test]
+fn explicitly_unfilled_regions_keep_the_stroke_only_selection_band() {
+    let mut d = Document::new("stroke selection");
+    let p = page(&d);
+    let mut network =
+        VectorNetwork::from_points(&[Point::new(0.0, 0.0), Point::new(100.0, 0.0), Point::new(100.0, 100.0), Point::new(0.0, 100.0)], true);
+    network.regions[0].fills = Some(Vec::new());
+    let id = d.create(p, NodeKind::Vector { network }, "V", 0.0, 0.0, 100.0, 100.0).unwrap();
+    let n = d.get_mut(id).unwrap();
+    n.fills.clear();
+    n.strokes = vec![figcraft_color::Paint::solid(figcraft_color::Color::BLACK)];
+    n.stroke.weight = 1.0;
+    assert_eq!(d.hit_test(p, Point::new(50.0, -4.0), 2.0, None), Some(id));
 }
 
 #[test]

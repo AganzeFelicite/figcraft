@@ -6,9 +6,10 @@
 //! are expanded here from the main component (overrides and derived layout matched by id path,
 //! component property values applied) so the import looks as saved.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::rc::Rc;
 
+use figcraft_doc::VectorNetwork;
 use figcraft_doc::geom::{Affine, Point};
 use figcraft_doc::proto::{MAX_ACTION_DEPTH, MAX_EXPR_DEPTH};
 use serde_json::{Map, Value, json};
@@ -18,23 +19,36 @@ use super::network;
 
 type Obj = Map<String, Value>;
 
-/// Most layers produced (instance expansion included) and deepest nesting followed.
-const MAX_NODES: usize = crate::rest::MAX_NODES;
+/// Deepest nesting followed.
 const MAX_DEPTH: usize = 256;
 /// Most path commands read from one geometry blob.
 const MAX_COMMANDS: usize = 200_000;
+const MAX_GRID_TRACKS: usize = 1_000;
+pub(super) const MAX_GRID_TRACK_VALUE: f64 = 1e6;
 /// Id of "no style".
 const NO_STYLE: &str = "4294967295:4294967295";
 /// Longest asset `key` or `version` kept for resolving references given as assets.
 const MAX_ASSET_PART: usize = 256;
 
-/// The REST API file JSON for message `msg`, with the warnings about what was skipped.
-pub(super) fn to_rest(msg: &Kv, name: &str) -> (Value, Vec<String>) {
-    let mut m = Mapper::new(msg);
+/// The REST API file JSON for message `msg`, with the warnings about what was skipped and the
+/// vector networks its layers name by `vectorNetworkRef` (for [`crate::rest::import_with_networks`]).
+pub(super) fn to_rest(msg: &Kv, name: &str, max_nodes: usize) -> (Value, Vec<String>, Vec<Option<VectorNetwork>>) {
+    let mut m = Mapper::new(msg, max_nodes);
     let doc = m.document();
-    let mut out = json!({"name": name, "document": doc});
+    // Large values are moved in, never passed through `json!`, which serialises its arguments:
+    // a deep copy of the whole tree, briefly holding it twice.
+    let mut out = json!({"name": name});
+    out["document"] = doc;
     if !m.library_contexts.is_empty() {
         out[crate::rest::FIG_LIBRARY_CONTEXTS_FIELD] = Value::Array(std::mem::take(&mut m.library_contexts));
+    }
+    // Mains in the file that the layer cap kept out: their instances are told apart from those of
+    // components the file doesn't have (#981).
+    if m.count >= m.max_nodes {
+        let capped: Vec<Value> = m.referenced_mains.difference(&m.mapped_mains).map(|id| json!(id)).collect();
+        if !capped.is_empty() {
+            out[crate::rest::FIG_CAPPED_MAINS_FIELD] = Value::Array(capped);
+        }
     }
     if !m.styles.is_empty() {
         out["styles"] = Value::Object(std::mem::take(&mut m.styles));
@@ -52,8 +66,12 @@ pub(super) fn to_rest(msg: &Kv, name: &str) -> (Value, Vec<String>) {
     if !styles.is_empty() {
         out["styleDefinitions"] = Value::Array(styles);
     }
-    (out, m.warnings)
+    (out, m.warnings.finish(), m.networks)
 }
+
+#[cfg(test)]
+#[path = "map_image_filter_tests.rs"]
+mod image_filter_tests;
 
 /// REST importer warnings reworded for a `.fig` import (`None`: drop it).
 pub(super) fn adapt_warning(w: String) -> Option<String> {
@@ -73,6 +91,16 @@ fn num(n: &Kv, k: &str) -> Option<f64> {
     n.get(k).and_then(Kv::f64)
 }
 
+fn filter_number(value: &Kv) -> Option<f64> {
+    let number = match value {
+        Kv::Float(value) => f64::from(*value),
+        Kv::Int(value) => *value as f64,
+        Kv::Uint(value) => *value as f64,
+        _ => return None,
+    };
+    number.is_finite().then_some(number)
+}
+
 fn guid(v: &Kv) -> Option<String> {
     Some(format!("{}:{}", num(v, "sessionID")? as u64, num(v, "localID")? as u64))
 }
@@ -89,6 +117,10 @@ fn normalize_override_segment(path: &mut [String], index: usize, scope: &Overrid
         path[index] = current.clone();
     }
 }
+
+#[cfg(test)]
+#[path = "map_connector_snapshot_budget_tests.rs"]
+mod connector_snapshot_budget_tests;
 
 /// A `GUID`-holding reference (`StyleId`, `VariableID`, …): its `guid`.
 fn ref_guid(v: &Kv) -> Option<String> {
@@ -138,6 +170,41 @@ fn copy_str(o: &mut Obj, n: &View, from: &str, to: &str) {
     if let Some(s) = n.str(from) {
         o.insert(to.into(), json!(s));
     }
+}
+
+/// The value from the last override layer holding a valid one for an optional text setting; invalid instance rows fall through.
+fn text_num(v: &View, key: &str) -> Option<f64> {
+    v.layers.iter().rev().find_map(|layer| {
+        layer.get(key).and_then(|value| match value {
+            Kv::Bool(_) => None,
+            _ => value.f64(),
+        })
+    })
+}
+
+fn text_flag(v: &View, key: &str) -> Option<bool> {
+    v.layers.iter().rev().find_map(|layer| layer.get(key).and_then(Kv::bool))
+}
+
+fn insert_text_options(style: &mut Obj, v: &View) {
+    if let Some(value) = text_num(v, "listSpacing") {
+        style.insert("listSpacing".into(), json!(value));
+    }
+    for k in ["hangingList", "hangingPunctuation"] {
+        if let Some(value) = text_flag(v, k) {
+            style.insert(k.into(), json!(value));
+        }
+    }
+    if let Some(value) = leading_trim(v) {
+        style.insert("leadingTrim".into(), json!(value));
+    }
+}
+
+fn leading_trim<'a>(v: &View<'a>) -> Option<&'a str> {
+    v.layers.iter().rev().find_map(|layer| match layer.get("leadingTrim").and_then(Kv::str) {
+        Some(value @ ("NONE" | "CAP_HEIGHT")) => Some(value),
+        _ => None,
+    })
 }
 
 /// A node seen through override layers: the last layer with a field wins.
@@ -295,6 +362,10 @@ struct Inst<'a> {
     path: Vec<String>,
     overrides: Rc<Overrides<'a>>,
     props: Rc<BTreeMap<String, &'a Kv<'a>>>,
+    /// Slot property GUID → private slot-content node GUID.
+    slot_contents: Rc<BTreeMap<String, String>>,
+    /// Layers imported from a slot's independent content subtree.
+    slot_content: bool,
     /// Mains being expanded (an instance inside its own main stops there).
     symbols: Vec<String>,
 }
@@ -305,6 +376,9 @@ struct Mapper<'a> {
     blobs: Vec<&'a [u8]>,
     /// Component property definitions: id → (REST name "Name#id", type).
     prop_defs: BTreeMap<String, (String, &'a str)>,
+    /// The copies of a set's definitions each variant keeps (no name or type of their own; the
+    /// variant's layers and its instances' assignments use them): copy id → the definition's id.
+    prop_parents: BTreeMap<String, String>,
     /// File nodes by asset `key` and `version`: references can name a collection, variable or
     /// style as the asset instead of the guid, and the file carries the resources to resolve
     /// them (the collection node itself says the same `key`).
@@ -315,23 +389,38 @@ struct Mapper<'a> {
     sets: Obj,
     /// Layers and keys of each main, built when an instance of it first needs them.
     override_scopes: BTreeMap<String, Rc<OverrideScope>>,
-    /// Entries held by `override_scopes` (bounded by [`MAX_NODES`] together).
+    /// Entries held by `override_scopes` (bounded by `max_nodes` together).
     override_scope_entries: usize,
     /// Component-bearing branches of the file's internal canvases (cached library definitions).
     library_contexts: Vec<Value>,
     /// Layers visited while scanning internal canvases, across all of them.
     library_scan_count: usize,
-    /// Most layers produced or scanned; the one place the cap comes from.
-    max_nodes: usize,
-    warnings: Vec<String>,
+    warnings: crate::rest::Warnings,
     count: usize,
+    /// The mains in the file that instances or instance swap defaults name, and the mains mapped
+    /// as layers: the difference is what the layer cap kept out.
+    referenced_mains: BTreeSet<String>,
+    mapped_mains: BTreeSet<String>,
+    /// Most layers produced or scanned, instance expansion included; the one place the cap comes
+    /// from (see [`super::layer_budget`]).
+    max_nodes: usize,
+    /// Layers kept back for the visible pages' top level while library copies are mapped, so the
+    /// copies can't take the whole budget and leave the pages empty.
+    reserved: usize,
+    /// Vector networks, each built once: the layers that show one (every instance of a main
+    /// holding it) name it by `vectorNetworkRef`. Kept out of the JSON, where a large file's
+    /// networks took gigabytes.
+    networks: Vec<Option<VectorNetwork>>,
+    /// Index in `networks` by what a network is made from: its blob, its scale and its style table.
+    network_ids: HashMap<(usize, u64, u64, usize), usize>,
 }
 
 impl<'a> Mapper<'a> {
-    fn new(msg: &'a Kv<'a>) -> Self {
+    fn new(msg: &'a Kv<'a>, max_nodes: usize) -> Self {
         let mut nodes = BTreeMap::new();
         let mut kids: BTreeMap<String, Vec<(&'a str, String)>> = BTreeMap::new();
         let mut prop_defs = BTreeMap::new();
+        let mut prop_parents = BTreeMap::new();
         let changes = msg.get("nodeChanges").map(Kv::list).unwrap_or_default();
         // The last change of a GUID wins; a REMOVED change deletes what came before it.
         for n in changes {
@@ -353,10 +442,11 @@ impl<'a> Mapper<'a> {
                 kids.entry(parent).or_default().push((p.get("position").and_then(Kv::str).unwrap_or(""), id.clone()));
             }
             for d in n.get("componentPropDefs").map(Kv::list).unwrap_or_default() {
-                if let (Some(did), Some(name), Some(ty)) =
-                    (d.get("id").and_then(guid), d.get("name").and_then(Kv::str), d.get("type").and_then(Kv::str))
-                {
+                let Some(did) = d.get("id").and_then(guid) else { continue };
+                if let (Some(name), Some(ty)) = (d.get("name").and_then(Kv::str), d.get("type").and_then(Kv::str)) {
                     prop_defs.insert(did.clone(), (format!("{name}#{did}"), ty));
+                } else if let Some(parent) = d.get("parentPropDefId").and_then(guid) {
+                    prop_parents.insert(did, parent);
                 }
             }
         }
@@ -380,6 +470,7 @@ impl<'a> Mapper<'a> {
             kids,
             blobs,
             prop_defs,
+            prop_parents,
             assets,
             styles: Obj::new(),
             components: Obj::new(),
@@ -388,9 +479,14 @@ impl<'a> Mapper<'a> {
             override_scope_entries: 0,
             library_contexts: Vec::new(),
             library_scan_count: 0,
-            max_nodes: MAX_NODES,
-            warnings: Vec::new(),
+            warnings: crate::rest::Warnings::default(),
             count: 0,
+            referenced_mains: BTreeSet::new(),
+            mapped_mains: BTreeSet::new(),
+            max_nodes,
+            reserved: 0,
+            networks: Vec::new(),
+            network_ids: HashMap::new(),
         }
     }
 
@@ -415,11 +511,14 @@ impl<'a> Mapper<'a> {
         .cloned()
     }
 
+    /// A note about what this file's mapping left out or changed. Counted, as the REST importer
+    /// counts its own: these notes are met once per layer, so the kinds were named once each with
+    /// no sign of how much of the file they covered -- a file whose every text layer lost a
+    /// setting read the same as one where a single layer did (#467). The collector keeps the
+    /// first-seen order and the same cap, since some notes name fields of the file (image
+    /// filters).
     fn warn(&mut self, w: impl Into<String>) {
-        let w = w.into();
-        if !self.warnings.contains(&w) {
-            self.warnings.push(w);
-        }
+        self.warnings.add(w.into());
     }
 
     fn children(&self, id: &str) -> Vec<String> {
@@ -438,7 +537,7 @@ impl<'a> Mapper<'a> {
         let mut pending: Vec<(String, usize)> = self.children(main).into_iter().map(|id| (id, 1)).collect();
         let mut complete = true;
         while let Some((id, depth)) = pending.pop() {
-            if depth > MAX_DEPTH || visited.len() >= MAX_NODES {
+            if depth > MAX_DEPTH || visited.len() >= self.max_nodes {
                 complete = false;
                 break;
             }
@@ -463,11 +562,16 @@ impl<'a> Mapper<'a> {
         }
         let scope = Rc::new(OverrideScope { current, aliases });
         let cost = scope.current.len() + scope.aliases.len();
-        if cost <= MAX_NODES.saturating_sub(self.override_scope_entries) {
+        if cost <= self.max_nodes.saturating_sub(self.override_scope_entries) {
             self.override_scope_entries += cost;
             self.override_scopes.insert(main.to_string(), Rc::clone(&scope));
         }
         scope
+    }
+
+    /// How many layers may be produced now: the cap, less what is kept for the visible pages.
+    fn budget(&self) -> usize {
+        self.max_nodes.saturating_sub(self.reserved)
     }
 
     /// The DOCUMENT with its pages.
@@ -477,9 +581,8 @@ impl<'a> Mapper<'a> {
             Some(d) => self.children(d),
             None => self.nodes.iter().filter(|(_, n)| n.get("type").and_then(Kv::str) == Some("CANVAS")).map(|(id, _)| id.clone()).collect(),
         };
-        let mut out = Vec::new();
         let mut internal = Vec::new();
-        let mut visible_pages = Vec::new();
+        let mut visible = Vec::new();
         for p in pages {
             let Some(&n) = self.nodes.get(&p) else { continue };
             if n.get("type").and_then(Kv::str) != Some("CANVAS") {
@@ -489,21 +592,30 @@ impl<'a> Mapper<'a> {
             // The hidden page that holds styles, variables and library copies.
             if n.get("internalOnly").and_then(Kv::bool) == Some(true) {
                 internal.push((p, n));
-                continue;
+            } else {
+                visible.push((p, n));
             }
-            visible_pages.push(p.clone());
-            out.push(self.page(&p, n));
         }
+        // The library copies the pages use come first: in a file past the layer cap, the pages'
+        // last layers are skipped rather than the mains every instance of them needs (#981).
+        let visible_pages: Vec<String> = visible.iter().map(|(p, _)| p.clone()).collect();
         let required_mains = self.referenced_component_mains(&visible_pages);
+        // The pages and their top-level layers, up to half the cap, stay for the pages.
+        let top: usize = visible_pages.iter().map(|p| 1 + self.children(p).len()).sum();
+        self.reserved = top.min(self.max_nodes / 2);
         for (id, canvas) in internal {
             if let Some(context) = self.library_context(&id, canvas, &required_mains) {
                 self.library_contexts.push(context);
             }
         }
+        self.reserved = 0;
+        let out: Vec<Value> = visible.into_iter().map(|(p, n)| self.page(&p, n)).collect();
         if out.is_empty() {
             self.warn("the file has no pages");
         }
-        json!({"id": doc_id.unwrap_or_else(|| "0:0".into()), "type": "DOCUMENT", "children": out})
+        let mut doc = json!({"id": doc_id.unwrap_or_else(|| "0:0".into()), "type": "DOCUMENT"});
+        doc["children"] = Value::Array(out);
+        doc
     }
 
     /// The ids of the components the visible pages use, directly or through the components they
@@ -565,7 +677,7 @@ impl<'a> Mapper<'a> {
             targets.extend(data.and_then(|d| d.get("symbolID")).and_then(guid));
             for assignment in row.get("componentPropAssignments").map(Kv::list).unwrap_or_default() {
                 if assignment.get("defID").is_some_and(|def| self.is_instance_swap(def).is_some()) {
-                    targets.extend(assignment.get("value").and_then(|v| v.get("guidValue")).and_then(guid));
+                    targets.extend(assigned(assignment).and_then(prop_guid));
                 }
             }
             let overrides = data.and_then(|d| d.get("symbolOverrides")).map(Kv::list).unwrap_or_default();
@@ -576,7 +688,31 @@ impl<'a> Mapper<'a> {
     }
 
     fn is_instance_swap(&self, def: &Kv) -> Option<()> {
-        matches!(self.prop_defs.get(&guid(def)?), Some((_, "INSTANCE_SWAP"))).then_some(())
+        matches!(self.prop_def(&guid(def)?), Some((_, "INSTANCE_SWAP"))).then_some(())
+    }
+
+    /// The definition a copy of it was made from, followed to the original: the values an instance
+    /// sets are kept under it, since an assignment and the layers that read it may name different
+    /// copies of one definition.
+    fn prop_root(&self, def: &str) -> String {
+        let mut def = def;
+        for _ in 0..=MAX_DEPTH {
+            let Some(parent) = self.prop_parents.get(def) else { break };
+            def = parent;
+        }
+        def.to_string()
+    }
+
+    /// The definition `def` names: its own, or the set's for a variant's copy of it.
+    fn prop_def(&self, def: &str) -> Option<&(String, &'a str)> {
+        let mut def = def;
+        for _ in 0..=MAX_DEPTH {
+            if let Some(found) = self.prop_defs.get(def) {
+                return Some(found);
+            }
+            def = self.prop_parents.get(def)?;
+        }
+        None
     }
 
     /// The branches of the internal canvas `id` that hold the `required_mains` (with the frames
@@ -717,8 +853,9 @@ impl<'a> Mapper<'a> {
             self.warn(format!("layers nested deeper than {MAX_DEPTH} levels were skipped"));
             return None;
         }
-        if self.count >= MAX_NODES {
-            self.warn(format!("the file has more than {MAX_NODES} layers; the rest were skipped"));
+        if self.count >= self.budget() {
+            let max = self.max_nodes;
+            self.warn(format!("the file has more than {max} layers; the rest were skipped"));
             return None;
         }
         let base = *self.nodes.get(id)?;
@@ -750,31 +887,57 @@ impl<'a> Mapper<'a> {
             _ => id.to_string(),
         };
         let own = view.str("type").unwrap_or("");
-        let stand = stand_in(own);
+        let connector_snapshot = own == "CONNECTOR" && self.connector_snapshot_supported(&view);
+        // Only a connector with a saved label needs the frame wrapper; an unlabelled one stays a single vector.
+        let connector_terminal =
+            connector_snapshot && (!connector_has_saved_label(&view) || depth >= MAX_DEPTH || self.count.saturating_add(1) >= self.budget());
+        // A supported connector snapshot has its own note below instead of the generic stand-in one.
+        let stand = stand_in(own).filter(|_| !connector_snapshot);
         let ty = match own {
             "ROUNDED_RECTANGLE" => "RECTANGLE",
             "SYMBOL" => "COMPONENT",
             "FRAME" if view.flag("isStateGroup") == Some(true) => "COMPONENT_SET",
             "FRAME" if view.flag("resizeToFit") == Some(true) => "GROUP",
             "VARIABLE" | "VARIABLE_SET" => return None,
+            "CONNECTOR" if connector_snapshot && connector_terminal => "VECTOR",
+            "CONNECTOR" if connector_snapshot => "FRAME",
             t => stand.map_or(t, |s| s.0),
         };
-        if let Some((_, what)) = stand {
+        if let Some((_, what)) = stand.filter(|_| own != "TEXT_PATH") {
             self.warn(format!("{} layers import as {what}", own.to_ascii_lowercase().replace('_', " ")));
         }
+        if connector_snapshot {
+            self.warn("connector layers import as static frame/vector snapshots with labels when present; live endpoint bindings are not retained");
+        }
         self.count += 1;
+        if own == "SYMBOL" && inst.is_none() {
+            self.mapped_mains.insert(id.to_string());
+        }
         let mut o = Obj::new();
         o.insert("id".into(), json!(rest_id));
         // Private provenance for the .fig importer; ordinary REST import ignores it.
         o.insert(
             crate::rest::FIG_SOURCE_FIELD.into(),
-            json!({"origin": id, "expanded": inst.is_some(), "wireFrame": own == "FRAME", "wireInstance": own == "INSTANCE"}),
+            json!({
+                "origin": id,
+                "expanded": inst.is_some(),
+                "wireFrame": own == "FRAME",
+                "wireInstance": own == "INSTANCE",
+                "slotContent": inst.is_some_and(|i| i.slot_content),
+                // A size the instance gives this layer itself (kept when the instance relays out).
+                "sizeOverride": entries.iter().any(|e| e.entry == Entry::Override && e.row.get("size").is_some()),
+            }),
         );
         o.insert("type".into(), json!(ty));
         copy_str(&mut o, &view, "name", "name");
         self.common(&mut o, &view, ty, space, parent);
         match ty {
-            "TEXT" => self.text(&mut o, &view),
+            "TEXT" => {
+                self.text(&mut o, &view);
+                if own == "TEXT_PATH" {
+                    self.text_path(&mut o, &view);
+                }
+            }
             "VECTOR" | "STAR" | "REGULAR_POLYGON" => self.geometry(&mut o, &view),
             "ELLIPSE" => {
                 if let Some(a) = view.get("arcData") {
@@ -790,23 +953,63 @@ impl<'a> Mapper<'a> {
             }
             _ => {}
         }
-        if own == "CONNECTOR" {
+        if own == "CONNECTOR" && connector_snapshot {
+            if connector_terminal {
+                self.connector_snapshot_flatten(&mut o, &view, &rest_id, space);
+            } else {
+                o.insert("fills".into(), json!([]));
+                o.insert("strokes".into(), json!([]));
+                for key in ["styles", "strokeWeight", "strokeAlign", "strokeJoin", "strokeDashes", "strokeCap"] {
+                    o.remove(key);
+                }
+                o.insert("clipsContent".into(), json!(false));
+            }
+        } else if own == "CONNECTOR" {
             self.connector(&mut o, &view, space);
         }
         if ty == "COMPONENT" || ty == "COMPONENT_SET" {
             self.component(&mut o, &view, &rest_id);
         }
         self.prop_refs(&mut o, &view, inst);
+        let slot_content = if own == "FRAME" {
+            prop_ref(&view, "SLOT_CONTENT_ID").and_then(|def| inst.and_then(|i| i.slot_contents.get(&self.prop_root(&def)).cloned()))
+        } else {
+            None
+        };
+        if slot_content.is_some()
+            && let Some(source) = o.get_mut(crate::rest::FIG_SOURCE_FIELD).and_then(Value::as_object_mut)
+        {
+            source.insert("slotOverride".into(), json!(true));
+        }
         let child_space = if matches!(ty, "GROUP" | "BOOLEAN_OPERATION") { space * view.transform().unwrap_or_default() } else { Affine::IDENTITY };
-        let mut kids = Vec::new();
-        if ty == "INSTANCE" {
+        let mut kids = if connector_snapshot && !connector_terminal { self.connector_snapshot_children(&view, &rest_id) } else { Vec::new() };
+        if connector_terminal {
+            // The saved vector is flattened into the connector node when no child slot remains.
+        } else if ty == "INSTANCE" {
             if let Some((sub, sym)) = self.instance(&mut o, &view, id, inst, &rest_id) {
                 let main = self.nodes.get(&sym).map(|m| View::of(m));
-                let fit = Fit::frame(main.and_then(|m| m.size()), view.size());
+                let fit = Fit::frame(main.as_ref().and_then(View::size), view.size());
+                // An instance that records no auto layout of its own has its main's.
+                let view = match main {
+                    Some(m) if view.get("stackMode").is_none() && m.get("stackMode").is_some() => {
+                        let layered = View { fitted: view.fitted, ..m.with(view.layers.iter().copied()) };
+                        self.auto_layout(&mut o, &layered);
+                        layered
+                    }
+                    _ => view.clone(),
+                };
                 for c in self.children(&sym) {
                     // The main's branch can live outside the cached context being mapped.
                     kids.extend(self.layer_filtered(&c, Some(&sub), child_space, Some(&view), fit, depth + 1, None));
                 }
+            }
+        } else if let Some(content) = slot_content {
+            let mut content_inst = inst.cloned();
+            if let Some(content_inst) = &mut content_inst {
+                content_inst.slot_content = true;
+            }
+            for c in self.children(&content) {
+                kids.extend(self.layer_filtered(&c, content_inst.as_ref(), child_space, Some(&view), None, depth + 1, included));
             }
         } else {
             // Inside an instance a layer's children are its main's: they follow it from the main's
@@ -835,7 +1038,7 @@ impl<'a> Mapper<'a> {
     fn shape_with_text(&mut self, o: &mut Obj, v: &View<'a>, own: &str, rest_id: &str) -> Option<Value> {
         let shape = v.str("shapeWithTextType").unwrap_or("SQUARE");
         let outlined = !v.list("fillGeometry").is_empty() || !v.list("strokeGeometry").is_empty();
-        if own != "SHAPE_WITH_TEXT" || matches!(shape, "SQUARE" | "ROUNDED_RECTANGLE") || !outlined || self.count >= MAX_NODES {
+        if own != "SHAPE_WITH_TEXT" || matches!(shape, "SQUARE" | "ROUNDED_RECTANGLE") || !outlined || self.count >= self.budget() {
             return None;
         }
         let mut s = Obj::new();
@@ -867,7 +1070,7 @@ impl<'a> Mapper<'a> {
     /// layer filling it, inset a little; centred unless it's a note.
     fn inner_text(&mut self, o: &Obj, v: &View<'a>, rest_id: &str, note: bool) -> Option<Value> {
         let chars = own_text(v)?;
-        if self.count >= MAX_NODES {
+        if self.count >= self.budget() {
             return None;
         }
         self.count += 1;
@@ -898,10 +1101,10 @@ impl<'a> Mapper<'a> {
                 o.insert(to.into(), json!(cap_name(c)));
             }
         }
-        if own_text(v).is_some() {
+        if connector_has_saved_label(v) {
             self.warn("connector labels were skipped");
         }
-        if ["vectorNetwork", "fillGeometry", "strokeGeometry"].iter().any(|k| o.contains_key(*k)) {
+        if ["vectorNetwork", "vectorNetworkRef", "fillGeometry", "strokeGeometry"].iter().any(|k| o.contains_key(*k)) {
             return;
         }
         let parent = v.get("parentIndex").and_then(|p| p.get("guid")).and_then(guid);
@@ -938,6 +1141,207 @@ impl<'a> Mapper<'a> {
         );
     }
 
+    fn connector_snapshot_supported(&self, v: &View<'a>) -> bool {
+        if v.str("connectorType") != Some("MANUAL")
+            || v.get("connectorVersion").and_then(Kv::f64) != Some(1.0)
+            || v.str("connectorLineStyle") != Some("STRAIGHT")
+            || v.get("derivedImmutableFrameData").and_then(|data| data.get("version")).and_then(Kv::f64) != Some(1.0)
+        {
+            return false;
+        }
+        let Some(line) = connector_record(v, "derivedImmutableFrameData", 0) else { return false };
+        if line.get("transform").and_then(matrix).is_none() || valid_size(line.get("size")).is_none() {
+            return false;
+        }
+        let geometry = ["fillGeometry", "strokeGeometry"].iter().any(|key| {
+            line.get(key).map(Kv::list).unwrap_or_default().iter().any(|path| {
+                num(path, "commandsBlob")
+                    .and_then(|index| self.blobs.get(index as usize))
+                    .and_then(|blob| svg_path(blob))
+                    .is_some_and(|data| !data.is_empty())
+            })
+        });
+        let network = line
+            .get("vectorData")
+            .and_then(|data| num(data, "vectorNetworkBlob"))
+            .and_then(|index| self.blobs.get(index as usize))
+            .and_then(|blob| network::decode(blob))
+            .is_some_and(|network| !network.segments.is_empty());
+        (geometry || network) && connector_record(v, "nodeGenerationData", 0).is_some()
+    }
+
+    fn connector_snapshot_flatten(&mut self, out: &mut Obj, v: &View<'a>, rest_id: &str, space: Affine) {
+        let parent = space * v.get("transform").and_then(matrix).unwrap_or_default();
+        let Some(vector) = self.connector_snapshot_vector(v, rest_id, parent, false) else {
+            self.warn("connector snapshot vector data is missing; connector was left empty");
+            return;
+        };
+        for key in [
+            "size",
+            "relativeTransform",
+            "fills",
+            "strokes",
+            "strokeWeight",
+            "strokeAlign",
+            "strokeJoin",
+            "strokeDashes",
+            "strokeCap",
+            "strokeCapStart",
+            "strokeCapEnd",
+            "styles",
+            "fillGeometry",
+            "strokeGeometry",
+            "vectorNetwork",
+        ] {
+            if let Some(value) = vector.get(key) {
+                out.insert(key.to_string(), value.clone());
+            }
+        }
+        if vector.get("visible").and_then(Value::as_bool) == Some(false) {
+            out.insert("visible".into(), json!(false));
+        }
+        if let Some(line_opacity) = vector.get("opacity").and_then(Value::as_f64) {
+            let root_opacity = out.get("opacity").and_then(Value::as_f64).unwrap_or(1.0);
+            out.insert("opacity".into(), json!(root_opacity * line_opacity));
+        }
+        if connector_has_saved_label(v) {
+            let reason = if self.count >= self.budget() { "node budget" } else { "depth limit" };
+            self.warn(format!("connector label was skipped: {reason} prevents nested snapshot children"));
+        }
+    }
+
+    /// Build the saved vector child or flattened terminal connector from the same child-only view.
+    fn connector_snapshot_vector(&mut self, v: &View<'a>, rest_id: &str, space: Affine, nested: bool) -> Option<Obj> {
+        let (Some(line), Some(line_style)) = (connector_record(v, "derivedImmutableFrameData", 0), connector_record(v, "nodeGenerationData", 0))
+        else {
+            return None;
+        };
+        let mut vector = Obj::new();
+        vector.insert("id".into(), json!(if nested { format!("{rest_id};vector") } else { rest_id.to_string() }));
+        vector.insert("type".into(), json!("VECTOR"));
+        if let Some(name) = v.str("name") {
+            vector.insert("name".into(), json!(if nested { format!("{name} vector") } else { name.to_string() }));
+        }
+        let line_view = View::of(line).with([line_style]);
+        self.common(&mut vector, &line_view, "VECTOR", space, None);
+        self.geometry(&mut vector, &line_view);
+        for (from, to) in [("connectorStartCap", "strokeCapStart"), ("connectorEndCap", "strokeCapEnd")] {
+            if let Some(cap) = v.str(from) {
+                vector.entry(to).or_insert_with(|| json!(cap_name(cap)));
+            }
+        }
+        Some(vector)
+    }
+
+    /// Snapshot the straight, manual connector contract carried by its generated children.
+    fn connector_snapshot_children(&mut self, v: &View<'a>, rest_id: &str) -> Vec<Value> {
+        if self.count >= self.budget() {
+            self.warn(format!("the file has more than {} layers; connector snapshot children were skipped", self.max_nodes));
+            return Vec::new();
+        }
+        let Some(vector) = self.connector_snapshot_vector(v, rest_id, Affine::IDENTITY, true) else {
+            self.warn("connector snapshot vector data is missing; connector was left empty");
+            return Vec::new();
+        };
+        let mut children = Vec::new();
+        children.push(Value::Object(vector));
+        self.count += 1;
+
+        let Some(text_frame) = connector_record(v, "derivedImmutableFrameData", 1) else {
+            if connector_has_saved_label(v) {
+                self.warn("connector label was skipped: derived text bounds are missing");
+            }
+            return children;
+        };
+        let Some(background) = connector_record(v, "derivedImmutableFrameData", 2) else {
+            if connector_has_saved_label(v) || valid_size(text_frame.get("size")).is_some_and(|(w, h)| w > 0.0 && h > 0.0) {
+                self.warn("connector label was skipped: derived background bounds are missing");
+            }
+            return children;
+        };
+        let Some(text_style) = connector_record(v, "nodeGenerationData", 1) else {
+            if valid_size(text_frame.get("size")).is_some_and(|(w, h)| w > 0.0 && h > 0.0) {
+                self.warn("connector label was skipped: text style data is missing");
+            }
+            return children;
+        };
+        let text_view = View::of(text_frame).with([text_style]);
+        let Some(characters) = text_view.get("textData").and_then(|d| d.get("characters")).and_then(Kv::str).filter(|s| !s.trim().is_empty()) else {
+            return children;
+        };
+        let Some(text_transform) = text_frame.get("transform").and_then(matrix) else {
+            self.warn("connector label was skipped: text transform is invalid");
+            return children;
+        };
+        let Some(background_transform) = background.get("transform").and_then(matrix) else {
+            self.warn("connector label was skipped: background transform is invalid");
+            return children;
+        };
+        let Some(text_size) = valid_size(text_frame.get("size")) else {
+            self.warn("connector label was skipped: text bounds are invalid");
+            return children;
+        };
+        let Some(background_size) = valid_size(background.get("size")) else {
+            self.warn("connector label was skipped: background bounds are invalid");
+            return children;
+        };
+        let composed_text_transform = background_transform * text_transform;
+        if !composed_text_transform.as_coeffs().iter().all(|coefficient| coefficient.is_finite()) {
+            self.warn("connector label was skipped: composed text transform is invalid");
+            return children;
+        }
+
+        let Some(background_style) = connector_record(v, "nodeGenerationData", 2) else {
+            self.warn("connector label background was skipped: style data is missing");
+            self.add_connector_text(&mut children, rest_id, characters, text_size, composed_text_transform, &text_view);
+            return children;
+        };
+        let background_view = View::of(background).with([background_style]);
+        if !background_view.list("fillPaints").is_empty() {
+            if self.count >= self.budget() {
+                self.warn(format!("the file has more than {} layers; connector label background was skipped", self.max_nodes));
+            } else {
+                let mut rect = Obj::new();
+                rect.insert("id".into(), json!(format!("{rest_id};label-background")));
+                rect.insert("type".into(), json!("RECTANGLE"));
+                rect.insert("name".into(), json!("connector label background"));
+                self.common(&mut rect, &background_view, "RECTANGLE", Affine::IDENTITY, None);
+                rect.insert("size".into(), json!({"x": background_size.0, "y": background_size.1}));
+                rect.insert("relativeTransform".into(), rows(background_transform));
+                rect.insert("clipsContent".into(), json!(false));
+                children.push(Value::Object(rect));
+                self.count += 1;
+            }
+        }
+        self.add_connector_text(&mut children, rest_id, characters, text_size, composed_text_transform, &text_view);
+        children
+    }
+
+    fn add_connector_text(
+        &mut self,
+        children: &mut Vec<Value>,
+        rest_id: &str,
+        characters: &str,
+        size: (f64, f64),
+        transform: Affine,
+        view: &View<'a>,
+    ) {
+        if self.count >= self.budget() {
+            self.warn(format!("the file has more than {} layers; connector label was skipped", self.max_nodes));
+            return;
+        }
+        let mut text = Obj::new();
+        text.insert("id".into(), json!(format!("{rest_id};label-text")));
+        text.insert("type".into(), json!("TEXT"));
+        text.insert("name".into(), json!(characters));
+        text.insert("size".into(), json!({"x": size.0, "y": size.1}));
+        self.common(&mut text, view, "TEXT", Affine::IDENTITY, None);
+        text.insert("relativeTransform".into(), rows(transform));
+        self.text(&mut text, view);
+        children.push(Value::Object(text));
+        self.count += 1;
+    }
+
     /// Fields every layer type shares.
     fn common(&mut self, o: &mut Obj, v: &View<'a>, ty: &str, space: Affine, parent: Option<&View<'a>>) {
         for (from, to) in [("visible", "visible"), ("locked", "locked"), ("mask", "isMask")] {
@@ -964,11 +1368,11 @@ impl<'a> Mapper<'a> {
         let fill_style = self.style(v, "styleIdForFill", "inheritFillStyleID", "fill", &mut styles);
         let fills = own("fillPaints")
             .unwrap_or_else(|| fill_style.map_or_else(|| v.list("fillPaints"), |s| s.get("fillPaints").map(Kv::list).unwrap_or_default()));
-        o.insert("fills".into(), Value::Array(fills.iter().filter_map(paint).collect()));
+        o.insert("fills".into(), Value::Array(fills.iter().filter_map(|p| paint(p, &mut |w| self.warn(w))).collect()));
         let stroke_style = self.style(v, "styleIdForStrokeFill", "inheritFillStyleIDForStroke", "stroke", &mut styles);
         let strokes = own("strokePaints")
             .unwrap_or_else(|| stroke_style.map_or_else(|| v.list("strokePaints"), |s| s.get("fillPaints").map(Kv::list).unwrap_or_default()));
-        o.insert("strokes".into(), Value::Array(strokes.iter().filter_map(paint).collect()));
+        o.insert("strokes".into(), Value::Array(strokes.iter().filter_map(|p| paint(p, &mut |w| self.warn(w))).collect()));
         let effect_style = self.style(v, "styleIdForEffect", "inheritEffectStyleID", "effect", &mut styles);
         let effects = effect_style.map_or_else(|| v.list("effects"), |s| s.get("effects").map(Kv::list).unwrap_or_default());
         if !effects.is_empty() {
@@ -1064,7 +1468,10 @@ impl<'a> Mapper<'a> {
         let main = match v.str("stackPrimaryAlignItems").or_else(|| v.str("stackJustify")) {
             Some("CENTER") => "CENTER",
             Some("MAX") => "MAX",
-            Some("SPACE_BETWEEN" | "SPACE_EVENLY" | "SPACE_AROUND" | "SPACE_EVENLY_CSS") => "SPACE_BETWEEN",
+            Some("SPACE_AROUND") => "SPACE_AROUND",
+            // `SPACE_EVENLY` is the format's older name for equal gaps without edge space.
+            Some("SPACE_EVENLY_CSS") => "SPACE_EVENLY",
+            Some("SPACE_BETWEEN" | "SPACE_EVENLY") => "SPACE_BETWEEN",
             _ => "MIN",
         };
         o.insert("primaryAxisAlignItems".into(), json!(main));
@@ -1076,7 +1483,10 @@ impl<'a> Mapper<'a> {
         };
         o.insert("counterAxisAlignItems".into(), json!(cross));
         let sizing = |k: &str| if v.str(k).is_some_and(|s| s.starts_with("RESIZE_TO_FIT")) { "AUTO" } else { "FIXED" };
-        o.insert("primaryAxisSizingMode".into(), json!(sizing("stackPrimarySizing")));
+        // A flow that records no sizing for its primary axis sizes it by its content: auto layout
+        // did before that axis could be fixed.
+        let primary = if v.get("stackPrimarySizing").is_none() && mode != "GRID" { "AUTO" } else { sizing("stackPrimarySizing") };
+        o.insert("primaryAxisSizingMode".into(), json!(primary));
         o.insert("counterAxisSizingMode".into(), json!(sizing("stackCounterSizing")));
         if let Some(b) = v.flag("bordersTakeSpace") {
             o.insert("strokesIncludedInLayout".into(), json!(b));
@@ -1089,19 +1499,73 @@ impl<'a> Mapper<'a> {
             copy_num(o, v, "gridRowGap", "gridRowGap");
             o.insert("gridColumnCount".into(), json!(tracks(v, "gridColumns").len()));
             o.insert("gridRowCount".into(), json!(tracks(v, "gridRows").len()));
-            let sizes = ["gridColumnsSizing", "gridRowsSizing"]
-                .iter()
-                .flat_map(|k| v.get(k).and_then(|m| m.get("entries")).map(Kv::list).unwrap_or_default());
-            let flexible = sizes.into_iter().all(|e| {
-                let t = e.get("trackSize");
-                ["minSizing", "maxSizing"]
-                    .iter()
-                    .all(|s| t.and_then(|t| t.get(s)).and_then(|s| s.get("type")).and_then(Kv::str).is_none_or(|x| x == "FLEX"))
-            });
-            if !flexible {
-                self.warn("grid tracks of fixed or content size import as equal tracks");
+            let track_data = [("columnTracks", "gridColumns", "gridColumnsSizing"), ("rowTracks", "gridRows", "gridRowsSizing")]
+                .into_iter()
+                .filter_map(|(out_key, order_key, sizing_key)| {
+                    self.map_grid_tracks(v, order_key, sizing_key).map(|mapped| (out_key.to_string(), mapped))
+                })
+                .collect::<Obj>();
+            if !track_data.is_empty() {
+                let source = o.entry(crate::rest::FIG_SOURCE_FIELD).or_insert_with(|| json!({}));
+                if let Some(source) = source.as_object_mut() {
+                    source.insert("gridTracks".into(), Value::Object(track_data));
+                }
             }
         }
+    }
+
+    /// Track sizing maps are keyed by GUID; their order comes from the separate track list.
+    fn map_grid_tracks(&mut self, v: &View<'a>, order_key: &str, sizing_key: &str) -> Option<Value> {
+        let track_entries = v.get(order_key).and_then(|m| m.get("entries")).map(Kv::list).unwrap_or_default();
+        let sizes = v.get(sizing_key).and_then(|m| m.get("entries")).map(Kv::list).unwrap_or_default();
+        if track_entries.len() > MAX_GRID_TRACKS {
+            self.warn("grid track list exceeds 1000 entries; the tracks use the default equal sizing");
+            return None;
+        }
+        if sizes.is_empty() {
+            return None;
+        }
+        if sizes.len() > MAX_GRID_TRACKS {
+            self.warn("grid track sizing list exceeds 1000 entries; the tracks use the default equal sizing");
+            return None;
+        }
+        let ordered = tracks(v, order_key);
+        let ordered_ids: BTreeSet<&str> = ordered.iter().map(String::as_str).collect();
+        let mut size_by_id: BTreeMap<String, Option<&Kv<'a>>> = BTreeMap::new();
+        for entry in sizes {
+            let Some(id) = entry.get("id").and_then(guid) else {
+                self.warn("stale or invalid grid track sizing entries were ignored");
+                continue;
+            };
+            if !ordered_ids.contains(id.as_str()) {
+                self.warn("stale or invalid grid track sizing entries were ignored");
+                continue;
+            }
+            match size_by_id.entry(id) {
+                std::collections::btree_map::Entry::Vacant(slot) => {
+                    slot.insert(Some(entry));
+                }
+                std::collections::btree_map::Entry::Occupied(mut slot) => {
+                    slot.insert(None);
+                    self.warn("duplicate grid track sizing entries use equal tracks");
+                }
+            }
+        }
+        let mut mapped = Vec::with_capacity(ordered.len());
+        for id in ordered {
+            if let Some(Some(entry)) = size_by_id.get(&id) {
+                match grid_track_sizing(entry.get("trackSize")) {
+                    Some(track) => mapped.push(track),
+                    None => {
+                        self.warn("grid track sizing is unsupported or malformed; affected tracks use equal sizing");
+                        mapped.push(json!({"sizing": "fill", "value": 1.0}));
+                    }
+                }
+            } else {
+                mapped.push(json!({"sizing": "fill", "value": 1.0}));
+            }
+        }
+        Some(Value::Array(mapped))
     }
 
     fn text(&mut self, o: &mut Obj, v: &View<'a>) {
@@ -1119,6 +1583,9 @@ impl<'a> Mapper<'a> {
         if let Some(decoration @ ("NONE" | "UNDERLINE" | "STRIKETHROUGH")) = v.str("textDecoration") {
             style.insert("textDecoration".into(), json!(decoration));
         }
+        if let Some(skip_ink) = v.flag("textDecorationSkipInk") {
+            style.insert("textDecorationSkipInk".into(), json!(skip_ink));
+        }
         if let Some(case @ ("ORIGINAL" | "UPPER" | "LOWER" | "TITLE" | "SMALL_CAPS" | "SMALL_CAPS_FORCED")) = v.str("textCase") {
             style.insert("textCase".into(), json!(case));
         }
@@ -1129,6 +1596,7 @@ impl<'a> Mapper<'a> {
         for k in ["paragraphSpacing", "paragraphIndent"] {
             copy_num(&mut style, v, k, k);
         }
+        insert_text_options(&mut style, v);
         if let Some(n) = v.num("maxLines").filter(|n| *n >= 1.0) {
             style.insert("maxLines".into(), json!(n));
         }
@@ -1138,11 +1606,9 @@ impl<'a> Mapper<'a> {
         }
         o.insert("style".into(), Value::Object(style));
         let Some(td) = td else { return };
-        char_styles(o, td, size);
-        let lines: Vec<&str> = td
-            .get("lines")
-            .map(Kv::list)
-            .unwrap_or_default()
+        char_styles(o, td, size, &mut |w| self.warn(w));
+        let raw = td.get("lines").map(Kv::list).unwrap_or_default();
+        let lines: Vec<&str> = raw
             .iter()
             .map(|l| match l.get("lineType").and_then(Kv::str) {
                 Some("ORDERED_LIST") => "ORDERED",
@@ -1153,6 +1619,98 @@ impl<'a> Mapper<'a> {
         if lines.iter().any(|l| *l != "NONE") {
             o.insert("lineTypes".into(), json!(lines));
         }
+        // Where a numbered list starts counting, less one (not a REST field).
+        let starts: Vec<u32> =
+            raw.iter().map(|l| num(l, "listStartOffset").filter(|n| n.is_finite()).map_or(0, |n| n.clamp(0.0, f64::from(u32::MAX)) as u32)).collect();
+        if starts.iter().any(|n| *n > 0) {
+            o.insert("listStartOffsets".into(), json!(starts));
+        }
+    }
+
+    /// Carry supported text-path data through the private .fig REST ingress only.
+    fn text_path(&mut self, o: &mut Obj, v: &View<'a>) {
+        let fail = |this: &mut Self, reason: &str| {
+            this.warn(format!("text path {reason}; text imports off its path"));
+        };
+        let Some(start) = v.get("textPathStart") else {
+            fail(self, "has no start data");
+            return;
+        };
+        let (Some(t), Some(forward)) = (num(start, "tValue"), start.get("forward").and_then(Kv::bool)) else {
+            fail(self, "has invalid start data");
+            return;
+        };
+        let Some(vd) = v.get("vectorData") else {
+            fail(self, "has no vector data");
+            return;
+        };
+        let Some(blob) = num(vd, "vectorNetworkBlob")
+            .filter(|i| i.is_finite() && *i >= 0.0 && i.fract() == 0.0)
+            .and_then(|i| usize::try_from(i as u64).ok())
+            .and_then(|i| self.blobs.get(i))
+            .copied()
+        else {
+            fail(self, "has no vector network");
+            return;
+        };
+        let Some(net) = network::decode(blob) else {
+            fail(self, "has damaged vector data");
+            return;
+        };
+        let Some(norm) = vd.get("normalizedSize") else {
+            fail(self, "has invalid normalized size");
+            return;
+        };
+        let Some(size) = v.get("size") else {
+            fail(self, "has invalid dimensions");
+            return;
+        };
+        let (Some(nx), Some(ny), Some(w), Some(h)) = (num(norm, "x"), num(norm, "y"), num(size, "x"), num(size, "y")) else {
+            fail(self, "has invalid dimensions");
+            return;
+        };
+        let axis_scale = |size: f64, normalized: f64, values: &[f64]| -> Option<f64> {
+            if !size.is_finite() || size < 0.0 || !normalized.is_finite() || normalized < 0.0 {
+                return None;
+            }
+            if normalized > 1e-9 {
+                if size <= 0.0 {
+                    return None;
+                }
+                return Some(size / normalized);
+            }
+            (size == 0.0 && values.iter().all(|v| *v == 0.0)).then_some(1.0)
+        };
+        let xs: Vec<f64> = net.vertices.iter().map(|p| p.x).chain(net.segments.iter().flat_map(|s| [s.ta.0, s.tb.0])).collect();
+        let ys: Vec<f64> = net.vertices.iter().map(|p| p.y).chain(net.segments.iter().flat_map(|s| [s.ta.1, s.tb.1])).collect();
+        let sx = axis_scale(w, nx, &xs);
+        let sy = axis_scale(h, ny, &ys);
+        let (Some(sx), Some(sy)) = (sx, sy) else {
+            fail(self, "has invalid path scale");
+            return;
+        };
+        if v.str("textAlignVertical").is_some_and(|x| x != "TOP") {
+            fail(self, "uses unsupported vertical placement");
+            return;
+        }
+        if v.get("textData").and_then(|td| td.get("characters")).and_then(Kv::str).is_some_and(|s| s.chars().any(|c| matches!(c, '\n' | '\r'))) {
+            fail(self, "contains multiple lines");
+            return;
+        }
+        let path = match super::text_path::from_network(&net, sx, sy, t, forward) {
+            Ok(path) => path,
+            Err(reason) => {
+                fail(self, reason);
+                return;
+            }
+        };
+        let has_decoration = |style: &Value| style.get("textDecoration").and_then(Value::as_str).is_some_and(|x| x != "NONE");
+        let decorated = o.get("style").is_some_and(has_decoration)
+            || o.get("styleOverrideTable").and_then(Value::as_object).into_iter().flat_map(|styles| styles.values()).any(has_decoration);
+        if decorated {
+            self.warn("text path underline or strikethrough decoration is not rendered");
+        }
+        o.insert("_figTextPath".into(), json!({"d": path.d, "start": path.start, "flip": path.flip}));
     }
 
     /// `fillGeometry` / `strokeGeometry` as SVG path data, and star/polygon parameters.
@@ -1191,13 +1749,31 @@ impl<'a> Mapper<'a> {
     /// False when there's none or it's damaged (the outlines stand in).
     fn network(&mut self, o: &mut Obj, v: &View<'a>) -> bool {
         let Some(vd) = v.get("vectorData") else { return false };
-        let Some(blob) = num(vd, "vectorNetworkBlob").and_then(|i| self.blobs.get(i as usize)).copied() else { return false };
-        let Some((net, styled_segments)) = network::decode_styled(blob) else {
+        let Some(blob_id) = num(vd, "vectorNetworkBlob").map(|i| i as usize) else { return false };
+        let Some(blob) = self.blobs.get(blob_id).copied() else { return false };
+        let Some(net) = network::decode(blob) else {
             self.warn("damaged vector networks import as outlines");
             return false;
         };
-        if styled_segments > 0 {
-            self.warn("stroke styles of single vector network segments were left out");
+        let styles: BTreeMap<u64, &Kv> =
+            vd.get("styleOverrideTable").map(Kv::list).unwrap_or_default().iter().filter_map(|s| Some((num(s, "styleID")? as u64, s))).collect();
+        let mut has_uninterpreted = false;
+        let mut has_missing = false;
+        for segment in &net.segments {
+            if segment.style == 0 {
+                continue;
+            }
+            if styles.contains_key(&u64::from(segment.style)) {
+                has_uninterpreted = true;
+            } else {
+                has_missing = true;
+            }
+        }
+        if has_uninterpreted {
+            self.warn("style settings of some vector segments aren't supported; those segments use the layer's stroke");
+        }
+        if has_missing {
+            self.warn("some vector segments refer to style settings missing from the file; they use the layer's stroke");
         }
         // An open path shows its fill, which regions can't hold: the outline keeps the look.
         let fills_shown =
@@ -1205,8 +1781,6 @@ impl<'a> Mapper<'a> {
         if net.segments.is_empty() || (net.regions.is_empty() && fills_shown && o.contains_key("fillGeometry")) {
             return false;
         }
-        let styles: BTreeMap<u64, &Kv> =
-            vd.get("styleOverrideTable").map(Kv::list).unwrap_or_default().iter().filter_map(|s| Some((num(s, "styleID")? as u64, s))).collect();
         let style = |id: u32| styles.get(&u64::from(id)).copied().filter(|_| id != 0);
         let scale = |k: &str| {
             let size = v.size().map(|s| if k == "x" { s.0 } else { s.1 });
@@ -1228,6 +1802,9 @@ impl<'a> Mapper<'a> {
                     Some("ANGLE_AND_LENGTH") => out["mirror"] = json!("angleAndLength"),
                     Some("NONE") => out["mirror"] = json!("none"),
                     _ => {}
+                }
+                if let Some(join @ ("MITER" | "BEVEL" | "ROUND")) = st.and_then(|s| s.get("strokeJoin")).and_then(Kv::str) {
+                    out["join"] = json!(join.to_ascii_lowercase());
                 }
                 out
             })
@@ -1256,7 +1833,7 @@ impl<'a> Mapper<'a> {
                                         return region;
                                     }
                                     region_paint_elements += paint_cost;
-                                    let paints: Vec<Value> = source_paints.iter().filter_map(paint).collect();
+                                    let paints: Vec<Value> = source_paints.iter().filter_map(|p| paint(p, &mut |w| self.warn(w))).collect();
                                     if paints.len() != source_paints.len() {
                                         self.warn("invalid vector region paints were skipped");
                                     }
@@ -1278,9 +1855,21 @@ impl<'a> Mapper<'a> {
                 region
             })
             .collect();
-        let join = v.str("strokeJoin");
-        if net.vertices.iter().any(|p| style(p.style).and_then(|s| s.get("strokeJoin")).and_then(Kv::str).is_some_and(|j| Some(j) != join)) {
-            self.warn("points with their own stroke join use the layer's");
+        // An absent layer join is the source default.
+        let layer_join = v.str("strokeJoin").unwrap_or("MITER");
+        let point_join = |p: &network::Vertex| style(p.style).and_then(|s| s.get("strokeJoin"));
+        let known = |j: &str| matches!(j, "MITER" | "BEVEL" | "ROUND");
+        let unresolved_style = net.vertices.iter().any(|p| p.style != 0 && style(p.style).is_none());
+        let unknown_join = net.vertices.iter().any(|p| point_join(p).is_some_and(|j| !j.str().is_some_and(known)));
+        let unsupported_join = net.vertices.iter().any(|p| point_join(p).and_then(Kv::str).is_some_and(|j| known(j) && j != layer_join));
+        if unresolved_style {
+            self.warn("some vector points refer to point settings missing from the file; they use the layer's joins and plain corners");
+        }
+        if unknown_join {
+            self.warn("vector points with unknown stroke joins use the layer join");
+        }
+        if unsupported_join && (o.contains_key("strokeDashes") || o.contains_key("strokeWidthProfile")) {
+            self.warn("point stroke joins were preserved; dashed or variable-width strokes render with the layer join");
         }
         // The stroke starts at the first end point and stops at the last (as the editor draws it).
         let mut degree = vec![0usize; net.vertices.len()];
@@ -1300,7 +1889,25 @@ impl<'a> Mapper<'a> {
             o.insert("strokeCapStart".into(), json!(cap_name(first.unwrap_or(node))));
             o.insert("strokeCapEnd".into(), json!(cap_name(last.unwrap_or(node))));
         }
-        o.insert("vectorNetwork".into(), json!({"vertices": vertices, "segments": segments, "regions": regions}));
+        // Every instance of a main shows the same network: it is written once and shared.
+        let mut entry = json!({});
+        entry["vertices"] = Value::Array(vertices);
+        entry["segments"] = Value::Array(segments);
+        entry["regions"] = Value::Array(regions.clone());
+        if regions.iter().any(|r| r.get("_figRegionFills").is_some()) {
+            o.insert("vectorNetwork".into(), entry);
+            return true;
+        }
+        let key = (blob_id, sx.to_bits(), sy.to_bits(), std::ptr::from_ref(vd) as usize);
+        let id = match self.network_ids.get(&key) {
+            Some(id) => *id,
+            None => {
+                self.networks.push(crate::rest::network(&entry));
+                self.network_ids.insert(key, self.networks.len() - 1);
+                self.networks.len() - 1
+            }
+        };
+        o.insert("vectorNetworkRef".into(), json!(id));
         true
     }
 
@@ -1317,10 +1924,20 @@ impl<'a> Mapper<'a> {
                 "BOOL" => json!({"type": "BOOLEAN", "defaultValue": init.and_then(|i| i.get("boolValue")).and_then(Kv::bool).unwrap_or(true)}),
                 "TEXT" => json!({"type": "TEXT", "defaultValue": init.and_then(prop_text).unwrap_or("")}),
                 "INSTANCE_SWAP" => match init.and_then(|i| i.get("guidValue")).and_then(guid) {
-                    Some(g) => json!({"type": "INSTANCE_SWAP", "defaultValue": g}),
+                    Some(g) => {
+                        if self.nodes.contains_key(&g) {
+                            self.referenced_mains.insert(g.clone());
+                        }
+                        json!({"type": "INSTANCE_SWAP", "defaultValue": g})
+                    }
                     None => continue,
                 },
                 "VARIANT" => json!({"type": "VARIANT"}),
+                "SLOT" => {
+                    self.warn_non_default_slot_config(d);
+                    self.warn_dropped_slot_preferred_values(d);
+                    json!({"type": "SLOT"})
+                }
                 _ => {
                     self.warn(format!("{} component properties are not supported and were skipped", ty.to_ascii_lowercase()));
                     continue;
@@ -1337,6 +1954,34 @@ impl<'a> Mapper<'a> {
         }
     }
 
+    /// Preferred slot values are source component keys, but this mapper has no proven way to map
+    /// those keys to file GUIDs. They are dropped instead of guessing native NodeIds.
+    fn warn_dropped_slot_preferred_values(&mut self, def: &Kv<'a>) {
+        let entries = def.get("preferredValues").and_then(|v| v.get("instanceSwapValues")).map(Kv::list).unwrap_or_default();
+        if !entries.is_empty() {
+            self.warn("preferred slot component keys cannot be resolved to file nodes and were skipped");
+        }
+    }
+
+    fn warn_non_default_slot_config(&mut self, def: &Kv<'a>) {
+        let Some(config) = def.get("slotPropConfig") else { return };
+        let non_default = [
+            ("stretchChildOnInsert", Some(false)),
+            ("displayByDefault", Some(false)),
+            ("minChildren", None),
+            ("maxChildren", None),
+            ("allowPreferredValuesOnly", Some(false)),
+        ]
+        .into_iter()
+        .any(|(field, bool_default)| {
+            let Some(value) = config.get(field) else { return false };
+            if let Some(default) = bool_default { value.bool() != Some(default) } else { value.f64() != Some(0.0) }
+        });
+        if non_default {
+            self.warn("non-default slot settings are not represented and were skipped");
+        }
+    }
+
     /// A layer's component property references, and inside an instance the values they take.
     fn prop_refs(&mut self, o: &mut Obj, v: &View<'a>, inst: Option<&Inst<'a>>) {
         let mut refs = Obj::new();
@@ -1345,6 +1990,7 @@ impl<'a> Mapper<'a> {
                 Some("VISIBLE") => "visible",
                 Some("TEXT_DATA") => "characters",
                 Some("OVERRIDDEN_SYMBOL_ID") => "mainComponent",
+                Some("SLOT_CONTENT_ID") => "slot",
                 _ => continue,
             };
             let Some(def) =
@@ -1352,10 +1998,14 @@ impl<'a> Mapper<'a> {
             else {
                 continue;
             };
-            if let Some((name, _)) = self.prop_defs.get(&def) {
+            // Expanded frames must follow their main frame's source link. A direct slot reference
+            // makes the engine resolve ownership against the instance, where the property is not defined.
+            if !(field == "slot" && inst.is_some())
+                && let Some((name, _)) = self.prop_def(&def)
+            {
                 refs.insert(field.into(), json!(name));
             }
-            let Some(val) = inst.and_then(|i| i.props.get(&def)) else { continue };
+            let Some(val) = inst.and_then(|i| i.props.get(&self.prop_root(&def))) else { continue };
             match field {
                 "visible" => {
                     if let Some(b) = val.get("boolValue").and_then(Kv::bool) {
@@ -1370,9 +2020,9 @@ impl<'a> Mapper<'a> {
                         if own_text(v) != Some(t) {
                             o.remove("characterStyleOverrides");
                             o.remove("styleOverrideTable");
-                            if let Some(tv) = val.get("textValue") {
+                            if let Some(tv) = prop_text_data(val) {
                                 let size = o.get("style").and_then(|s| s.get("fontSize")).and_then(Value::as_f64);
-                                char_styles(o, tv, size);
+                                char_styles(o, tv, size, &mut |w| self.warn(w));
                             }
                         }
                     }
@@ -1392,7 +2042,7 @@ impl<'a> Mapper<'a> {
         // An instance swap property value picks the main.
         if let Some(i) = outer
             && let Some(def) = prop_ref(v, "OVERRIDDEN_SYMBOL_ID")
-            && let Some(g) = i.props.get(&def).and_then(|p| p.get("guidValue")).and_then(guid)
+            && let Some(g) = i.props.get(&self.prop_root(&def)).and_then(|p| prop_guid(p))
         {
             sym = Some(g);
         }
@@ -1404,12 +2054,12 @@ impl<'a> Mapper<'a> {
         let assignments = v.list("componentPropAssignments");
         let mut props = Obj::new();
         for a in assignments {
-            let Some((name, ty)) = a.get("defID").and_then(guid).and_then(|d| self.prop_defs.get(&d).cloned()) else { continue };
-            let val = a.get("value");
+            let Some((name, ty)) = a.get("defID").and_then(guid).and_then(|d| self.prop_def(&d).cloned()) else { continue };
+            let val = assigned(a);
             let p = match ty {
                 "BOOL" => val.and_then(|x| x.get("boolValue")).and_then(Kv::bool).map(|b| json!({"type": "BOOLEAN", "value": b})),
                 "TEXT" => val.and_then(prop_text).map(|t| json!({"type": "TEXT", "value": t})),
-                "INSTANCE_SWAP" => val.and_then(|x| x.get("guidValue")).and_then(guid).map(|g| json!({"type": "INSTANCE_SWAP", "value": g})),
+                "INSTANCE_SWAP" => val.and_then(prop_guid).map(|g| json!({"type": "INSTANCE_SWAP", "value": g})),
                 _ => None,
             };
             if let Some(p) = p {
@@ -1422,6 +2072,9 @@ impl<'a> Mapper<'a> {
         if !self.nodes.contains_key(&sym) {
             self.warn("instances of components that aren't in the file show no layers");
             return None;
+        }
+        if !self.referenced_mains.contains(&sym) {
+            self.referenced_mains.insert(sym.clone());
         }
         if outer.is_some_and(|i| i.symbols.contains(&sym)) {
             return None;
@@ -1484,15 +2137,50 @@ impl<'a> Mapper<'a> {
             rows.sort_by_key(|row| (std::cmp::Reverse(row.source_depth), row.ordinal));
         }
         let mut all_props: BTreeMap<String, &'a Kv<'a>> = outer.map(|i| (*i.props).clone()).unwrap_or_default();
+        let mut slot_contents: BTreeMap<String, String> = outer.map(|i| (*i.slot_contents).clone()).unwrap_or_default();
         for a in assignments {
-            if let (Some(d), Some(val)) = (a.get("defID").and_then(guid), a.get("value")) {
-                all_props.entry(d).or_insert(val);
+            if let (Some(d), Some(val)) = (a.get("defID").and_then(guid), assigned(a)) {
+                all_props.entry(self.prop_root(&d)).or_insert(val);
             }
+            let Some(def) = a.get("defID").and_then(guid) else { continue };
+            if self.prop_def(&def).is_none_or(|(_, ty)| *ty != "SLOT") {
+                continue;
+            }
+            let var_value = a.get("varValue");
+            if var_value.and_then(|v| v.get("dataType")).and_then(Kv::str) != Some("SLOT_CONTENT_ID") {
+                self.warn("malformed slot content assignment was skipped");
+                continue;
+            }
+            let target = var_value.and_then(|v| v.get("value")).and_then(|v| v.get("slotContentIdValue")).and_then(|v| v.get("guid")).and_then(guid);
+            let Some(target) = target else {
+                self.warn("malformed slot content assignment was skipped");
+                continue;
+            };
+            if target == "4294967295:4294967295" {
+                self.warn("slot content assignment uses the empty GUID sentinel and was skipped");
+                continue;
+            }
+            if self.nodes.get(&target).is_none_or(|n| n.get("isSlotContent").and_then(Kv::bool) != Some(true)) {
+                self.warn("slot content assignment target is missing or is not slot content");
+                continue;
+            }
+            slot_contents.entry(self.prop_root(&def)).or_insert(target);
         }
         let mut symbols = outer.map(|i| i.symbols.clone()).unwrap_or_default();
         symbols.push(sym.clone());
         let root = outer.map_or_else(|| rest_id.to_string(), |i| i.root.clone());
-        Some((Inst { root, path: own_path, overrides: Rc::new(overrides), props: Rc::new(all_props), symbols }, sym))
+        Some((
+            Inst {
+                root,
+                path: own_path,
+                overrides: Rc::new(overrides),
+                props: Rc::new(all_props),
+                slot_contents: Rc::new(slot_contents),
+                slot_content: false,
+                symbols,
+            },
+            sym,
+        ))
     }
 
     fn prototype(&mut self, o: &mut Obj, v: &View<'a>) {
@@ -1891,6 +2579,30 @@ fn own_text<'a>(v: &View<'a>) -> Option<&'a str> {
     v.get("textData").and_then(|t| t.get("characters")).and_then(Kv::str).filter(|c| !c.trim().is_empty())
 }
 
+/// A generated connector child is identified by one exact template GUID, not its array position.
+fn connector_record<'a>(v: &View<'a>, field: &str, local_id: u32) -> Option<&'a Kv<'a>> {
+    v.get(field)?.get("overrides")?.list().iter().find(|row| {
+        row.get("guidPath").and_then(|path| path.get("guids")).map(Kv::list).is_some_and(|guids| {
+            guids.len() == 1 && num(&guids[0], "sessionID") == Some(40_000_000.0) && num(&guids[0], "localID") == Some(f64::from(local_id))
+        })
+    })
+}
+
+fn connector_has_saved_label(v: &View<'_>) -> bool {
+    own_text(v).is_some()
+        || connector_record(v, "nodeGenerationData", 1)
+            .and_then(|r| r.get("textData"))
+            .and_then(|d| d.get("characters"))
+            .and_then(Kv::str)
+            .is_some_and(|s| !s.trim().is_empty())
+}
+
+fn valid_size(value: Option<&Kv<'_>>) -> Option<(f64, f64)> {
+    let x = num(value?, "x")?;
+    let y = num(value?, "y")?;
+    (x.is_finite() && y.is_finite() && x >= 0.0 && y >= 0.0).then_some((x, y))
+}
+
 /// The REST name of a stroke cap.
 fn cap_name(cap: &str) -> &str {
     match cap {
@@ -1959,7 +2671,7 @@ fn paint_bound(p: &Kv) -> bool {
     alias(p.get("colorVar")).is_some() || p.get("stopsVar").map(Kv::list).unwrap_or_default().iter().any(|s| alias(s.get("colorVar")).is_some())
 }
 
-fn paint(p: &Kv) -> Option<Value> {
+fn paint(p: &Kv, warn: &mut dyn FnMut(String)) -> Option<Value> {
     let ty = p.get("type").and_then(Kv::str)?;
     let mut o = Obj::new();
     o.insert("type".into(), json!(ty));
@@ -2028,6 +2740,52 @@ fn paint(p: &Kv) -> Option<Value> {
             if let Some(r) = num(p, "rotation") {
                 o.insert("rotation".into(), json!(r));
             }
+            match (p.get("filterColorAdjust"), p.get("paintFilter")) {
+                (Some(_), Some(_)) => {
+                    warn("image filters are ambiguous because both filter containers are present; filter conversion was skipped".into())
+                }
+                (Some(_), None) => warn("legacy image filter container is unsupported; filter conversion was skipped".into()),
+                (None, Some(filters)) => {
+                    let mut mapped = Obj::new();
+                    let fields = [
+                        ("exposure", "exposure"),
+                        ("contrast", "contrast"),
+                        ("vibrance", "saturation"),
+                        ("temperature", "temperature"),
+                        ("tint", "tint"),
+                        ("highlights", "highlights"),
+                        ("shadows", "shadows"),
+                    ];
+                    if let Kv::Object(values) = filters {
+                        for (source, target) in fields {
+                            if let Some(value) = filters.get(source) {
+                                match filter_number(value) {
+                                    Some(value) => {
+                                        mapped.insert(target.into(), json!(value));
+                                    }
+                                    None => warn(format!("malformed image filter `{source}` was skipped")),
+                                }
+                            }
+                        }
+                        for (name, value) in values {
+                            if fields.iter().any(|(known, _)| *known == *name) {
+                                continue;
+                            }
+                            match filter_number(value) {
+                                Some(0.0) => {}
+                                Some(_) => warn(format!("nonzero unsupported image filter `{}` was skipped", crate::rest::props::clip_str(name))),
+                                None => warn(format!("malformed unsupported image filter `{}` was skipped", crate::rest::props::clip_str(name))),
+                            }
+                        }
+                    } else {
+                        warn("malformed image paintFilter container was skipped".into());
+                    }
+                    if !mapped.is_empty() {
+                        o.insert("filters".into(), Value::Object(mapped));
+                    }
+                }
+                (None, None) => {}
+            }
         }
         _ => {}
     }
@@ -2065,6 +2823,32 @@ fn tracks(v: &View, key: &str) -> Vec<String> {
     t.into_iter().map(|e| e.1).collect()
 }
 
+/// Convert only unconstrained tracks, whose min and max sizing functions agree.
+fn grid_track_sizing(size: Option<&Kv<'_>>) -> Option<Value> {
+    let size = size?;
+    let min = size.get("minSizing")?;
+    let max = size.get("maxSizing")?;
+    let min_type = min.get("type").and_then(Kv::str)?;
+    let max_type = max.get("type").and_then(Kv::str)?;
+    if min_type != max_type {
+        return None;
+    }
+    match min_type {
+        "FIXED" => {
+            let px = num(min, "value")?;
+            let max_px = num(max, "value")?;
+            (px == max_px && px.is_finite() && (0.0..=MAX_GRID_TRACK_VALUE).contains(&px)).then(|| json!({"sizing": "fixed", "value": px}))
+        }
+        "FLEX" => {
+            let fr = num(min, "value")?;
+            let max_fr = num(max, "value")?;
+            (fr == max_fr && fr.is_finite() && fr > 0.0 && fr <= MAX_GRID_TRACK_VALUE).then(|| json!({"sizing": "fill", "value": fr}))
+        }
+        "HUG" => Some(json!({"sizing": "hug", "value": 0.0})),
+        _ => None,
+    }
+}
+
 /// The variable an `ALIAS` variable data points at.
 fn alias(d: Option<&Kv>) -> Option<String> {
     let d = d?;
@@ -2093,7 +2877,7 @@ fn variable_value(d: &Kv) -> Option<Value> {
 
 /// Per-character styles of text data `td` (`characterStyleIDs` + `styleOverrideTable`) as REST
 /// `characterStyleOverrides` + `styleOverrideTable`; `size`: the base font size.
-fn char_styles(o: &mut Obj, td: &Kv, size: Option<f64>) {
+fn char_styles(o: &mut Obj, td: &Kv, size: Option<f64>, warn: &mut dyn FnMut(String)) {
     let ids: Vec<u64> = td.get("characterStyleIDs").map(Kv::list).unwrap_or_default().iter().filter_map(Kv::f64).map(|i| i as u64).collect();
     if ids.iter().all(|i| *i == 0) {
         return;
@@ -2103,7 +2887,7 @@ fn char_styles(o: &mut Obj, td: &Kv, size: Option<f64>) {
         let Some(sid) = num(e, "styleID") else { continue };
         let mut s = text_style(&View::of(e), size);
         if let Some(fills) = e.get("fillPaints") {
-            s.insert("fills".into(), Value::Array(fills.list().iter().filter_map(paint).collect()));
+            s.insert("fills".into(), Value::Array(fills.list().iter().filter_map(|p| paint(p, warn)).collect()));
         }
         table.insert((sid as u64).to_string(), Value::Object(s));
     }
@@ -2113,7 +2897,23 @@ fn char_styles(o: &mut Obj, td: &Kv, size: Option<f64>) {
 
 /// The text of a component property value.
 fn prop_text<'k>(v: &'k Kv) -> Option<&'k str> {
-    v.get("textValue").and_then(|t| t.get("characters")).and_then(Kv::str)
+    prop_text_data(v).and_then(|t| t.get("characters")).and_then(Kv::str)
+}
+
+/// The text data of a component property value: `textValue`, or `textDataValue` in the variable form.
+fn prop_text_data<'k, 's>(v: &'k Kv<'s>) -> Option<&'k Kv<'s>> {
+    v.get("textValue").or_else(|| v.get("textDataValue"))
+}
+
+/// The main an instance swap value names: `guidValue`, or `symbolIdValue` in the variable form.
+fn prop_guid(v: &Kv) -> Option<String> {
+    v.get("guidValue").and_then(guid).or_else(|| v.get("symbolIdValue")?.get("guid").and_then(guid))
+}
+
+/// The value a component property assignment sets: `value`, or the variable form `varValue` holds
+/// when `value` is empty, as current files write many booleans and instance swaps.
+fn assigned<'k, 's>(assignment: &'k Kv<'s>) -> Option<&'k Kv<'s>> {
+    assignment.get("value").filter(|v| !matches!(v, Kv::Object(fields) if fields.is_empty())).or_else(|| assignment.get("varValue")?.get("value"))
 }
 
 /// The property a layer's `field` is bound to (`parameterConsumptionMap`).
@@ -2141,8 +2941,13 @@ fn text_style(v: &View, size: Option<f64>) -> Obj {
     copy_num(&mut s, v, "fontSize", "fontSize");
     copy_num(&mut s, v, "paragraphSpacing", "paragraphSpacing");
     copy_num(&mut s, v, "paragraphIndent", "paragraphIndent");
+    insert_text_options(&mut s, v);
     copy_str(&mut s, v, "textCase", "textCase");
     copy_str(&mut s, v, "textDecoration", "textDecoration");
+    if let Some(skip_ink) = v.flag("textDecorationSkipInk") {
+        s.insert("textDecorationSkipInk".into(), json!(skip_ink));
+    }
+    copy_str(&mut s, v, "leadingTrim", "leadingTrim");
     let font_size = v.num("fontSize").or(size).unwrap_or(12.0);
     if let Some(ls) = v.get("letterSpacing") {
         let val = num(ls, "value").unwrap_or(0.0);

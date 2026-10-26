@@ -10,6 +10,8 @@ use crate::icons::{self, Icon};
 use crate::theme::{Tokens, regular, semibold};
 use crate::widgets::{self, PAD};
 
+/// Draw the expandable frame-preset categories; choosing a preset runs `frame.create`,
+/// switches to the Move tool and zooms to the new selection.
 pub fn panel(app: &mut FigApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     widgets::section_header(ui, tr("Frame"), &[], false);
@@ -22,7 +24,7 @@ pub fn panel(app: &mut FigApp, ui: &mut Ui) {
     }
     let mut chosen = None;
     for cat in cats {
-        let open_id = Id::new(("preset_cat", cat));
+        let open_id = Id::unique(("preset_cat", cat));
         // The first category starts open.
         let open: bool = ui.data(|d| d.get_temp(open_id)).unwrap_or(cat == "Phone");
         let (r, resp) = ui.allocate_exact_size(vec2(w, 32.0), Sense::click());

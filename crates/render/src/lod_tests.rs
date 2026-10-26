@@ -116,7 +116,7 @@ fn region_paints_disable_vector_and_ancestor_splatting() {
     let page = d.first_page().unwrap();
     let parent = d.create(page, NodeKind::Frame, "Parent", 0.0, 0.0, 4.0, 4.0).unwrap();
     let mut network = VectorNetwork::default();
-    network.regions.push(Region { loops: Vec::new(), winding: Default::default(), fills: Some(Vec::new()) });
+    network.regions.push(Region { loops: Vec::new(), winding: Default::default(), fills: Some(Vec::new()), ..Default::default() });
     let vector = d.create(parent, NodeKind::Vector { network }, "Styled", 0.0, 0.0, 2.0, 2.0).unwrap();
     let node = d.node(vector).unwrap();
     assert!(!lod::splattable(&d, node, 0));
@@ -167,6 +167,7 @@ fn exports_never_use_lod() {
     crate::render_nodes_into(&d, &[card], &v, &mut exact);
     assert_eq!(png.data(), exact.data());
     let mut preview = Pixmap::new(v.width, v.height).unwrap();
+    let bounds = crate::draw::Bounds::default();
     let ctx = crate::draw::Ctx {
         doc: &d,
         scale,
@@ -175,8 +176,10 @@ fn exports_never_use_lod() {
         outlined: &[],
         skip: &[],
         lod: true,
+        magnified_image_pixels: false,
         under: None,
         time: 0.0,
+        bounds: &bounds,
     };
     let parent = d.world_transform(p);
     crate::draw::draw_node(&ctx, &mut preview, card, v.transform() * parent, 0);

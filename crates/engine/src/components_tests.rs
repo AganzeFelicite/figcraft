@@ -67,8 +67,6 @@ fn overrides_survive_main_edits() {
     ex(&mut s, "node.set", json!({"id": ibg, "props": {"effects": [{"type": "dropShadow"}]}}));
     ex(&mut s, "text.set", json!({"id": ititle, "characters": "Overridden"}));
     ex(&mut s, "node.set", json!({"id": idot, "props": {"visible": false}}));
-    // A layer inside an instance keeps its main's size (the instance itself resizes).
-    assert!(s.execute("node.set", &json!({"id": idot, "props": {"width": 30}})).is_err());
     let ov = node(&s, ibg).overrides;
     for g in ["fills", "strokes", "effects", "name"] {
         assert!(ov.contains(g), "{g} in {ov:?}");
@@ -428,6 +426,90 @@ fn component_properties_apply_to_instances() {
     let set = idv(&ex(&mut s, "component.addProperty", json!({"id": c, "name": "Theme", "type": "variant", "default": "Light"})));
     assert!(matches!(node(&s, set).kind, NodeKind::ComponentSet { .. }));
     assert_eq!(node(&s, c).name, "Theme=Light");
+    healthy(&s);
+}
+
+/// The default of boolean property `name` on component `c`.
+fn bool_default(s: &Session, c: NodeId, name: &str) -> Option<bool> {
+    match &node(s, c).kind {
+        NodeKind::Component { props, .. } => match props.get(name) {
+            Some(PropDef::Boolean { default }) => Some(*default),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+#[test]
+fn boolean_property_default_is_the_mains_visibility() {
+    let mut s = Session::new();
+    let (c, bg, title, dot) = card(&mut s);
+    // #993: a `false` default hides the bound layer in the main, not only in instances.
+    ex(&mut s, "component.addProperty", json!({"id": c, "name": "Show dot", "type": "boolean", "default": false, "layer": dot}));
+    assert!(!node(&s, dot).visible);
+    let i = idv(&ex(&mut s, "instance.create", json!({"component": c, "x": 300, "y": 0})));
+    assert!(!node(&s, copy_of(&s, i, dot)).visible);
+    // Without a default, the property takes the layer's visibility.
+    ex(&mut s, "node.set", json!({"id": bg, "props": {"visible": false}}));
+    ex(&mut s, "component.addProperty", json!({"id": c, "name": "Show bg", "type": "boolean", "layer": bg}));
+    assert_eq!(bool_default(&s, c, "Show bg"), Some(false));
+    assert!(!node(&s, bg).visible);
+    // Binding a layer to an existing property shows it as the default says.
+    ex(&mut s, "component.bindProperty", json!({"layer": title, "property": "Show dot"}));
+    assert!(!node(&s, title).visible);
+    // A new default shows or hides every bound layer of the main; instances keep their values.
+    ex(&mut s, "instance.setProperties", json!({"ids": [i], "properties": {"Show dot": false}}));
+    ex(&mut s, "component.editProperty", json!({"id": c, "name": "Show dot", "default": true}));
+    assert!(node(&s, dot).visible && node(&s, title).visible);
+    assert!(!node(&s, copy_of(&s, i, dot)).visible, "the instance's own value stays");
+    // Renamed with a new default in one go.
+    ex(&mut s, "component.editProperty", json!({"id": c, "name": "Show dot", "newName": "Dot", "default": false}));
+    assert!(!node(&s, dot).visible && !node(&s, title).visible);
+    assert_eq!(bool_default(&s, c, "Dot"), Some(false));
+    // Showing a bound layer on the main is the property's new default, for its other layers too.
+    ex(&mut s, "node.set", json!({"id": dot, "props": {"visible": true}}));
+    assert_eq!(bool_default(&s, c, "Dot"), Some(true));
+    assert!(node(&s, title).visible);
+    let j = idv(&ex(&mut s, "instance.create", json!({"component": c, "x": 600, "y": 0})));
+    assert!(node(&s, copy_of(&s, j, dot)).visible && node(&s, copy_of(&s, j, title)).visible);
+    assert!(!node(&s, copy_of(&s, i, dot)).visible, "existing instances keep their values");
+    // Hiding a layer inside an instance is an override there, not a new default.
+    let jdot = copy_of(&s, j, dot);
+    ex(&mut s, "node.set", json!({"id": jdot, "props": {"visible": false}}));
+    assert_eq!(bool_default(&s, c, "Dot"), Some(true));
+    assert!(node(&s, dot).visible);
+    // Undo puts the default and the layers back together.
+    s.undo().unwrap();
+    s.undo().unwrap();
+    s.undo().unwrap();
+    assert_eq!(bool_default(&s, c, "Dot"), Some(false));
+    assert!(!node(&s, dot).visible && !node(&s, title).visible);
+    healthy(&s);
+}
+
+#[test]
+fn boolean_property_default_follows_across_variants() {
+    let mut s = Session::new();
+    let mut variants = Vec::new();
+    let mut labels = Vec::new();
+    for (k, state) in ["Default", "Hover"].iter().enumerate() {
+        let f =
+            idv(&ex(&mut s, "frame.create", json!({"x": k as f64 * 150.0, "y": 0, "width": 100, "height": 40, "name": format!("State={state}")})));
+        labels.push(idv(&ex(&mut s, "text.create", json!({"text": *state, "x": 10, "y": 10, "parent": f, "props": {"name": "Label"}}))));
+        variants.push(idv(&ex(&mut s, "component.create", json!({"ids": [f]}))));
+    }
+    let set = idv(&ex(&mut s, "component.combineVariants", json!({"ids": variants.clone()})));
+    ex(&mut s, "component.addProperty", json!({"id": set, "name": "Show label", "type": "boolean", "default": false, "layer": labels[0]}));
+    ex(&mut s, "component.bindProperty", json!({"layer": labels[1], "property": "Show label"}));
+    assert!(labels.iter().all(|l| !node(&s, *l).visible));
+    ex(&mut s, "component.editProperty", json!({"id": set, "name": "Show label", "default": true}));
+    assert!(labels.iter().all(|l| node(&s, *l).visible));
+    // Hiding the label in one variant is the set's default: the other variant's label follows.
+    ex(&mut s, "node.set", json!({"id": labels[1], "props": {"visible": false}}));
+    assert!(variants.iter().all(|v| bool_default(&s, *v, "Show label") == Some(false)));
+    assert!(!node(&s, labels[0]).visible);
+    let i = idv(&ex(&mut s, "instance.create", json!({"component": set, "x": 0, "y": 200})));
+    assert!(!node(&s, kids(&s, i)[0]).visible);
     healthy(&s);
 }
 

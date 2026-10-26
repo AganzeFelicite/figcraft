@@ -189,10 +189,10 @@ pub fn cluster(points: &[Pos2], r: f32) -> Vec<Vec<usize>> {
 }
 
 /// A message's text with its @mentions of `people` picked out, wrapped at `width`.
-pub fn rich_text(text: &str, people: &[&str], color: Color32, width: f32) -> LayoutJob {
+pub fn rich_text(text: &str, people: &[&str], color: Color32, mention_color: Color32, width: f32) -> LayoutJob {
     let mut job = LayoutJob::default();
     let plain = TextFormat { font_id: regular(12.0), color, ..Default::default() };
-    let mention = TextFormat { font_id: semibold(12.0), color: ACCENT, ..Default::default() };
+    let mention = TextFormat { font_id: semibold(12.0), color: mention_color, ..Default::default() };
     let mut at = 0;
     for r in mention_ranges(text, people) {
         job.append(text.get(at..r.start).unwrap_or(""), 0.0, plain.clone());
@@ -400,7 +400,7 @@ pub fn draw(app: &FigApp, painter: &egui::Painter) {
     if let Some((x, y, _)) = &app.ui.comments.draft {
         let r = pin_rect(app.to_screen(*x, *y));
         painter.rect_filled(r, BUBBLE, ACCENT);
-        painter.circle_filled(r.center(), 3.0, Color32::WHITE);
+        painter.circle_filled(r.center(), 3.0, crate::theme::ACCENT_ON);
     }
 }
 
@@ -476,7 +476,7 @@ pub fn start_draft(app: &mut FigApp, x: f64, y: f64) {
 
 /// The reply field's id for a thread.
 fn reply_id(thread: u64) -> Id {
-    Id::new(("comment_reply", thread))
+    Id::unique(("comment_reply", thread))
 }
 
 fn set_cursor(ctx: &egui::Context, id: Id, at: usize) {
@@ -650,7 +650,7 @@ fn message(
     let t = Tokens::get(ui.ctx());
     let ctx = ui.ctx().clone();
     let id = cx.c.id;
-    let hover_key = Id::new(("comment_msg_hover", id, i));
+    let hover_key = Id::unique(("comment_msg_hover", id, i));
     let hovered = ctx.data(|d| d.get_temp::<bool>(hover_key)).unwrap_or(false);
     let indent = 36.0;
     let block = ui.scope(|ui| {
@@ -663,10 +663,10 @@ fn message(
             ui.label(egui::RichText::new(when).font(regular(11.0)).color(t.text_tertiary));
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if m.author == cx.me {
-                    let menu = Id::new(("comment_msg_more_menu", id, i));
+                    let menu = Id::unique(("comment_msg_more_menu", id, i));
                     let more = hover_button(
                         ui,
-                        Id::new(("comment_msg_more", id, i)),
+                        Id::unique(("comment_msg_more", id, i)),
                         Icon::Dots,
                         hovered || egui::Popup::is_id_open(&ctx, menu),
                         tr("More"),
@@ -682,10 +682,10 @@ fn message(
                         }
                     });
                 }
-                let menu = Id::new(("comment_msg_react_menu", id, i));
+                let menu = Id::unique(("comment_msg_react_menu", id, i));
                 let react = hover_button(
                     ui,
-                    Id::new(("comment_msg_react", id, i)),
+                    Id::unique(("comment_msg_react", id, i)),
                     Icon::Reaction,
                     hovered || egui::Popup::is_id_open(&ctx, menu),
                     tr("Add reaction"),
@@ -715,7 +715,7 @@ fn message(
                 ui.horizontal(|ui| {
                     ui.add_space(indent);
                     ui.vertical(|ui| {
-                        if composer(ui, Id::new(("comment_edit", id, i)), text, tr("Edit comment"), cx.people, cx.me, pick) {
+                        if composer(ui, Id::unique(("comment_edit", id, i)), text, tr("Edit comment"), cx.people, cx.me, pick) {
                             let mut p = message_params(id, i);
                             p["text"] = json!(text.trim());
                             *act = Some(Act::Run("comment.edit", p));
@@ -729,7 +729,7 @@ fn message(
                     ui.add_space(indent);
                     let mut names: Vec<&str> = cx.people.iter().map(String::as_str).collect();
                     names.push(cx.me);
-                    ui.add(egui::Label::new(rich_text(&m.text, &names, t.text, ui.available_width())).wrap());
+                    ui.add(egui::Label::new(rich_text(&m.text, &names, t.text, t.accent_text, ui.available_width())).wrap());
                 });
             }
         }
@@ -828,12 +828,12 @@ pub fn popovers(app: &mut FigApp, ctx: &egui::Context) {
         let me = me(app);
         let mut pick = std::mem::take(&mut app.ui.comments.mention);
         let mut post = false;
-        egui::Area::new(Id::new("comment_draft")).order(egui::Order::Foreground).fixed_pos(popover_pos(app.to_screen(x, y), canvas)).show(
+        egui::Area::new(Id::unique("comment_draft")).order(egui::Order::Foreground).fixed_pos(popover_pos(app.to_screen(x, y), canvas)).show(
             ctx,
             |ui| {
                 popover_frame(&t).show(ui, |ui| {
                     ui.set_width(POPOVER_W - 24.0);
-                    post = composer(ui, Id::new("comment_draft_text"), &mut text, tr("Add a comment"), &people, &me, &mut pick);
+                    post = composer(ui, Id::unique("comment_draft_text"), &mut text, tr("Add a comment"), &people, &me, &mut pick);
                 });
             },
         );
@@ -877,7 +877,7 @@ pub fn thread(app: &mut FigApp, ctx: &egui::Context, id: u64, anchor: Pos2, boun
     let mut pick = std::mem::take(&mut app.ui.comments.mention);
     let mut act: Option<Act> = None;
     let cx = ThreadCtx { c: &c, me: &me, people: &people };
-    egui::Area::new(Id::new("comment_thread")).order(egui::Order::Foreground).fixed_pos(popover_pos(anchor, bounds)).show(ctx, |ui| {
+    egui::Area::new(Id::unique("comment_thread")).order(egui::Order::Foreground).fixed_pos(popover_pos(anchor, bounds)).show(ctx, |ui| {
         popover_frame(&t).show(ui, |ui| {
             ui.set_width(POPOVER_W - 24.0);
             // Header: resolve, more, close.
@@ -934,7 +934,7 @@ pub fn thread(app: &mut FigApp, ctx: &egui::Context, id: u64, anchor: Pos2, boun
         }
         Some(Act::CopyLink) => {
             if let Some(link) = app.run("comment.link", json!({"id": id})).and_then(|v| v.get("link").and_then(Value::as_str).map(str::to_string)) {
-                app.services.clipboard_set_text(&link);
+                app.clipboard_set_text(&link);
                 app.toast(tr("Link copied"));
             }
         }
@@ -1051,7 +1051,7 @@ pub fn panel(app: &mut FigApp, ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.add_space(16.0);
         let w = ui.available_width() - 16.0;
-        if let Some(s) = crate::widgets::text_field(ui, Id::new("comment_search"), &app.ui.comments.search, w, tr("Search comments")) {
+        if let Some(s) = crate::widgets::text_field(ui, Id::unique("comment_search"), &app.ui.comments.search, w, tr("Search comments")) {
             app.ui.comments.search = s;
         }
     });
@@ -1062,7 +1062,8 @@ pub fn panel(app: &mut FigApp, ui: &mut Ui) {
             ui.add_space(16.0);
             ui.label(egui::RichText::new(tr(app.ui.comments.filter.label())).font(regular(11.0)).color(t.text_secondary));
             ui.add_space(4.0);
-            if ui.add(egui::Label::new(egui::RichText::new(tr("Show open")).font(regular(11.0)).color(ACCENT)).sense(Sense::click())).clicked() {
+            if ui.add(egui::Label::new(egui::RichText::new(tr("Show open")).font(regular(11.0)).color(t.accent_text)).sense(Sense::click())).clicked()
+            {
                 app.ui.comments.filter = Filter::Open;
             }
         });
@@ -1177,7 +1178,7 @@ pub fn presenter(app: &mut FigApp, ctx: &egui::Context, frame: NodeId, place: cr
     let mut clicked = None;
     for p in &pins {
         let r = pin_rect(p.at);
-        egui::Area::new(Id::new(("present_comment_pin", p.id))).order(egui::Order::Foreground).fixed_pos(r.min).show(ctx, |ui| {
+        egui::Area::new(Id::unique(("present_comment_pin", p.id))).order(egui::Order::Foreground).fixed_pos(r.min).show(ctx, |ui| {
             let (rr, resp) = ui.allocate_exact_size(r.size(), Sense::click());
             paint_pin(ui.painter(), rr, p, open == Some(p.id) || resp.hovered());
             if resp.on_hover_cursor(egui::CursorIcon::PointingHand).clicked() {

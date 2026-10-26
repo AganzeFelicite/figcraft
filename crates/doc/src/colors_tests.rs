@@ -134,3 +134,11 @@ fn profile_and_presets_serialize_only_when_set() {
     assert_eq!(back.color_profile, ColorProfile::DisplayP3);
     assert_eq!(back.image_presets, d.image_presets);
 }
+
+#[test]
+fn text_decoration_colour_is_visited() {
+    let mut s = TextStyle::default();
+    s.set_look(|l| l.color = Some(RED));
+    s.for_each_color_mut(&mut |c| *c = Color::BLACK);
+    assert_eq!(s.look().color, Some(Color::BLACK), "decoration colour not visited");
+}

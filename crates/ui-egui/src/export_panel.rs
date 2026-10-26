@@ -40,8 +40,9 @@ pub fn section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
     if mixed {
         widgets::note(ui, tr("Click + to replace mixed content"), t.text_secondary);
     }
+    let text = sel.iter().all(|i| matches!(doc.node(*i).map(|n| &n.kind), Some(NodeKind::Text(_))));
     for (i, e) in list.iter().enumerate() {
-        setting_row(app, ui, &ids, i, e);
+        setting_row(app, ui, &ids, i, e, text);
     }
     let jobs = export_jobs(doc, sel);
     if jobs.is_empty() {
@@ -60,22 +61,26 @@ pub fn section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
     }
 }
 
-/// One export setting: size (typed or picked), suffix, format, advanced options and remove; a
-/// PDF's print settings under it.
-fn setting_row(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, e: &ExportSetting) {
+/// One export setting: size (typed or picked; images only, SVG and PDF are vector), suffix,
+/// format, advanced options and remove; a PDF's print settings under it. `text`: every layer in
+/// `ids` is a text layer.
+fn setting_row(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, e: &ExportSetting, text: bool) {
     row(ui, 32.0, |ui| {
         // Tighter spacing so the advanced options and remove buttons fit beside the fields.
         ui.spacing_mut().item_spacing.x = 4.0;
-        let (size_w, format_w, button, gap) = (52.0, 54.0, 22.0, ui.spacing().item_spacing.x);
-        let suffix_w = (ui.available_width() - size_w - format_w - button * 2.0 - gap * 4.0).max(32.0);
-        let presets: Vec<String> =
-            ExportSize::SCALES.iter().map(|value| ExportSize::Scale { value: *value }.label()).chain(["512w".into(), "512h".into()]).collect();
-        if let Some(s) = widgets::combo_field(ui, Id::new(("export_size", i)), &e.size.label(), size_w, &presets)
-            && ExportSize::parse(&s) != Some(e.size)
-        {
-            app.run("export.update", json!({"ids": ids, "index": i, "size": s}));
+        let (format_w, button, gap) = (54.0, 22.0, ui.spacing().item_spacing.x);
+        let size_w = e.format.is_raster().then_some(52.0);
+        let suffix_w = (ui.available_width() - size_w.map_or(0.0, |w| w + gap) - format_w - button * 2.0 - gap * 3.0).max(32.0);
+        if let Some(size_w) = size_w {
+            let presets: Vec<String> =
+                ExportSize::SCALES.iter().map(|value| ExportSize::Scale { value: *value }.label()).chain(["512w".into(), "512h".into()]).collect();
+            if let Some(s) = widgets::combo_field(ui, Id::unique(("export_size", i)), &e.size.label(), size_w, &presets)
+                && ExportSize::parse(&s) != Some(e.size)
+            {
+                app.run("export.update", json!({"ids": ids, "index": i, "size": s}));
+            }
         }
-        if let Some(sfx) = widgets::text_field(ui, Id::new(("export_suffix", i)), &e.suffix, suffix_w, tr("Suffix"))
+        if let Some(sfx) = widgets::text_field(ui, Id::unique(("export_suffix", i)), &e.suffix, suffix_w, tr("Suffix"))
             && sfx != e.suffix
         {
             app.run("export.update", json!({"ids": ids, "index": i, "suffix": sfx}));
@@ -91,11 +96,11 @@ fn setting_row(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, e: &Expo
         });
         let more = icons::button(ui, Icon::Dots, button, false, tr("Export settings"));
         egui::Popup::from_toggle_button_response(&more)
-            .id(Id::new(("export_more", i)))
+            .id(Id::unique(("export_more", i)))
             .width(216.0)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
-                if let Some(mut params) = advanced_options(ui, e) {
+                if let Some(mut params) = advanced_options(ui, e, text) {
                     params["ids"] = json!(ids);
                     params["index"] = json!(i);
                     app.run("export.update", params);
@@ -110,17 +115,21 @@ fn setting_row(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, e: &Expo
     }
 }
 
-/// A setting's advanced options: contents only and include bounding box, and for SVG outline
-/// text, the id attribute and simplified strokes. Returns the changed option as command params.
-fn advanced_options(ui: &mut Ui, e: &ExportSetting) -> Option<Value> {
+/// A setting's advanced options: ignore overlapping layers (`contentsOnly`), include bounding box
+/// for text layers (and for any setting that has it on, so it can be turned off), and for SVG
+/// outline text, the id attribute and simplified strokes. Returns the changed option as command
+/// params.
+fn advanced_options(ui: &mut Ui, e: &ExportSetting, text: bool) -> Option<Value> {
     let mut out = None;
     let mut option = |ui: &mut Ui, key: &str, on: bool, label: &str| {
         if widgets::checkbox(ui, on, label) {
             out = Some(json!({ key: !on }));
         }
     };
-    option(ui, "contentsOnly", e.contents_only, tr("Contents only"));
-    option(ui, "includeBoundingBox", e.include_bounding_box, tr("Include bounding box"));
+    option(ui, "contentsOnly", e.contents_only, tr("Ignore overlapping layers"));
+    if text || e.include_bounding_box {
+        option(ui, "includeBoundingBox", e.include_bounding_box, tr("Include bounding box"));
+    }
     if e.format == ExportFormat::Svg {
         option(ui, "svgOutlineText", e.svg_outline_text, tr("Outline text"));
         option(ui, "svgIdAttribute", e.svg_id_attribute, tr("Include id attribute"));
@@ -133,7 +142,7 @@ fn advanced_options(ui: &mut Ui, e: &ExportSetting) -> Option<Value> {
 fn print_row(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, p: &PrintSettings) {
     let t = Tokens::get(ui.ctx());
     row(ui, 26.0, |ui| {
-        let open_id = Id::new(("export_print", i));
+        let open_id = Id::unique(("export_print", i));
         let open = egui::Popup::is_id_open(ui.ctx(), open_id);
         let (r, resp) = ui.allocate_exact_size(vec2(ui.available_width(), FIELD_H), Sense::click());
         if resp.hovered() || open {
@@ -147,7 +156,7 @@ fn print_row(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, p: &PrintS
             .width(216.0)
             .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
             .show(|ui| {
-                if let Some(next) = print_options(ui, Id::new(("export_print_fields", i)), p) {
+                if let Some(next) = print_options(ui, Id::unique(("export_print_fields", i)), p) {
                     let mut params = print_params(&next);
                     params["ids"] = json!(ids);
                     params["index"] = json!(i);
@@ -255,7 +264,7 @@ fn preview(app: &mut FigApp, ui: &mut Ui, doc: &Document, id: NodeId) {
     }
     let revision = app.session.ds().map(|d| d.revision).unwrap_or(0);
     let now = ui.input(|i| i.time);
-    let cache_id = Id::new("export_preview_tex");
+    let cache_id = Id::unique("export_preview_tex");
     let cached: Option<PreviewTex> = ui.data(|d| d.get_temp(cache_id));
     let stale = cached.as_ref().is_none_or(|c| c.id != id || c.revision != revision);
     let due = cached.as_ref().is_none_or(|c| c.id != id || now - c.at >= PREVIEW_REFRESH);
@@ -317,6 +326,16 @@ pub(crate) fn export_layers(app: &mut FigApp, ids: &[NodeId], assets: bool) {
         [] => {}
         // The suggested name keeps only the file's own name (a layer's folders apply to folders).
         [one] => save_one(app, &[one.id], &one.setting, one.file.rsplit('/').next().unwrap_or(&one.file)),
+        // No folders in the browser, and it lets a page start one download at a time: the files
+        // arrive together as one zip (#969).
+        _ if app.services.downloads() => {
+            let name = format!("{}.zip", app.session.doc().map_or("Export", |d| d.name.as_str()));
+            if let Some(r) = app.run("file.exportLayers", json!({"ids": ids, "assets": assets, "zip": true}))
+                && app.download(&name, &r)
+            {
+                app.toast(trn("Exported {n} files", r["files"].as_array().map_or(0, Vec::len), &[]));
+            }
+        }
         _ => {
             let ids = ids.to_vec();
             app.pick_folder(tr("Export"), move |app, dir| {
@@ -334,6 +353,14 @@ pub(crate) fn save_one(app: &mut FigApp, ids: &[NodeId], setting: &ExportSetting
     let ext = setting.format.ext();
     let mut params = setting_params(setting);
     params["ids"] = json!(ids);
+    if app.services.downloads() {
+        if let Some(r) = app.run("file.export", params)
+            && app.download(file, &r)
+        {
+            app.toast(trf("Exported {name}", &[("name", &file)]));
+        }
+        return;
+    }
     app.pick_save(tr("Export"), file, &[ext], move |app, p| {
         params["path"] = json!(p.to_string_lossy());
         if app.run("file.export", params).is_some() {

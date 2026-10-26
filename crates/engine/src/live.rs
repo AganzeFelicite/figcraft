@@ -37,7 +37,7 @@
 //! short-lived presence the host passes on to everyone, never stored. A spotlight makes everyone
 //! follow the person who started it; moving your own view stops following, as with any follow.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::net::IpAddr;
 use std::sync::Arc;
 
@@ -81,10 +81,14 @@ pub const PEOPLE: [&str; 8] = ["#0D99FF", "#9747FF", "#14AE5C", "#F24822", "#D97
 
 /// `#RRGGBB` → (r, g, b); `None` for anything else.
 pub fn parse_color(s: &str) -> Option<(u8, u8, u8)> {
-    let hex = s.strip_prefix('#').filter(|h| h.len() == 6 && h.is_ascii())?;
+    let hex = s.strip_prefix('#').filter(|h| h.len() == 6 && h.bytes().all(|b| b.is_ascii_hexdigit()))?;
     let byte = |i: usize| hex.get(i..i + 2).and_then(|b| u8::from_str_radix(b, 16).ok());
     Some((byte(0)?, byte(2)?, byte(4)?))
 }
+
+/// Why a join failed when a message from the host is over this app's size limit (`{mb}`: the
+/// limit in MB). The UI translates it.
+pub const TOO_LARGE_TO_JOIN: &str = "This file is too large to join here (up to {mb} MB)";
 
 /// The connection to a live session.
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
@@ -595,6 +599,9 @@ pub struct Live {
     pub spotlight: Option<u32>,
     /// You spotlight: everyone follows you.
     pub spotlighting: bool,
+    /// The branches of the session's file made or last updated from main in this session: every
+    /// layer of their base was in it (see [`crate::branches`]).
+    branch_bases: BTreeSet<String>,
 }
 
 impl Live {
@@ -1245,6 +1252,29 @@ impl Session {
     /// The active document can't be edited now (see [`live_read_only`](Self::live_read_only)).
     pub fn active_read_only(&self) -> Option<&'static str> {
         self.tab().and_then(|uid| self.live_read_only(uid))
+    }
+
+    /// Your client id in document `uid`'s live session (`None`: it isn't in one). Refused for
+    /// `cmd` while the session is on its way: there is no id yet.
+    pub(crate) fn live_client_id(&self, cmd: &str, uid: u64) -> Result<Option<u32>> {
+        let Some(live) = self.live.doc(uid) else { return Ok(None) };
+        match &live.client {
+            Some(c) => Ok(Some(c.id())),
+            None if live.status.active() => Err(EngineError::Disabled(cmd.into(), "wait until the file's live session has started".into())),
+            None => Ok(None),
+        }
+    }
+
+    /// Branch `id` of document `uid` got its base from the session document just now.
+    pub(crate) fn live_branch_base(&mut self, uid: u64, id: &str) {
+        if let Some(live) = self.live.doc_mut(uid).filter(|l| l.syncing()) {
+            live.branch_bases.insert(id.to_string());
+        }
+    }
+
+    /// Whether branch `id` of document `uid` got its base in the live session it is in now.
+    pub(crate) fn live_branch_in_session(&self, uid: u64, id: &str) -> bool {
+        self.live.doc(uid).is_some_and(|l| l.syncing() && l.branch_bases.contains(id))
     }
 
     /// Whether document `uid` is a live session's synced document: its edits sync and its undo

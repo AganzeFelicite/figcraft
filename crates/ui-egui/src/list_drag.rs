@@ -6,15 +6,15 @@
 //! lists bottom first; other lists (an interaction's actions, pages) show their items in model
 //! order.
 
-use egui::{AsId, Id, Rect, Sense, Ui, pos2, vec2};
+use egui::{AsIdSalt, Id, Rect, Sense, Ui, pos2, vec2};
 
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, regular};
 use crate::widgets::{self, PAD};
 
 /// The id of list `list` (any hashable key, e.g. `"fills"`).
-fn list_id(list: impl AsId) -> Id {
-    Id::new(("list_drag", list))
+fn list_id(list: impl AsIdSalt) -> Id {
+    Id::unique(("list_drag", list))
 }
 
 /// The row of list `list` being dragged (its model index; temp data).
@@ -24,7 +24,7 @@ fn drag_id(list: Id) -> Id {
 
 /// The grip of item `index` of list `list` (tests find rows by it).
 #[cfg(test)]
-pub(crate) fn grip_id(list: impl AsId, index: usize) -> Id {
+pub(crate) fn grip_id(list: impl AsIdSalt, index: usize) -> Id {
     grip_of(list_id(list), index)
 }
 
@@ -49,12 +49,12 @@ pub struct ListDrag {
 
 impl ListDrag {
     /// A list shown topmost item (the model's last) first, as the Design panel shows paints.
-    pub fn new(ui: &Ui, list: impl AsId) -> Self {
+    pub fn new(ui: &Ui, list: impl AsIdSalt) -> Self {
         Self::with_order(ui, list_id(list), true)
     }
 
     /// A list shown in model order, first item on top (an interaction's actions).
-    pub fn in_order(ui: &Ui, list: impl AsId) -> Self {
+    pub fn in_order(ui: &Ui, list: impl AsIdSalt) -> Self {
         Self::with_order(ui, list_id(list), false)
     }
 
@@ -164,34 +164,34 @@ fn drop_slot(rows: &[(usize, Rect)], from: usize, p: egui::Pos2, reversed: bool)
     Some((if reversed { n - 1 - at } else { at }, y))
 }
 
-/// Keep per-row flags (`Id::new((salt, index))`, e.g. an open settings section) with their rows
+/// Keep per-row flags (`Id::unique((salt, index))`, e.g. an open settings section) with their rows
 /// when item `from` of a `len`-long list moves to `to`.
 pub fn move_flags(ui: &Ui, salt: &'static str, len: usize, from: usize, to: usize) {
     ui.data_mut(|d| {
-        let flags: Vec<Option<bool>> = (0..len).map(|i| d.get_temp::<bool>(Id::new((salt, i)))).collect();
+        let flags: Vec<Option<bool>> = (0..len).map(|i| d.get_temp::<bool>(Id::unique((salt, i)))).collect();
         for (i, f) in flags.into_iter().enumerate() {
             let j = figcraft_engine::cmd::lists::moved_index(i, from, to);
             match f {
                 Some(v) => {
-                    d.insert_temp(Id::new((salt, j)), v);
+                    d.insert_temp(Id::unique((salt, j)), v);
                 }
-                None => d.remove::<bool>(Id::new((salt, j))),
+                None => d.remove::<bool>(Id::unique((salt, j))),
             }
         }
     });
 }
 
-/// Keep per-row flags (`Id::new((salt, index))`) with their rows when item `removed` of a
+/// Keep per-row flags (`Id::unique((salt, index))`) with their rows when item `removed` of a
 /// `len`-long list goes; its own flag goes with it.
 pub fn remove_flags(ui: &Ui, salt: &'static str, len: usize, removed: usize) {
     ui.data_mut(|d| {
-        let flags: Vec<Option<bool>> = (0..len).map(|i| d.get_temp::<bool>(Id::new((salt, i)))).collect();
+        let flags: Vec<Option<bool>> = (0..len).map(|i| d.get_temp::<bool>(Id::unique((salt, i)))).collect();
         for i in 0..len {
-            d.remove::<bool>(Id::new((salt, i)));
+            d.remove::<bool>(Id::unique((salt, i)));
         }
         for (i, f) in flags.into_iter().enumerate() {
             if let (Some(j), Some(v)) = (figcraft_engine::cmd::lists::removed_index(i, removed), f) {
-                d.insert_temp(Id::new((salt, j)), v);
+                d.insert_temp(Id::unique((salt, j)), v);
             }
         }
     });

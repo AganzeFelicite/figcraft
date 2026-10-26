@@ -2,8 +2,9 @@
 //!
 //! - An instance: its main component (with a swap menu), variant dropdowns, property values,
 //!   the selected layer's overrides, and Reset / Detach / Go to main / Push changes.
-//! - A component or component set: its properties (add, rename, default, delete) and, for a set,
-//!   the variant property matrix.
+//! - A component or component set: its properties (add, rename, default, delete), Add variant
+//!   (a lone main component becomes a set) and, for a set, the variant property matrix.
+//! - Several main components: Combine as variants.
 //! - A layer inside a component: bind its visibility / text / instance to a property, or make a
 //!   frame a slot.
 //! - A slot inside an instance (and an instance's slot properties): fill it with components
@@ -11,6 +12,7 @@
 
 use egui::{Id, Sense, Ui, vec2};
 use figcraft_doc::*;
+use figcraft_engine::cmd::component::{can_add_variant, can_combine_variants};
 use figcraft_engine::components::{
     PROP_BINDING, default_variant, inside_instance, owning_component, owning_instance, slot_def, slot_edited, slots_of, variant_conflicts,
     variant_options, variant_props, variant_set,
@@ -20,13 +22,17 @@ use serde_json::{Value, json};
 use crate::FigApp;
 use crate::i18n::{tr, tr_noop, trn};
 use crate::icons::{self, Icon};
-use crate::right::{menu_item, menu_popup, row};
+use crate::list_drag::ListDrag;
+use crate::right::{menu_item, menu_popup, row, row_rect};
 use crate::theme::{COMPONENT, Tokens, semibold};
 use crate::widgets;
 
 /// Entry point (called from the Design panel header for every selection).
 pub fn instance_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
-    let [id] = sel else { return };
+    let [id] = sel else {
+        combine_ui(app, ui, doc, sel);
+        return;
+    };
     let Some(n) = doc.node(*id) else { return };
     match &n.kind {
         NodeKind::Instance { .. } => instance_ui(app, ui, doc, n),
@@ -56,11 +62,25 @@ pub fn instance_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[No
     }
 }
 
+/// Two or more main components selected: a button combines them into a component set.
+fn combine_ui(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
+    if !can_combine_variants(doc, sel) {
+        return;
+    }
+    row(ui, 32.0, |ui| {
+        let label = crate::i18n::command("component.combineVariants", "Combine as variants");
+        if widgets::dropdown(ui, &label, 160.0, Some(Icon::ComponentSet)).clicked() {
+            app.run("component.combineVariants", json!({"ids": sel}));
+        }
+    });
+}
+
 /// A component's description: a multi-line field, saved when it loses focus.
 fn description_ui(app: &mut FigApp, ui: &mut Ui, id: NodeId, description: &str) {
     widgets::separator(ui);
     widgets::sublabels(ui, tr("Description"), None);
-    if let Some(new) = widgets::multiline_field(ui, Id::new(("comp_desc", id)), description, tr("Describe how and when to use this component"), 3) {
+    if let Some(new) = widgets::multiline_field(ui, Id::unique(("comp_desc", id)), description, tr("Describe how and when to use this component"), 3)
+    {
         app.run("node.set", json!({"id": id, "props": {"description": new.chars().take(10_000).collect::<String>()}}));
     }
     ui.add_space(8.0);
@@ -69,10 +89,10 @@ fn description_ui(app: &mut FigApp, ui: &mut Ui, id: NodeId, description: &str) 
 /// Local components (and component sets, not their variants), for swap menus: (id, label), page
 /// by page. Listed once per document revision (a file with thousands of layers isn't walked every
 /// frame).
-fn local_components(app: &FigApp, ui: &Ui, doc: &Document) -> std::sync::Arc<Vec<(NodeId, String)>> {
+pub(crate) fn local_components(app: &FigApp, ui: &Ui, doc: &Document) -> std::sync::Arc<Vec<(NodeId, String)>> {
     type Cached = ((u64, u64), std::sync::Arc<Vec<(NodeId, String)>>);
     let key = app.session.ds().map(|d| (d.uid, d.revision)).unwrap_or_default();
-    let id = Id::new("component_panel_local_components");
+    let id = Id::unique("component_panel_local_components");
     if let Some((k, list)) = ui.data(|d| d.get_temp::<Cached>(id))
         && k == key
     {
@@ -241,12 +261,14 @@ fn properties_ui(app: &mut FigApp, ui: &mut Ui, doc: &Document, owner: NodeId) {
     } else {
         Default::default()
     };
-    // Variant properties: name, values (the matrix), add value, delete.
-    for (k, vals) in &variants {
-        row(ui, 32.0, |ui| {
+    // Variant properties: name, values (the matrix), add value, delete. Dragged by their left
+    // margin to reorder them (only among themselves: the shared ones keep the engine's order).
+    let mut drag = ListDrag::in_order(ui, ("variant_props", owner));
+    for (i, (k, vals)) in variants.iter().enumerate() {
+        let header = row_rect(ui, 32.0, |ui| {
             let (ir, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
             icons::paint(ui.painter(), ir, Icon::ComponentSet, COMPONENT);
-            if let Some(nn) = widgets::text_field(ui, Id::new(("vprop_name", owner, k.as_str())), k, 110.0, tr("Name")) {
+            if let Some(nn) = widgets::text_field(ui, Id::unique(("vprop_name", owner, k.as_str())), k, 110.0, tr("Name")) {
                 app.run("component.editProperty", json!({"id": owner, "name": k, "newName": nn}));
             }
             let def = defaults.get(k).or(vals.first()).cloned().unwrap_or_default();
@@ -271,7 +293,7 @@ fn properties_ui(app: &mut FigApp, ui: &mut Ui, doc: &Document, owner: NodeId) {
             row(ui, 30.0, |ui| {
                 ui.add_space(22.0);
                 for v in &chunk {
-                    if let Some(nv) = widgets::text_field(ui, Id::new(("vprop_val", owner, k.as_str(), v.as_str())), v, 62.0, "")
+                    if let Some(nv) = widgets::text_field(ui, Id::unique(("vprop_val", owner, k.as_str(), v.as_str())), v, 62.0, "")
                         && nv != *v
                     {
                         app.run("component.editProperty", json!({"id": owner, "name": k, "value": v, "newValue": nv}));
@@ -284,6 +306,12 @@ fn properties_ui(app: &mut FigApp, ui: &mut Ui, doc: &Document, owner: NodeId) {
             });
             vi += 3;
         }
+        drag.row(ui, i, header, header.with_max_y(ui.cursor().min.y.max(header.max.y)), || k.clone());
+    }
+    if let Some((from, to)) = drag.finish(ui)
+        && let Some((k, _)) = variants.get(from)
+    {
+        app.run("component.editProperty", json!({"id": owner, "name": k, "index": to}));
     }
     // Shared properties.
     for (k, d) in &defs {
@@ -293,7 +321,7 @@ fn properties_ui(app: &mut FigApp, ui: &mut Ui, doc: &Document, owner: NodeId) {
         row(ui, 32.0, |ui| {
             let (ir, _) = ui.allocate_exact_size(vec2(14.0, 14.0), Sense::hover());
             icons::paint(ui.painter(), ir, type_icon(d), COMPONENT);
-            if let Some(nn) = widgets::text_field(ui, Id::new(("prop_name", owner, k.as_str())), k, 96.0, tr("Name")) {
+            if let Some(nn) = widgets::text_field(ui, Id::unique(("prop_name", owner, k.as_str())), k, 96.0, tr("Name")) {
                 app.run("component.editProperty", json!({"id": owner, "name": k, "newName": nn}));
             }
             match d {
@@ -303,20 +331,27 @@ fn properties_ui(app: &mut FigApp, ui: &mut Ui, doc: &Document, owner: NodeId) {
                     }
                 }
                 PropDef::Text { default } => {
-                    if let Some(v) = widgets::text_field(ui, Id::new(("prop_def", owner, k.as_str())), default, 84.0, tr("Default")) {
+                    if let Some(v) = widgets::text_field(ui, Id::unique(("prop_def", owner, k.as_str())), default, 84.0, tr("Default")) {
                         app.run("component.editProperty", json!({"id": owner, "name": k, "default": v}));
                     }
                 }
                 PropDef::InstanceSwap { default, .. } => {
                     let label = doc.node(*default).map(|n| n.name.clone()).unwrap_or_else(|| tr("Missing").into());
                     let resp = widgets::dropdown(ui, &label, 84.0, None);
-                    menu_popup(&resp).show(|ui| {
-                        for (c, name) in comps.iter() {
-                            if menu_item(ui, name, "") {
-                                app.run("component.editProperty", json!({"id": owner, "name": k, "default": c.0}));
-                                ui.close();
+                    crate::a11y::combo(&resp, k, &label, crate::a11y::menu_open(&resp));
+                    // A file with many components (an icon library) scrolls instead of running off the screen.
+                    menu_popup(&resp).width(200.0).show(|ui| {
+                        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                            for (c, name) in comps.iter() {
+                                let current = c == default;
+                                if menu_item(ui, &format!("{}{name}", if current { "✓ " } else { "" }), "") {
+                                    if !current {
+                                        app.run("component.editProperty", json!({"id": owner, "name": k, "default": c.0}));
+                                    }
+                                    ui.close();
+                                }
                             }
-                        }
+                        });
                     });
                 }
                 PropDef::Variant { .. } | PropDef::Slot { .. } => {}
@@ -356,7 +391,8 @@ fn properties_ui(app: &mut FigApp, ui: &mut Ui, doc: &Document, owner: NodeId) {
             });
         }
     }
-    if is_set {
+    // A lone main component too: Add variant makes it a set of itself and the new variant.
+    if can_add_variant(doc, owner) {
         row(ui, 32.0, |ui| {
             if widgets::dropdown(ui, tr("Add variant"), 120.0, Some(Icon::Plus)).clicked() {
                 app.run("component.addVariant", json!({"id": owner}));
@@ -493,7 +529,9 @@ fn group_label(g: &str) -> String {
         "grids" => tr("Layout grids"),
         "exports" => tr("Export settings"),
         "interactions" => tr("Interactions"),
+        "modes" => tr("Variable modes"),
         "size" => tr("Size"),
+        "resizing" => tr("Resizing"),
         "position" => tr("Position"),
         "component" => tr("Swapped instance"),
         "props" => tr("Instance properties"),
@@ -671,7 +709,7 @@ fn instance_props(app: &mut FigApp, ui: &mut Ui, doc: &Document, n: &Node, comps
                 PropDef::Text { .. } => {
                     crate::variable_ui::bindable(app, ui, &[id], &bind_field, VariableType::String, w, |app, ui| {
                         let cur = v.as_str().unwrap_or_default().to_string();
-                        if let Some(ns) = widgets::text_field(ui, Id::new(("iprop", id, k.as_str())), &cur, w, "")
+                        if let Some(ns) = widgets::text_field(ui, Id::unique(("iprop", id, k.as_str())), &cur, w, "")
                             && ns != cur
                         {
                             app.run("instance.setProperties", json!({"ids": [id], "properties": {k.clone(): ns}}));
@@ -679,35 +717,9 @@ fn instance_props(app: &mut FigApp, ui: &mut Ui, doc: &Document, n: &Node, comps
                     });
                 }
                 PropDef::InstanceSwap { preferred, .. } => {
-                    let cur = figcraft_engine::params::id_of(&v);
-                    let label = cur.and_then(|c| doc.node(c)).map(|c| c.name.clone()).unwrap_or_else(|| tr("None").into());
-                    let resp = widgets::dropdown(ui, &label, w, Some(Icon::Instance));
-                    menu_popup(&resp).width(200.0).show(|ui| {
-                        let t = Tokens::get(ui.ctx());
-                        let heading = |ui: &mut Ui, text: &str| ui.label(egui::RichText::new(text).font(semibold(11.0)).color(t.text_secondary));
-                        let mut pick = |ui: &mut Ui, c: NodeId, name: &str| {
-                            let current = cur == Some(c);
-                            if menu_item(ui, &format!("{}{name}", if current { "✓ " } else { "" }), "") {
-                                if !current {
-                                    app.run("instance.setProperties", json!({"ids": [id], "properties": {k.clone(): c.0}}));
-                                }
-                                ui.close();
-                            }
-                        };
-                        let preferred: Vec<(NodeId, String)> = preferred.iter().filter_map(|c| doc.node(*c).map(|n| (*c, n.name.clone()))).collect();
-                        if !preferred.is_empty() {
-                            heading(ui, tr("Preferred"));
-                            for (c, name) in &preferred {
-                                pick(ui, *c, name);
-                            }
-                            heading(ui, tr("All components"));
-                        }
-                        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                            for (c, name) in comps {
-                                pick(ui, *c, name);
-                            }
-                        });
-                    });
+                    if let Some(c) = swap_dropdown(ui, doc, figcraft_engine::params::id_of(&v), &preferred, comps, w, "").1 {
+                        app.run("instance.setProperties", json!({"ids": [id], "properties": {k.clone(): c.0}}));
+                    }
                 }
                 PropDef::Variant { .. } => {}
                 PropDef::Slot { preferred } => {
@@ -718,6 +730,54 @@ fn instance_props(app: &mut FigApp, ui: &mut Ui, doc: &Document, n: &Node, comps
             }
         });
     }
+}
+
+/// The dropdown of an instance-swap property showing component `cur`: its menu lists the
+/// property's preferred components first (when it has any), then every component in the file. The
+/// dropdown, and the component picked (picking the current one picks nothing). `name` labels it for
+/// assistive technology.
+pub(crate) fn swap_dropdown(
+    ui: &mut Ui,
+    doc: &Document,
+    cur: Option<NodeId>,
+    preferred: &[NodeId],
+    comps: &[(NodeId, String)],
+    w: f32,
+    name: &str,
+) -> (egui::Response, Option<NodeId>) {
+    let label = cur.and_then(|c| doc.node(c)).map(|c| c.name.clone()).unwrap_or_else(|| tr("None").into());
+    let resp = widgets::dropdown(ui, &label, w, Some(Icon::Instance));
+    if !name.is_empty() {
+        crate::a11y::combo(&resp, name, &label, crate::a11y::menu_open(&resp));
+    }
+    let mut picked = None;
+    menu_popup(&resp).width(200.0).show(|ui| {
+        let t = Tokens::get(ui.ctx());
+        let heading = |ui: &mut Ui, text: &str| ui.label(egui::RichText::new(text).font(semibold(11.0)).color(t.text_secondary));
+        let mut pick = |ui: &mut Ui, c: NodeId, name: &str| {
+            let current = cur == Some(c);
+            if menu_item(ui, &format!("{}{name}", if current { "✓ " } else { "" }), "") {
+                if !current {
+                    picked = Some(c);
+                }
+                ui.close();
+            }
+        };
+        let preferred: Vec<(NodeId, String)> = preferred.iter().filter_map(|c| doc.node(*c).map(|n| (*c, n.name.clone()))).collect();
+        if !preferred.is_empty() {
+            heading(ui, tr("Preferred"));
+            for (c, name) in &preferred {
+                pick(ui, *c, name);
+            }
+            heading(ui, tr("All components"));
+        }
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            for (c, name) in comps {
+                pick(ui, *c, name);
+            }
+        });
+    });
+    (resp, picked)
 }
 
 fn prop_label(ui: &mut Ui, name: &str, icon: Icon) {

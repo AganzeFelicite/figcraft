@@ -17,6 +17,7 @@ struct Origin<'a> {
     rest: &'a str,
     guid: &'a str,
     expanded: bool,
+    slot_content: bool,
     wire_frame: bool,
     wire_instance: bool,
     component: Option<&'a str>,
@@ -75,7 +76,8 @@ impl<'a> Sources<'a> {
             && meta.get("wireInstance").and_then(Value::as_bool) == Some(true)
             && node.get("type").and_then(Value::as_str) == Some("INSTANCE");
         let component = wire_instance.then(|| node.get("componentId").and_then(Value::as_str).filter(|id| guid(id))).flatten();
-        self.nodes.insert(id, Origin { rest, guid: origin, expanded, wire_frame, wire_instance, component });
+        let slot_content = meta.get("slotContent").and_then(Value::as_bool).unwrap_or(false);
+        self.nodes.insert(id, Origin { rest, guid: origin, expanded, slot_content, wire_frame, wire_instance, component });
     }
 
     fn origin(&self, id: NodeId) -> Option<Origin<'a>> {
@@ -211,6 +213,9 @@ impl<'a> Sources<'a> {
         let found = (|| {
             let meta = self.origin(id)?;
             let _ = doc.node(id)?;
+            if meta.slot_content {
+                return if matches!(doc.node(id)?.kind, NodeKind::Instance { .. }) { self.root_source(id, doc) } else { None };
+            }
             if !meta.expanded {
                 return self.root_source(id, doc);
             }
@@ -269,8 +274,8 @@ impl<'a> Sources<'a> {
         }
         let mut missing = self.rejected;
         for (&id, meta) in &self.nodes {
-            let needs_source =
-                (meta.expanded && !self.owned_layer(id, doc, ids)) || doc.node(id).is_some_and(|n| matches!(n.kind, NodeKind::Instance { .. }));
+            let needs_source = (!meta.slot_content && meta.expanded && !self.owned_layer(id, doc, ids))
+                || doc.node(id).is_some_and(|n| matches!(n.kind, NodeKind::Instance { .. }));
             if !needs_source {
                 continue;
             }

@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use chrono::Datelike;
 use egui::{Align2, Color32, CornerRadius, Id, Key, Rect, Response, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use figcraft_engine::Prefs;
 use figcraft_format::thumbnail::{FileKind, Preview};
@@ -200,18 +201,35 @@ const MONTHS: [&str; 12] = [
     tr_noop("Dec"),
 ];
 
-/// `secs` since 1970 as a date in UTC: "Mar 4, 2026".
+/// (days since 1970-01-01, seconds-of-day, nanos) → (proleptic Gregorian year, the same wall-clock
+/// instant moved into chrono's range by whole 400-year cycles). The calendar repeats every 400
+/// years (146_097 days), so month, day and time of day come from chrono and only the year is
+/// carried, which keeps the result exact for any `i64` day count. This is not hand-rolled calendar
+/// math: chrono still does the date, the cycle count just shifts the year.
+fn utc_parts(days: i64, sod: u32, nanos: u32) -> (i64, chrono::NaiveDateTime) {
+    let (cycles, rest) = (days.div_euclid(146_097), days.rem_euclid(146_097));
+    // `rest + 719_163` (1970-01-01 is CE day 719_163) is always a valid CE day, and `sod` < 86_400.
+    let date = i32::try_from(rest + 719_163).ok().and_then(chrono::NaiveDate::from_num_days_from_ce_opt);
+    let time = chrono::NaiveTime::from_num_seconds_from_midnight_opt(sod.min(86_399), nanos.min(999_999_999));
+    match (date, time) {
+        (Some(d), Some(t)) => {
+            let y = i128::from(d.year()) + i128::from(cycles) * 400;
+            (i64::try_from(y).unwrap_or(if y < 0 { i64::MIN } else { i64::MAX }), d.and_time(t))
+        }
+        _ => (1970, chrono::NaiveDateTime::default()), // unreachable
+    }
+}
+
+/// `secs` since 1970 as a date in UTC: "Mar 4, 2026". Years past chrono's own range (262143) keep
+/// converting: the instant is moved into range by whole 400-year cycles and the real year restored,
+/// so every `u64` reads as the date the old hand-rolled conversion produced.
 fn date(secs: u64) -> String {
-    // Days to a civil date (Howard Hinnant's days_from_civil, inverted).
-    let z = i64::try_from(secs / 86_400).unwrap_or(0) + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
+    // The day count of any `u64` seconds fits in `i64` (`u64::MAX / 86_400` ≈ 2.1e14), so the
+    // conversion is always exact (no epoch fallback). Splitting with `u64` arithmetic (as the old
+    // code did) avoids the `i64` seconds overflow near `u64::MAX`.
+    let (days, sod) = (i64::try_from(secs / 86_400).unwrap_or(i64::MAX), (secs % 86_400) as u32);
+    let (year, dt) = utc_parts(days, sod, 0);
+    let (month, day) = (i64::from(dt.month()), i64::from(dt.day()));
     let name = usize::try_from(month - 1).ok().and_then(|m| MONTHS.get(m)).map_or("", |m| tr(m));
     trf("{month} {day}, {year}", &[("month", &name), ("day", &day), ("year", &year)])
 }
@@ -234,6 +252,8 @@ pub struct Shown {
     pub name: String,
     /// `None` until the file has been looked at.
     pub stat: Option<Stat>,
+    /// A design file or a board (design until its picture has been read).
+    pub kind: figcraft_doc::FileKind,
 }
 
 impl Shown {
@@ -241,7 +261,7 @@ impl Shown {
         // Shown without its extension, like a document's name; the full path is the tooltip.
         let p = Path::new(path);
         let name = p.file_stem().or_else(|| p.file_name()).map_or_else(|| path.to_string(), |f| f.to_string_lossy().into_owned());
-        Shown { path: path.to_string(), name, stat }
+        Shown { path: path.to_string(), name, stat, kind: figcraft_doc::FileKind::Design }
     }
 
     fn date(&self, key: SortKey) -> Option<u64> {
@@ -293,6 +313,7 @@ struct Ready {
     modified: Option<u64>,
     page: Option<Color32>,
     texture: Option<egui::TextureHandle>,
+    kind: figcraft_doc::FileKind,
     /// When it came in (for its fade).
     arrived: f64,
 }
@@ -461,7 +482,7 @@ impl Recents {
                         let page = preview.page.map(|[r, g, b, a]| crate::theme::c32(figcraft_color::Color { r, g, b, a }));
                         // A changed file's new picture shows at once; a first one fades in.
                         let arrived = if k.shown.is_some() { f64::NEG_INFINITY } else { time };
-                        k.shown = Some(Ready { modified, page, texture, arrived });
+                        k.shown = Some(Ready { modified, page, texture, kind: preview.kind, arrived });
                         k.wanted = None;
                     }
                 }
@@ -501,12 +522,18 @@ impl Recents {
 
     /// The files as listed, with what is known about them.
     fn shown(&self, paths: &[String]) -> Vec<Shown> {
-        paths.iter().map(|p| Shown::new(p, self.files.get(p).and_then(|k| k.stat))).collect()
+        paths
+            .iter()
+            .map(|p| {
+                let k = self.files.get(p);
+                Shown { kind: k.and_then(|k| k.shown.as_ref()).map_or_else(Default::default, |r| r.kind), ..Shown::new(p, k.and_then(|k| k.stat)) }
+            })
+            .collect()
     }
 
     /// For `ui.inspect`: each file listed, whether it is there and whether its picture is in.
     pub fn inspect(&self, prefs: &Prefs) -> Value {
-        let paths: Vec<String> = prefs.recent_files.iter().take(SHOWN).cloned().collect();
+        let paths: Vec<String> = listed(&prefs.recent_files).take(SHOWN).cloned().collect();
         let files: Vec<Value> = sorted(self.shown(&paths), Sort::of(prefs))
             .iter()
             .map(|f| {
@@ -523,6 +550,12 @@ impl Recents {
             .collect();
         json!(files)
     }
+}
+
+/// The recent files that may be listed: all of them, or, when the app runs confined to automation
+/// roots, those inside them (no name or picture of another file is shown).
+pub(crate) fn listed(recents: &[String]) -> impl Iterator<Item = &String> {
+    recents.iter().filter(|p| figcraft_engine::file_access::allowed(p, figcraft_engine::file_access::Access::Read))
 }
 
 /// The recent files for `ui.inspect`: `{view, sort, order, files: [{path, name, exists, picture,
@@ -548,16 +581,27 @@ enum Action {
     View(View),
 }
 
-/// The Recent files heading, its toolbar and the files as cards or a table.
-pub fn section(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
-    let paths: Vec<String> = app.session.prefs.recent_files.iter().take(SHOWN).cloned().collect();
+/// The Recent files heading, its toolbar and the files as cards or a table. With a `query` (lower
+/// case, from the Home search) only the files not open whose path has it, from every recent file;
+/// nothing at all when none has it. How many files are shown.
+pub fn section(app: &mut FigApp, ui: &mut Ui, t: &Tokens, query: &str) -> usize {
+    let searching = !query.is_empty();
+    // A search reaches every recent file; the files shown without one stay known through it.
+    let paths: Vec<String> = listed(&app.session.prefs.recent_files).take(if searching { usize::MAX } else { SHOWN }).cloned().collect();
     let time = ui.input(|i| i.time);
     let now = figcraft_engine::cmd::comment::now_secs();
     let reduce_motion = app.reduce_motion();
     let (view, sort) = (View::of(&app.session.prefs), Sort::of(&app.session.prefs));
     let state = &mut app.ui.home_view.recents;
     state.refresh(ui.ctx(), &paths, time);
-    let files = sorted(state.shown(&paths), sort);
+    let mut files = sorted(state.shown(&paths), sort);
+    if searching {
+        let docs = &app.session.docs;
+        files.retain(|f| f.path.to_lowercase().contains(query) && !docs.iter().any(|d| d.path.as_deref() == Some(f.path.as_str())));
+        if files.is_empty() {
+            return 0;
+        }
+    }
     let with_created = files.iter().any(|f| f.stat.is_some_and(|s| s.created.is_some()));
     let mut action = toolbar(ui, t, view, sort, with_created);
     ui.add_space(16.0);
@@ -568,7 +612,7 @@ pub fn section(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
     action = action.or(chosen);
     match action {
         Some(Action::Open(path)) => {
-            if app.run("file.open", json!({"path": path})).is_some() {
+            if app.run_user("file.open", json!({"path": path})).is_some() {
                 app.ui.home = false;
             }
         }
@@ -587,6 +631,7 @@ pub fn section(app: &mut FigApp, ui: &mut Ui, t: &Tokens) {
         }
         None => {}
     }
+    files.len()
 }
 
 /// "Recent files", and at the right the sort menu and the grid and list buttons.
@@ -640,7 +685,7 @@ fn heading(ui: &mut Ui, t: &Tokens, text: &str) {
 
 /// The id of `path`'s card or row (stable, so the keyboard stays on it as the order changes).
 fn card_id(path: &str) -> Id {
-    Id::new(("home_recent_file", path))
+    Id::unique(("home_recent_file", path))
 }
 
 /// Clicks, keys and the context menu on a card or row: a click selects, a double-click or Enter
@@ -715,13 +760,13 @@ fn arrows(ui: &Ui, recents: &mut Recents, files: &[Shown], across: usize, down: 
     }
 }
 
-/// The square file-type mark before a name.
-fn file_icon(ui: &Ui, t: &Tokens, center: egui::Pos2, path: &str) {
+/// The square file-type mark before a name (a design file's pen nib, a board's note).
+fn file_icon(ui: &Ui, t: &Tokens, center: egui::Pos2, file: &Shown) {
     let r = Rect::from_center_size(center, vec2(16.0, 16.0));
-    match FileKind::of(Path::new(path)) {
-        FileKind::FigCraft | FileKind::Fig => {
-            ui.painter().rect_filled(r, CornerRadius::same(4), ACCENT);
-            icons::paint(ui.painter(), r.shrink(3.0), Icon::Logo, Color32::WHITE);
+    match FileKind::of(Path::new(&file.path)) {
+        FileKind::FigCraft | FileKind::Fig | FileKind::Sketch => {
+            ui.painter().rect_filled(r, CornerRadius::same(4), t.accent);
+            icons::paint(ui.painter(), r.shrink(3.0), icons::file_mark(file.kind), t.accent_on);
         }
         kind => {
             ui.painter().rect_filled(r, CornerRadius::same(4), t.field);
@@ -831,7 +876,7 @@ fn card(
     }
     p.line_segment([pos2(rect.min.x, area.max.y + 0.5), pos2(rect.max.x, area.max.y + 0.5)], Stroke::new(1.0, t.border));
     let y = area.max.y + 1.0 + FOOTER_H / 2.0;
-    file_icon(ui, t, pos2(rect.min.x + 24.0, y), &file.path);
+    file_icon(ui, t, pos2(rect.min.x + 24.0, y), file);
     let (x, w) = (rect.min.x + 44.0, rect.width() - 56.0);
     let name = widgets::elide_font(ui, &file.name, w, semibold(12.5));
     p.text(pos2(x, y - 8.0), Align2::LEFT_CENTER, name, semibold(12.5), t.text);
@@ -864,7 +909,7 @@ fn list(ui: &mut Ui, t: &Tokens, recents: &mut Recents, files: &[Shown], now: u6
         let x0 = if i == 0 { header.min.x } else { header.min.x + date_x(i) };
         let x1 = if i + 1 < columns.len() { header.min.x + date_x(i + 1) } else { header.max.x };
         let cell = Rect::from_min_max(pos2(x0, header.min.y), pos2(x1, header.max.y));
-        let resp = ui.interact(cell, Id::new(("home_recents_header", key.id())), Sense::click());
+        let resp = ui.interact(cell, Id::unique(("home_recents_header", key.id())), Sense::click());
         a11y::button(&resp, &trf("Sort by {column}", &[("column", label)]));
         let on = sort.key == *key;
         if resp.hovered() {
@@ -899,6 +944,8 @@ fn list(ui: &mut Ui, t: &Tokens, recents: &mut Recents, files: &[Shown], now: u6
         if !ui.is_rect_visible(r) {
             continue;
         }
+        // The row's mark says what kind of file it is: read it like a card's picture.
+        recents.picture(&file.path, true, ui.input(|i| i.time));
         let selected = recents.selected.as_deref() == Some(file.path.as_str());
         let p = ui.painter();
         if selected {
@@ -909,7 +956,7 @@ fn list(ui: &mut Ui, t: &Tokens, recents: &mut Recents, files: &[Shown], now: u6
         if resp.has_focus() && !selected {
             p.rect_stroke(r, CornerRadius::same(5), Stroke::new(2.0, t.focus), StrokeKind::Inside);
         }
-        file_icon(ui, t, pos2(r.min.x + 20.0, r.center().y), &file.path);
+        file_icon(ui, t, pos2(r.min.x + 20.0, r.center().y), file);
         let name_w = date_x(1) - 52.0;
         p.text(
             pos2(r.min.x + 40.0, r.center().y),
@@ -946,4 +993,25 @@ fn list(ui: &mut Ui, t: &Tokens, recents: &mut Recents, files: &[Shown], now: u6
     }
     arrows(ui, recents, files, 0, 1);
     action
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `date` keeps the exact "Mon D, YYYY" (UTC) output the hand-rolled days-from-civil code
+    /// produced. With no catalog loaded the month and format strings pass through in English.
+    #[test]
+    fn date_formats_seconds_since_1970_in_utc() {
+        assert_eq!(date(0), "Jan 1, 1970");
+        assert_eq!(date(951_782_400), "Feb 29, 2000");
+        assert_eq!(date(1_709_164_800), "Feb 29, 2024");
+        assert_eq!(date(1_741_046_400), "Mar 4, 2025");
+        // A year past chrono's own `NaiveDate` range (262143): the instant is moved into range by
+        // whole 400-year cycles and the real year restored.
+        assert_eq!(date(253_402_300_800), "Jan 1, 10000");
+        // Past chrono's year range, `u64::MAX` keeps the old hand-rolled output instead of falling
+        // back to the epoch.
+        assert_eq!(date(u64::MAX), "Nov 9, 584554051223");
+    }
 }

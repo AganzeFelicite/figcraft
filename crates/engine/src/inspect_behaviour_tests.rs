@@ -214,6 +214,26 @@ fn css_for_common_layers() {
     }
 }
 
+/// Individual stroke sides are borders on those sides only: a header with a divider under it isn't
+/// boxed in, and a side bound to a variable names it.
+#[test]
+fn css_borders_follow_individual_stroke_sides() {
+    let mut s = Session::new();
+    let r = rect(&mut s, 0.0, 0.0, 100.0, 50.0, None);
+    set(&mut s, &[r], json!({"strokes": ["#000000"], "strokeWeight": 1, "strokeSides": [0, 0, 2, 0]}));
+    let c = css(&mut s, r);
+    assert!(c.contains("border-bottom: 2px solid #000000;"), "{c}");
+    assert!(!c.contains("border:") && !c.contains("border-top") && !c.contains("border-right") && !c.contains("border-left"), "{c}");
+
+    let col = ex(&mut s, "variable.createCollection", json!({"name": "Borders"}));
+    let col = col["id"].as_str().unwrap().to_string();
+    ex(&mut s, "variable.create", json!({"collection": col, "name": "border/top", "type": "number", "value": 3}));
+    ex(&mut s, "variable.bind", json!({"ids": [r], "field": "strokeTopWeight", "variable": "border/top"}));
+    let c = css(&mut s, r);
+    assert!(c.contains("border-top: var(--border-top, 3px) solid #000000;"), "{c}");
+    assert!(c.contains("border-bottom: 2px solid #000000;"), "{c}");
+}
+
 #[test]
 fn native_code_for_a_simple_layer() {
     let mut s = Session::new();
@@ -320,6 +340,13 @@ fn rem_conversion_leaves_names_alone() {
     let f = crate::codegen::px_to_rem;
     // Lengths convert, names ending in "px" don't.
     assert_eq!(f("width: 32px; --gap-8px: 1; margin: -8px 0px;", 16.0), "width: 2rem; --gap-8px: 1; margin: -0.5rem 0rem;");
-    assert_eq!(f("épx 1px px", 16.0), "épx 0.06rem px");
+    assert_eq!(f("épx 1px px", 16.0), "épx 0.0625rem px");
     assert_eq!(f("", 16.0), "");
+}
+
+#[test]
+fn rem_conversion_keeps_the_original_pixels() {
+    let f = crate::codegen::px_to_rem;
+    assert_eq!(f("padding: 3px;", 16.0), "padding: 0.1875rem;");
+    assert_eq!(f("gap: 0.5px;", 16.0), "gap: 0.03125rem;");
 }

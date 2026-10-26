@@ -18,57 +18,156 @@ use crate::tools::{PointerEvent, PointerKind};
 use crate::vectoredit::{VectorEdit, network};
 
 #[test]
-fn region_paints_block_destructive_rebuilds_before_mutation() {
+fn region_paints_survive_simplify_offset_and_bucket_normalization() {
     let mut s = Session::new();
-    let id = square(&mut s, true);
+    let id = square(&mut s, false);
+    ex_to_vector(s.doc_mut().unwrap(), id);
+    let mut gradient = figcraft_color::Gradient::default_for(figcraft_color::GradientKind::Linear, figcraft_color::Color::BLACK);
+    gradient.from = (0.2, 0.1);
+    gradient.to = (0.8, 0.9);
+    let fills = vec![
+        figcraft_color::Paint::gradient(gradient),
+        figcraft_color::Paint::image("test-image", figcraft_color::ImageScaleMode::Crop),
+        figcraft_color::Paint::pattern(123),
+    ];
     {
         let doc = s.doc_mut().unwrap();
         let NodeKind::Vector { network } = &mut doc.get_mut(id).unwrap().kind else { panic!("expected vector fixture") };
-        network.regions[0].fills = Some(vec![figcraft_color::Paint::solid(figcraft_color::Color::BLACK)]);
+        network.regions[0].fills = Some(fills.clone());
     }
-    let before = net(&s, id);
-    for (cmd, params) in
-        [("vector.simplify", json!({"ids": [id]})), ("vector.offset", json!({"ids": [id], "offset": 2})), ("vector.flatten", json!({"ids": [id]}))]
-    {
-        assert!(
-            matches!(s.execute(cmd, &params), Err(crate::EngineError::Disabled(actual, reason)) if actual == cmd && reason.contains("region paints")),
-            "{cmd} must report the region-paint-loss guard"
-        );
-        assert_eq!(net(&s, id), before, "{cmd} must leave network untouched");
-    }
-    let group = id_of(&ex(&mut s, "object.group", json!({"ids": [id]}))["id"]).unwrap();
-    assert!(
-        matches!(s.execute("vector.flatten", &json!({"ids": [group]})), Err(crate::EngineError::Disabled(actual, reason)) if actual == "vector.flatten" && reason.contains("region paints")),
-        "flatten must report its descendant region-paint-loss guard"
-    );
-    assert_eq!(net(&s, id), before, "descendant guard must leave network untouched");
+    ex(&mut s, "vector.simplify", json!({"ids": [id]}));
+    assert_eq!(net(&s, id).regions[0].fills, Some(fills.clone()), "simplify keeps the full stack");
+    ex(&mut s, "vector.offset", json!({"ids": [id], "offset": 2}));
+    assert_eq!(net(&s, id).regions[0].fills, Some(fills.clone()), "offset keeps the full stack");
+
+    // Add a divider so the legacy single region must split into independently painted faces.
     ex(&mut s, "vector.edit.begin", json!({"id": id}));
-    assert!(
-        matches!(s.execute("vector.edit.paint", &json!({"x": 50, "y": 50})), Err(crate::EngineError::Disabled(actual, reason)) if actual == "vector.edit.paint" && reason.contains("region paints")),
-        "bucket must report its region-paint-loss guard"
+    let network = net(&s, id);
+    let (topseg, botseg) = (
+        network.segments.iter().position(|sg| network.vertices[sg.a].y == 0.0 && network.vertices[sg.b].y == 0.0).unwrap(),
+        network.segments.iter().position(|sg| network.vertices[sg.a].y == 104.0 && network.vertices[sg.b].y == 104.0).unwrap(),
     );
-    assert_eq!(net(&s, id), before, "bucket normalization must leave network untouched");
+    let a = ex(&mut s, "vector.edit.addVertex", json!({"segment": topseg, "t": 0.5}))["vertex"].as_u64().unwrap();
+    let b = ex(&mut s, "vector.edit.addVertex", json!({"segment": botseg, "t": 0.5}))["vertex"].as_u64().unwrap();
+    ex(&mut s, "vector.edit.connect", json!({"a": a, "b": b}));
+    ex(&mut s, "vector.edit.paint", json!({"x": 25, "y": 52}));
+    let normalized = net(&s, id);
+    assert_eq!(normalized.regions.len(), 1, "unfilled face is removed while the other stays");
+    assert_eq!(normalized.regions[0].fills, Some(fills.clone()), "untouched face keeps the original stack");
+    assert!(!normalized.fill_contains(Point::new(27.0, 54.0)));
+    assert!(normalized.fill_contains(Point::new(77.0, 54.0)));
+    s.undo().unwrap();
+    assert!(net(&s, id).fill_contains(Point::new(25.0, 52.0)), "bucket change is undoable");
+    ex(&mut s, "vector.edit.end", json!({}));
+
+    let group = id_of(&ex(&mut s, "object.group", json!({"ids": [id]}))["id"]).unwrap();
+    let flattened = id_of(&ex(&mut s, "vector.flatten", json!({"ids": [group]}))["id"]).unwrap();
+    let flattened_net = net(&s, flattened);
+    assert!(flattened_net.regions.iter().all(|region| region.fills == Some(fills.clone())), "flatten keeps each source region stack");
+    assert!(flattened_net.regions.iter().all(|region| region.paint_space.is_some()), "flatten keeps source paint frames");
+    assert!(flattened_net.fill_contains(Point::new(25.0, 52.0)));
+    let prior_frame =
+        flattened_net.regions[0].paint_frame(s.doc().unwrap().get(flattened).unwrap().width, s.doc().unwrap().get(flattened).unwrap().height);
+    let prior_world_frame = s.doc().unwrap().world_transform(flattened) * prior_frame.2;
+    let regrouped = id_of(&ex(&mut s, "object.group", json!({"ids": [flattened]}))["id"]).unwrap();
+    let flattened_again = id_of(&ex(&mut s, "vector.flatten", json!({"ids": [regrouped]}))["id"]).unwrap();
+    let after = net(&s, flattened_again);
+    let after_frame =
+        after.regions[0].paint_frame(s.doc().unwrap().get(flattened_again).unwrap().width, s.doc().unwrap().get(flattened_again).unwrap().height);
+    let after_world_frame = s.doc().unwrap().world_transform(flattened_again) * after_frame.2;
+    assert!(
+        prior_world_frame.as_coeffs().iter().zip(after_world_frame.as_coeffs()).all(|(before, after)| (before - after).abs() < 1e-8),
+        "flattening an already framed gradient preserves its source coordinates"
+    );
+
+    let empty_id = square(&mut s, false);
+    ex_to_vector(s.doc_mut().unwrap(), empty_id);
+    {
+        let doc = s.doc_mut().unwrap();
+        if let NodeKind::Vector { network } = &mut doc.get_mut(empty_id).unwrap().kind {
+            network.regions[0].fills = Some(Vec::new());
+        }
+    }
+    ex(&mut s, "vector.simplify", json!({"ids": [empty_id]}));
+    ex(&mut s, "vector.offset", json!({"ids": [empty_id], "offset": 2}));
+    assert_eq!(net(&s, empty_id).regions[0].fills, Some(Vec::new()), "explicit empty paint stack survives refit");
+
+    let inherited_id = square(&mut s, false);
+    ex_to_vector(s.doc_mut().unwrap(), inherited_id);
+    {
+        let doc = s.doc_mut().unwrap();
+        if let NodeKind::Vector { network } = &mut doc.get_mut(inherited_id).unwrap().kind {
+            network.regions[0].fills = None;
+        }
+    }
+    let inherited_fills = s.doc().unwrap().get(inherited_id).unwrap().fills.clone();
+    let (old_width, old_height) = {
+        let node = s.doc().unwrap().get(inherited_id).unwrap();
+        (node.width, node.height)
+    };
+    ex(&mut s, "vector.offset", json!({"ids": [inherited_id], "offset": 2}));
+    let inherited_net = net(&s, inherited_id);
+    let inherited = &inherited_net.regions[0];
+    assert_eq!(inherited.fills, Some(inherited_fills), "inherited paints become explicit when the node box refits");
+    let frame = inherited.paint_space.expect("refitted inherited paint has a frame");
+    assert_eq!((frame.width, frame.height), (old_width, old_height), "paint coordinates retain the original node box");
+
+    let empty_faces =
+        id_of(&ex(&mut s, "vector.create", json!({"path": "M0 0 L100 0 L100 100 L0 100 Z M200 0 L300 0 L300 100 L200 100 Z"}))["id"]).unwrap();
+    {
+        let doc = s.doc_mut().unwrap();
+        let node = doc.get_mut(empty_faces).unwrap();
+        node.fills.clear();
+        let NodeKind::Vector { network } = &mut node.kind else { panic!("expected vector fixture") };
+        assert!(network.regions.iter().all(|region| region.fills.is_none()));
+    }
+    ex(&mut s, "vector.edit.begin", json!({"id": empty_faces}));
+    ex(&mut s, "vector.edit.paint", json!({"x": 50, "y": 50}));
+    let split = net(&s, empty_faces);
+    let left =
+        split.regions.iter().enumerate().find(|(index, _)| split.region_contains(*index, Point::new(50.0, 50.0))).map(|(_, region)| region).unwrap();
+    let right =
+        split.regions.iter().enumerate().find(|(index, _)| split.region_contains(*index, Point::new(250.0, 50.0))).map(|(_, region)| region).unwrap();
+    assert_eq!(left.fills, None, "clicking an explicitly empty face fills it");
+    assert_eq!(right.fills, Some(Vec::new()), "untouched inherited-empty face stays empty");
+    assert!(!s.doc().unwrap().get(empty_faces).unwrap().fills.is_empty(), "the painted target gets the layer default fill");
 }
 
 #[test]
-fn region_paints_block_shape_builder_before_mutation() {
+fn legacy_evenodd_holes_survive_bucket_offset_and_flatten() {
     let mut s = Session::new();
-    let a = square(&mut s, false);
-    let b = id_of(&ex(&mut s, "shape.rectangle", json!({"x": 50, "y": 50, "width": 100, "height": 100}))["id"]).unwrap();
+    let id = id_of(&ex(&mut s, "vector.create", json!({"path": "M0 0 L200 0 L200 200 L0 200 Z M50 50 L150 50 L150 150 L50 150 Z"}))["id"]).unwrap();
     {
         let doc = s.doc_mut().unwrap();
-        ex_to_vector(doc, a);
+        let NodeKind::Vector { network } = &mut doc.get_mut(id).unwrap().kind else { panic!("expected vector fixture") };
+        network.regions[0].winding = figcraft_doc::WindingRule::EvenOdd;
     }
-    s.set_selection(vec![a, b]);
-    let before = net(&s, a);
-    for (cmd, params) in [("shapeBuilder.merge", json!({"points": [[75, 75]]})), ("shapeBuilder.remove", json!({"points": [[75, 75]]}))] {
-        assert!(
-            matches!(s.execute(cmd, &params), Err(crate::EngineError::Disabled(actual, reason)) if actual == cmd && reason.contains("region paints")),
-            "{cmd} must report the region-paint-loss guard"
-        );
-        assert_eq!(net(&s, a), before, "{cmd} must leave network untouched");
-        assert!(s.doc().unwrap().node(b).is_some(), "{cmd} must not remove the other shape");
+    assert!(!net(&s, id).fill_contains(Point::new(100.0, 100.0)), "center starts as an even-odd hole");
+    ex(&mut s, "vector.edit.begin", json!({"id": id}));
+    ex(&mut s, "vector.edit.paint", json!({"x": 100, "y": 100}));
+    assert!(net(&s, id).fill_contains(Point::new(100.0, 100.0)), "bucket fills a legacy even-odd hole");
+    s.undo().unwrap();
+    ex(&mut s, "vector.edit.end", json!({}));
+
+    let flatten_source =
+        id_of(&ex(&mut s, "vector.create", json!({"path": "M0 0 L200 0 L200 200 L0 200 Z M50 50 L150 50 L150 150 L50 150 Z"}))["id"]).unwrap();
+    {
+        let doc = s.doc_mut().unwrap();
+        if let NodeKind::Vector { network } = &mut doc.get_mut(flatten_source).unwrap().kind {
+            network.regions[0].winding = figcraft_doc::WindingRule::EvenOdd;
+        }
     }
+    let group = id_of(&ex(&mut s, "object.group", json!({"ids": [flatten_source]}))["id"]).unwrap();
+    let flattened_legacy = id_of(&ex(&mut s, "vector.flatten", json!({"ids": [group]}))["id"]).unwrap();
+    assert_eq!(net(&s, flattened_legacy).regions.len(), 1, "flatten combines unstyled legacy loops");
+    assert!(!net(&s, flattened_legacy).fill_contains(Point::new(100.0, 100.0)), "flatten preserves the legacy even-odd hole");
+
+    ex(&mut s, "vector.offset", json!({"ids": [id], "offset": 2}));
+    assert!(!net(&s, id).fill_contains(Point::new(100.0, 100.0)), "offset retains the even-odd hole");
+    let group = id_of(&ex(&mut s, "object.group", json!({"ids": [id]}))["id"]).unwrap();
+    let flattened = id_of(&ex(&mut s, "vector.flatten", json!({"ids": [group]}))["id"]).unwrap();
+    assert_eq!(net(&s, flattened).regions.len(), 1, "legacy region loops stay grouped");
+    assert!(!net(&s, flattened).fill_contains(Point::new(100.0, 100.0)), "flatten retains the even-odd hole");
 }
 
 /// Give vector `id` a painted region, converting a plain shape to a vector first.
@@ -157,7 +256,8 @@ fn entering_and_leaving_vector_edit_mode() {
         ("Enter", false, "Enter leaves edit mode"),
         ("Escape", false, "Escape leaves edit mode"),
         ("Escape with an open pen path", true, "Escape first ends the pen's path and stays in edit mode"),
-        ("click outside", false, "silent: a click away from the shape leaves edit mode (pinned)"),
+        ("click outside", true, "silent: a click away from the shape only clears the points (pinned)"),
+        ("double-click outside", false, "a double-click away from the shape leaves edit mode"),
     ];
     for (how, after, why) in rows {
         let mut s = Session::new();
@@ -176,6 +276,7 @@ fn entering_and_leaving_vector_edit_mode() {
                 key(&mut s, "Escape", false);
                 assert!(editing(&s).is_some_and(|e| e.anchor.is_none()), "{why}: the path ended");
             }
+            "double-click outside" => s.pointer(&ev(PointerKind::DoubleClick, (600.0, 600.0), NONE)).unwrap(),
             _ => click(&mut s, (600.0, 600.0), NONE),
         }
         assert_eq!(editing(&s).is_some(), after, "{why}");
@@ -194,6 +295,50 @@ fn entering_and_leaving_vector_edit_mode() {
     assert!((path.area().abs() - outline.area().abs()).abs() < 0.5, "the outline is kept, rounded corners included");
     s.undo().unwrap();
     assert!(matches!(s.doc().unwrap().node(id).unwrap().kind, NodeKind::Rectangle), "converting is one undo step");
+}
+
+#[test]
+fn thin_strokes_are_easy_to_enter_and_bend() {
+    use crate::tools::ToolId;
+    // A diagonal line from (100, 100) to (200, 50); `off` steps away from its middle, square to it.
+    let at = |off: f64| (150.0 + off * 50.0 / 125f64.sqrt() / 10.0, 75.0 + off * 100.0 / 125f64.sqrt() / 10.0);
+    // (layer, screen px off the stroke, in edit mode after a double-click, derivation)
+    let rows: Vec<(&str, f64, bool, &str)> = vec![
+        ("line", 0.0, true, "double-clicking a selected line edits it as a vector"),
+        ("line", 4.0, true, "a 1 px line reaches a few pixels, so a double-click near it still lands (#646)"),
+        ("line", 8.0, false, "a double-click well away from it does not"),
+        ("path", 4.0, true, "a stroke-only path reaches as far as a line does"),
+        ("path", 8.0, false, "and no further"),
+    ];
+    for (layer, off, after, why) in rows {
+        let mut s = Session::new();
+        let id = if layer == "line" {
+            s.set_tool(ToolId::Line);
+            drag(&mut s, (100.0, 100.0), (200.0, 50.0), NONE);
+            *s.selection().first().unwrap()
+        } else {
+            let id = id_of(&ex(&mut s, "vector.create", json!({"points": [[100, 100], [200, 50]], "closed": false}))["id"]).unwrap();
+            // Styled like a pen stroke: 1 px, no fill.
+            ex(&mut s, "node.set", json!({"ids": [id], "props": {"fills": [], "strokes": ["#000000"], "strokeWeight": 1}}));
+            s.set_selection(vec![id]);
+            id
+        };
+        assert!(!s.doc().unwrap().node(id).unwrap().fills.iter().any(|f| f.visible), "{why}: the {layer} only has a stroke");
+        let p = at(off);
+        click(&mut s, p, NONE);
+        s.pointer(&ev(PointerKind::Down, p, NONE)).unwrap();
+        s.pointer(&ev(PointerKind::DoubleClick, p, NONE)).unwrap();
+        s.pointer(&ev(PointerKind::Up, p, NONE)).unwrap();
+        assert_eq!(editing(&s).is_some(), after, "{why}");
+        if after {
+            // Cmd/Ctrl then bends it through the pointer.
+            drag(&mut s, at(0.0), (170.0, 115.0), Mods { cmd: true, ..NONE });
+            let w = s.doc().unwrap().world_transform(id);
+            let n = net(&s, id);
+            assert!(!n.segments[0].is_straight(), "{why}: Cmd/Ctrl bends it");
+            assert!((w * n.cubic(0).unwrap().eval(0.5) - Point::new(170.0, 115.0)).hypot() < 1.0, "{why}: through the pointer");
+        }
+    }
 }
 
 #[test]
@@ -255,7 +400,7 @@ fn selecting_points_and_segments() {
         match what {
             "click tl" => click(&mut s, (0.0, 0.0), m),
             "click tr" => click(&mut s, (100.0, 0.0), m),
-            "click top" => click(&mut s, (50.0, 0.0), m),
+            "click top" => click(&mut s, (30.0, 0.0), m),
             "marquee top" => drag(&mut s, (-20.0, -20.0), (110.0, 10.0), m),
             _ => {
                 ex(&mut s, "vector.edit.tool", json!({"tool": "lasso"}));
@@ -329,7 +474,7 @@ fn deleting_points_vs_delete_and_heal() {
     // Deleting a selected segment keeps its points when others use them.
     let mut s = Session::new();
     let id = square(&mut s, true);
-    click(&mut s, (50.0, 0.0), NONE);
+    click(&mut s, (30.0, 0.0), NONE);
     key(&mut s, "Delete", false);
     let n = net(&s, id);
     assert_eq!((n.vertices.len(), n.segments.len()), (4, 3), "deleting a segment leaves its points");
@@ -457,4 +602,62 @@ fn bend_paint_bucket_cut_join_and_eraser_tools() {
     ex(&mut s, "vector.edit.erase", json!({"points": [[50, 0]], "radius": 10}));
     assert_eq!(net(&s, id).segments.len(), 2, "the eraser removes what it passes over");
     assert_eq!(s.doc().unwrap().node(page).unwrap().children, vec![id], "and the pieces stay one layer");
+}
+
+#[test]
+fn vector_paths_take_the_requested_size_and_refuse_empty_geometry() {
+    let mut s = Session::new();
+    let path = "M0 0 L24 0 L24 24 L0 24 Z";
+    let intrinsic = id_of(&ex(&mut s, "vector.create", json!({"path": path}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(intrinsic).unwrap();
+    assert_eq!((n.width, n.height), (24.0, 24.0), "a path without a size keeps its intrinsic box");
+    // Both sides: each scales independently, like resizing a vector.
+    let both = id_of(&ex(&mut s, "vector.create", json!({"path": path, "width": 16, "height": 8}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(both).unwrap();
+    assert_eq!((n.width, n.height), (16.0, 8.0));
+    let n = net(&s, both);
+    let max = n.vertices.iter().fold((0.0f64, 0.0f64), |(x, y), v| (x.max(v.x), y.max(v.y)));
+    assert!((max.0 - 16.0).abs() < 1e-9 && (max.1 - 8.0).abs() < 1e-9, "{max:?}: the geometry itself is scaled");
+    // One side: the other keeps its proportion.
+    let width = id_of(&ex(&mut s, "vector.create", json!({"path": path, "width": 16}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(width).unwrap();
+    assert_eq!((n.width, n.height), (16.0, 16.0));
+    // A path or point set that draws nothing is an error, not an invisible zero-size layer.
+    let e = s.execute("vector.create", &json!({"path": "M5 5"})).unwrap_err().to_string();
+    assert!(e.contains("draws nothing"), "{e}");
+    let e = s.execute("vector.create", &json!({"points": [[5, 5], [5, 5]]})).unwrap_err().to_string();
+    assert!(e.contains("draws nothing"), "{e}");
+    // A size on an axis the geometry has none of is refused, not silently ignored.
+    let e = s.execute("vector.create", &json!({"path": "M0 0 L0 24", "width": 16})).unwrap_err().to_string();
+    assert!(e.contains("horizontal extent"), "{e}");
+    let e = s.execute("vector.create", &json!({"path": "M0 0 L24 0", "height": 16})).unwrap_err().to_string();
+    assert!(e.contains("vertical extent"), "{e}");
+    // But 0 on an axis it has none of is what it already is: a horizontal line with height 0.
+    let line = id_of(&ex(&mut s, "vector.create", json!({"path": "M0 0 L24 0", "width": 16, "height": 0}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(line).unwrap();
+    assert_eq!((n.width, n.height), (16.0, 0.0));
+    // A size of 0 or less on an axis it has would flatten it, so it is refused, alone or with the other.
+    for p in [json!({"path": path, "width": 0}), json!({"path": path, "width": 16, "height": 0}), json!({"path": path, "width": -4, "height": 8})] {
+        let e = s.execute("vector.create", &p).unwrap_err().to_string();
+        assert!(e.contains("positive"), "{p}: {e}");
+    }
+}
+
+#[test]
+fn vector_points_take_the_requested_size() {
+    let mut s = Session::new();
+    let points = json!([[10, 20], [34, 20], [34, 32]]);
+    let corners = |s: &Session, id: NodeId| net(s, id).vertices.iter().map(|v| (v.x, v.y)).collect::<Vec<_>>();
+    // Both sides: each axis scales on its own; the vertices move with the box.
+    let both = id_of(&ex(&mut s, "vector.create", json!({"points": points, "x": 10, "y": 20, "width": 48, "height": 6}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(both).unwrap();
+    assert_eq!((n.width, n.height), (48.0, 6.0));
+    assert_eq!(corners(&s, both), vec![(0.0, 0.0), (48.0, 0.0), (48.0, 6.0)]);
+    // One side: the other keeps its proportion.
+    let one = id_of(&ex(&mut s, "vector.create", json!({"points": points, "height": 24}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(one).unwrap();
+    assert_eq!((n.width, n.height), (48.0, 24.0));
+    assert_eq!(corners(&s, one), vec![(0.0, 0.0), (48.0, 0.0), (48.0, 24.0)]);
+    let e = s.execute("vector.create", &json!({"points": points, "width": 16, "height": -1})).unwrap_err().to_string();
+    assert!(e.contains("positive"), "{e}");
 }

@@ -256,7 +256,7 @@ pub fn contributors_ui(ui: &mut egui::Ui) {
 /// [`contributors_ui`] over a given list (tests pass their own).
 fn contributors_in(ui: &mut egui::Ui, contributors: &[Contributor], total_commits: u64) {
     let t = Tokens::get(ui.ctx());
-    let id = egui::Id::new("credits_view");
+    let id = egui::Id::unique("credits_view");
     let mut v = ui.data_mut(|d| d.get_temp::<View>(id)).unwrap_or_default();
     ui.horizontal_wrapped(|ui| {
         ui.label(RichText::new(tr("Show")).color(t.text_secondary));
@@ -446,7 +446,7 @@ fn cell(ui: &mut egui::Ui, numeric: bool, text: &str) {
 fn header_cell(ui: &mut egui::Ui, t: &Tokens, label: &str, numeric: bool, sort: Option<Option<bool>>) -> egui::Response {
     let rect = ui.max_rect();
     let resp = ui.allocate_rect(rect, if sort.is_some() { egui::Sense::click() } else { egui::Sense::hover() });
-    let kind = if sort.is_some() { egui::WidgetType::Button } else { egui::WidgetType::Label };
+    let kind = if sort.is_some() { egui::Role::Button } else { egui::Role::Label };
     resp.widget_info(|| egui::WidgetInfo::labeled(kind, true, label));
     let resp = if sort.is_some() { resp.on_hover_cursor(egui::CursorIcon::PointingHand) } else { resp };
     let current = sort.flatten();

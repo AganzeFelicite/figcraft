@@ -27,7 +27,7 @@ pub fn section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
     widgets::sublabels(ui, tr("Dimensions"), None);
     row(ui, 32.0, |ui| {
         for (key, lead, side) in [("scale_w", "W", b.width()), ("scale_h", "H", b.height())] {
-            let (v, s) = match widgets::number_field(ui, Id::new(key), Lead::Text(lead), Some(round(side)), "", col, 1.0) {
+            let (v, s) = match widgets::number_field(ui, Id::unique(key), Lead::Text(lead), Some(round(side)), "", col, 1.0) {
                 Some(FieldEdit::Set(v)) => (v, None),
                 Some(FieldEdit::Scrub(v, done)) => (v, Some(done)),
                 None => continue,
@@ -42,7 +42,7 @@ pub fn section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
     crate::right::block(ui, 52.0, 2.0, |ui| {
         // Relative to the layers as they are: a scrub applies once, when let go.
         if let Some(FieldEdit::Set(k) | FieldEdit::Scrub(k, true)) =
-            widgets::number_field(ui, Id::new("scale_k"), Lead::None, Some(1.0), "x", col, 0.1)
+            widgets::number_field(ui, Id::unique("scale_k"), Lead::None, Some(1.0), "x", col, 0.1)
         {
             factor = Some(k);
         }
@@ -90,7 +90,7 @@ fn anchor_picker(ui: &mut Ui, cur: (u8, u8)) -> Option<(u8, u8)> {
         for col in 0..3u8 {
             let c = pos2(r.min.x + 8.0 + f32::from(col) * 16.0, r.min.y + 8.0 + f32::from(row) * 16.0);
             let hit = Rect::from_center_size(c, vec2(16.0, 16.0));
-            let resp = ui.interact(hit, Id::new(("scale_anchor_dot", col, row)), Sense::click());
+            let resp = ui.interact(hit, Id::unique(("scale_anchor_dot", col, row)), Sense::click());
             let on = (col, row) == cur;
             if on {
                 ui.painter().rect_filled(Rect::from_center_size(c, vec2(7.0, 7.0)), CornerRadius::same(2), t.accent);

@@ -1,8 +1,84 @@
 //! On-canvas text editing: caret, selection, typing. A whole editing session is one undo step.
 
+use std::sync::{LazyLock, Mutex};
+
 use figcraft_doc::{Document, ListStyle, NodeId, NodeKind, TextData};
 
 use crate::{EngineError, Preedit, Result, Session, TextEdit};
+
+/// Most committed UTF-8 bytes an outgoing IME snapshot may describe.
+///
+/// This mirrors the fork's `egui::output::MAX_IME_SURROUNDING_TEXT_BYTES`; the engine keeps its
+/// own constant so this layer has no egui dependency. The query below returns only this bounded
+/// window around the selection, never a copy of the whole document.
+pub const MAX_IME_SURROUNDING_BYTES: usize = 4000;
+
+/// Stable identity of the on-canvas text edit an IME context belongs to.
+///
+/// `document` and `node` do not change through ordinary text or caret edits. `editing_session`
+/// changes when [`begin`] starts a new session for an equal `(document, node)` pair (leaving and
+/// re-entering the same layer), so a replaced target never inherits an old composition.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImeEditOwner {
+    /// The document tab's uid.
+    pub document: u64,
+    /// The edited text node.
+    pub node: NodeId,
+    /// [`TextEdit::editing_session`] of the current edit.
+    pub editing_session: u64,
+}
+
+/// Why the committed text around the IME caret cannot be described.
+///
+/// These are the only reasons this custom editor reports
+/// `egui::output::IMESurroundingText::Unavailable`; an empty text layer is available with empty
+/// text and a collapsed selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImeSurroundingUnavailable {
+    /// No text layer is being edited.
+    NotEditing,
+    /// The editing target is not a text node any more.
+    NotText,
+    /// The selection alone is wider than [`MAX_IME_SURROUNDING_BYTES`], so no bounded snapshot
+    /// can contain both selection ends.
+    SelectionTooWide,
+    /// Defensive: the computed window was not a character-boundary slice. The rounding above
+    /// makes this unreachable for a well-formed text model.
+    InvalidWindow,
+}
+
+/// One bounded, committed logical-text observation for the outgoing IME snapshot.
+///
+/// `text` is never display/bidi order and never contains the pre-edit (which is UI-only in this
+/// editor). `cursor` and `anchor` are UTF-8 byte offsets into `text`; `anchor > cursor` is a
+/// valid reversed selection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImeSurrounding {
+    /// Identity of the edit this observation belongs to.
+    pub owner: ImeEditOwner,
+    /// At most [`MAX_IME_SURROUNDING_BYTES`] bytes of committed text around the selection.
+    pub text: String,
+    /// UTF-8 byte offset of the primary caret in [`Self::text`].
+    pub cursor: usize,
+    /// UTF-8 byte offset of the selection anchor in [`Self::text`].
+    pub anchor: usize,
+}
+
+/// Every editing session gets its own token; zero is valid and never reused deliberately.
+///
+/// A mutex (rather than an atomic) also works on wasm32 targets without 64-bit atomics.
+static EDITING_SESSION: LazyLock<Mutex<u64>> = LazyLock::new(|| Mutex::new(0));
+
+/// Return the next editing-session token from a mutex-protected counter (`wrapping_add`).
+/// Zero is a valid token; the mutex also works on wasm32 without 64-bit atomics.
+fn next_editing_session() -> u64 {
+    let mut session = match EDITING_SESSION.lock() {
+        Ok(session) => session,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    *session = session.wrapping_add(1);
+    *session
+}
 
 fn text_of(s: &Session, id: NodeId) -> Result<TextData> {
     match &s.doc()?.get(id)?.kind {
@@ -17,11 +93,13 @@ pub fn begin(s: &mut Session, id: NodeId, caret: Option<usize>, created: bool) -
     let n = t.char_count();
     s.begin_interaction("Edit text")?;
     let ds = s.ds_mut()?;
+    // Editing the same layer again (a double-click into a text just made) keeps it new.
+    let created = created || ds.text_edit.as_ref().is_some_and(|te| te.id == id && te.created);
     let (caret, anchor) = match caret {
         Some(c) => (c.min(n), c.min(n)),
         None => (n, 0),
     };
-    ds.text_edit = Some(TextEdit { id, caret, anchor, created, preedit: None });
+    ds.text_edit = Some(TextEdit { id, caret, anchor, created, editing_session: next_editing_session(), preedit: None });
     ds.selection = vec![id];
     ds.revision += 1;
     s.live_text_notice(id);
@@ -32,7 +110,24 @@ pub fn begin(s: &mut Session, id: NodeId, caret: Option<usize>, created: bool) -
 pub fn end(s: &mut Session) -> Result<()> {
     let Some(te) = s.ds()?.text_edit.clone() else { return Ok(()) };
     s.ds_mut()?.text_edit = None;
-    let empty = text_of(s, te.id).map(|t| t.characters.trim().is_empty()).unwrap_or(false);
+    // A widget's editable field: the typing is put back and the new value goes to the widget's
+    // plugin through `widget.setText`, one undo step (or none when nothing changed).
+    if let Some((w, field)) = s.doc().ok().and_then(|d| crate::widgets::field_of(d, te.id)) {
+        let value = text_of(s, te.id).map(|t| t.characters).unwrap_or_default();
+        s.cancel_interaction()?;
+        let ds = s.ds_mut()?;
+        ds.selection = vec![w];
+        ds.revision += 1;
+        if text_of(s, te.id).is_ok_and(|t| t.characters != value)
+            && let Err(e) = s.execute("widget.setText", &serde_json::json!({"id": w, "field": field, "value": value}))
+        {
+            s.message = Some(e.to_string());
+        }
+        return Ok(());
+    }
+    // A board object's text (a sticky's note) stays when emptied; the object is selected again.
+    let owner = s.doc().ok().and_then(|d| crate::board::owner_of_text(d, te.id));
+    let empty = owner.is_none() && text_of(s, te.id).map(|t| t.characters.trim().is_empty()).unwrap_or(false);
     if empty {
         let doc = s.doc_mut()?;
         let _ = doc.remove(te.id);
@@ -42,14 +137,21 @@ pub fn end(s: &mut Session) -> Result<()> {
         // Nothing to undo for a text box that was never filled. The gesture snapshot was taken
         // after the layer was added, so it still holds it: re-base it on the document without the
         // layer, and committing then records no step (and leaves the redo stack alone).
+        // A snapshot taken before the layer was added (the Text on a path tool, which also took
+        // the path layer away) is put back whole instead.
         let ds = s.ds_mut()?;
         let doc = ds.doc.clone();
-        if let Some(it) = ds.interaction.as_mut() {
+        if ds.interaction.as_ref().is_some_and(|it| it.doc.node(te.id).is_none()) {
+            s.cancel_interaction()?;
+        } else if let Some(it) = ds.interaction.as_mut() {
             it.doc = doc;
         }
     }
     s.commit_interaction()?;
     let ds = s.ds_mut()?;
+    if let Some(o) = owner {
+        ds.selection = vec![o];
+    }
     ds.revision += 1;
     Ok(())
 }
@@ -58,14 +160,33 @@ fn range(te: &TextEdit) -> (usize, usize) {
     (te.caret.min(te.anchor), te.caret.max(te.anchor))
 }
 
+/// Apply an unconditional text-model mutation through `edit_if`, whose success clears the
+/// composition, clamps caret and anchor to the character count, marks a `characters` override
+/// when the node is source-backed, normalizes the document and bumps the revision.
 fn edit(s: &mut Session, f: impl FnOnce(&mut TextData, &mut TextEdit)) -> Result<()> {
+    edit_if(s, |t, te| {
+        f(t, te);
+        true
+    })
+    .map(|_| ())
+}
+
+/// [`edit`] for a mutation that can still turn out to be a no-op.
+///
+/// The closure returns whether it changed the model; return `false` only before mutating (the
+/// text is handed over directly). A no-op leaves the composition (`preedit`), the revision and the
+/// document untouched, so an IME deletion that finds nothing to delete does not cancel an
+/// in-progress composition.
+fn edit_if(s: &mut Session, f: impl FnOnce(&mut TextData, &mut TextEdit) -> bool) -> Result<bool> {
     let ds = s.ds_mut()?;
     let Some(mut te) = ds.text_edit.clone() else { return Err(EngineError::Other("not editing text".into())) };
     let before = ds.doc.clone();
     let doc = ds.doc_mut();
     let n = doc.get_mut(te.id)?;
     let NodeKind::Text(t) = &mut n.kind else { return Err(EngineError::Other("not a text layer".into())) };
-    f(t, &mut te);
+    if !f(t, &mut te) {
+        return Ok(false);
+    }
     // Any edit ends a composition (a commit replaces it with the final text).
     te.preedit = None;
     let len = t.char_count();
@@ -77,16 +198,83 @@ fn edit(s: &mut Session, f: impl FnOnce(&mut TextData, &mut TextEdit)) -> Result
     crate::normalize(doc, &before);
     ds.text_edit = Some(te);
     ds.revision += 1;
-    Ok(())
+    Ok(true)
+}
+
+/// What an accepted IME `Commit` did to the committed model.
+///
+/// An IME receipt may label the snapshot `InputMethod` only for [`Self::Plain`]. AutoFormat
+/// (typing "- " at a line start turns the paragraph into a list) is an application
+/// transformation in the same command, so the frame's change must be reported as `Other`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImeInsertion {
+    /// Nothing was inserted (an empty, control-only, or bare-newline commit).
+    Nothing,
+    /// The committed text replaced the selection exactly.
+    Plain,
+    /// The editor transformed the commit before applying it: paragraph AutoFormat, or line-ending
+    /// normalisation/control-character removal. The frame's change is application-origin.
+    Transformed,
 }
 
 /// Type (or paste) `text` replacing the selection. Line endings are normalised and other control
 /// characters dropped, so pasted plain text from any platform lands cleanly.
 pub fn insert(s: &mut Session, text: &str) -> Result<()> {
-    let text: String = crate::cmd::props::normalize_line_endings(text).chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect();
-    if text.is_empty() {
+    insert_model(s, text, false).map(|_| ())
+}
+
+/// End the composition without changing the document, for an empty IME commit.
+///
+/// Returns without touching the session when no composition is active (or nothing is being
+/// edited): an empty commit is otherwise a no-op, never an error.
+fn clear_composition(s: &mut Session) -> Result<()> {
+    let composing = s.ds().ok().and_then(|d| d.text_edit.as_ref()).is_some_and(|te| te.preedit.is_some());
+    if !composing {
         return Ok(());
     }
+    let ds = s.ds_mut()?;
+    if let Some(te) = ds.text_edit.as_mut() {
+        te.preedit = None;
+    }
+    ds.revision += 1;
+    Ok(())
+}
+
+/// Apply an IME `Commit`, reporting whether it was a plain insertion.
+///
+/// The UI calls this instead of [`insert`] so only a commit that the editor applied as a plain
+/// insertion can earn an `InputMethod` receipt. AutoFormat, line-ending normalisation and
+/// control-character removal are application transformations and are reported as
+/// [`ImeInsertion::Transformed`]. Like stock `TextEdit`, a bare `"\n"`/`"\r"` commit is ignored.
+pub fn insert_ime_commit(s: &mut Session, text: &str) -> Result<ImeInsertion> {
+    insert_model(s, text, true)
+}
+
+/// Insert committed text, optionally as an IME commit: normalize line endings, drop control
+/// characters except `\n`/`\t`, ignore a bare newline/CR IME commit, clear an active
+/// composition for an empty or control-only IME commit, and turn a committed space after a
+/// line-start `-`, `*` or `1.` into a bulleted/numbered list. Reports whether the insertion was
+/// plain, transformed, or a no-op.
+fn insert_model(s: &mut Session, text: &str, ime_commit: bool) -> Result<ImeInsertion> {
+    // Stock `TextEdit` deliberately ignores these two commits (they are not a mutation); only a
+    // real commit may do so, since typing Enter goes through `insert`.
+    if ime_commit && matches!(text, "\n" | "\r") {
+        return Ok(ImeInsertion::Nothing);
+    }
+    let normalized: String =
+        crate::cmd::props::normalize_line_endings(text).chars().filter(|c| !c.is_control() || matches!(c, '\n' | '\t')).collect();
+    if normalized.is_empty() {
+        // An empty commit is how some integrations (Safari's egui web integration when the last
+        // composition character is deleted) end the composition. It inserts nothing, but it must
+        // still clear the pre-edit; stock `TextEdit` does the same in its non-ignored `Commit` arm.
+        if ime_commit {
+            clear_composition(s)?;
+        }
+        return Ok(ImeInsertion::Nothing);
+    }
+    // A commit the editor had to transform is an application edit, not a plain insertion.
+    let mut outcome = if normalized == text { ImeInsertion::Plain } else { ImeInsertion::Transformed };
+    let text = normalized;
     edit(s, |t, te| {
         let (a, b) = range(te);
         // "- ", "* " or "1. " typed at the start of a plain paragraph starts a list.
@@ -103,13 +291,15 @@ pub fn insert(s: &mut Session, text: &str) -> Result<()> {
                 t.replace_range(start, a, "");
                 t.set_para_lists(start, start, |pl| pl.list = list);
                 (te.caret, te.anchor) = (start, start);
+                outcome = ImeInsertion::Transformed;
                 return;
             }
         }
         t.replace_range(a, b, &text);
         te.caret = a + text.chars().count();
         te.anchor = te.caret;
-    })
+    })?;
+    Ok(outcome)
 }
 
 /// List keys: Tab nests the selected list items a level deeper; Shift+Tab, Backspace at an item's
@@ -238,7 +428,7 @@ pub fn key(s: &mut Session, key: &str, shift: bool, word: bool, line: bool) -> R
                     } else if word {
                         word_left(&chars, a)
                     } else {
-                        figcraft_text::grapheme_step(&t.characters, a, false)
+                        figcraft_text::backspace_step(&t.characters, a)
                     };
                     (from, a)
                 } else {
@@ -332,6 +522,160 @@ fn select(s: &mut Session, anchor: usize, caret: usize) -> Result<()> {
     }
     ds.revision += 1;
     Ok(())
+}
+
+/// Delete the text surrounding the caret/selection that an IME reports with
+/// [`egui::ImeEvent::DeleteSurroundingBytes`]: `before_bytes` UTF-8 bytes end where the selection
+/// starts and `after_bytes` start where it ends. As in stock `TextEdit`, the selected text itself
+/// is kept for the paired `Commit`; only whole characters covered by the byte counts beyond the
+/// selection are removed (a character the range only partly covers stays). Returns whether
+/// anything was deleted.
+pub fn delete_surrounding_bytes(s: &mut Session, before_bytes: usize, after_bytes: usize) -> Result<bool> {
+    let Some(te) = s.ds()?.text_edit.clone() else { return Ok(false) };
+    let t = text_of(s, te.id)?;
+    let (a, b) = range(&te);
+    let (before, after) = surrounding_chars(&t.characters, a, b, before_bytes, after_bytes);
+    if before == 0 && after == 0 {
+        return Ok(false);
+    }
+    edit_if(s, |t, te| {
+        let (a, b) = range(te);
+        let (before, after) = surrounding_chars(&t.characters, a, b, before_bytes, after_bytes);
+        if before == 0 && after == 0 {
+            return false;
+        }
+        // Delete after the selection first so the before range's indices stay valid.
+        if after > 0 {
+            t.replace_range(b, b + after, "");
+        }
+        if before > 0 {
+            t.replace_range(a - before, a, "");
+        }
+        // Keep the selection: both ends move left by the deleted prefix, reversed or not.
+        te.caret = te.caret.saturating_sub(before);
+        te.anchor = te.anchor.saturating_sub(before);
+        true
+    })
+}
+
+/// Delete surrounding text counted in characters (the older `DeleteSurrounding` event). The
+/// selection is kept, as in stock `TextEdit`; only text before and after it is removed.
+pub fn delete_surrounding_chars(s: &mut Session, before_chars: usize, after_chars: usize) -> Result<bool> {
+    let Some(te) = s.ds()?.text_edit.clone() else { return Ok(false) };
+    let t = text_of(s, te.id)?;
+    let (a, b) = range(&te);
+    let (_, b_byte) = char_byte_offsets(&t.characters, a, b);
+    let before = before_chars.min(a);
+    let after = t.characters.get(b_byte..).map_or(0, |rest| rest.chars().take(after_chars).count());
+    if before == 0 && after == 0 {
+        return Ok(false);
+    }
+    edit_if(s, |t, te| {
+        let (a, b) = range(te);
+        let (_, b_byte) = char_byte_offsets(&t.characters, a, b);
+        let before = before_chars.min(a);
+        let after = t.characters.get(b_byte..).map_or(0, |rest| rest.chars().take(after_chars).count());
+        if before == 0 && after == 0 {
+            return false;
+        }
+        if after > 0 {
+            t.replace_range(b, b + after, "");
+        }
+        if before > 0 {
+            t.replace_range(a - before, a, "");
+        }
+        te.caret = te.caret.saturating_sub(before);
+        te.anchor = te.anchor.saturating_sub(before);
+        true
+    })
+}
+
+/// The UTF-8 byte offsets of character indices `a` and `b` in one forward pass.
+///
+/// An index at or past the end maps to `text.len()`. Walking once (instead of twice) matters on
+/// every IME event over a large text layer; the walk is still O(max(a, b)) characters, and callers
+/// that need the end still pay O(n). See [`ime_surrounding`].
+fn char_byte_offsets(text: &str, a: usize, b: usize) -> (usize, usize) {
+    let (mut a_byte, mut b_byte) = (None, None);
+    for (i, (byte, _)) in text.char_indices().enumerate() {
+        if a_byte.is_none() && i == a {
+            a_byte = Some(byte);
+        }
+        if b_byte.is_none() && i == b {
+            b_byte = Some(byte);
+        }
+        if a_byte.is_some() && b_byte.is_some() {
+            break;
+        }
+    }
+    (a_byte.unwrap_or(text.len()), b_byte.unwrap_or(text.len()))
+}
+
+/// `(before, after)` characters covered by the IME's byte counts around the selection `[a, b)`
+/// (character indices): mirror of egui's own `surrounding_bytes_to_chars`.
+fn surrounding_chars(text: &str, a: usize, b: usize, before_bytes: usize, after_bytes: usize) -> (usize, usize) {
+    let (a_byte, b_byte) = char_byte_offsets(text, a, b);
+    let from = a_byte.saturating_sub(before_bytes);
+    let before = text[..a_byte].char_indices().rev().take_while(|(i, _)| *i >= from).count();
+    let after = text[b_byte..].char_indices().take_while(|(i, c)| i + c.len_utf8() <= after_bytes).count();
+    (before, after)
+}
+
+/// The committed text around the IME caret for the outgoing surrounding-text snapshot.
+///
+/// This is the edited node's logical model text (never the bidi display order), with the
+/// pre-edit excluded because a composition is UI-only in this editor until it is committed.
+/// Character caret/anchor indices become independent UTF-8 byte offsets, so a reversed
+/// selection stays reversed. At most [`MAX_IME_SURROUNDING_BYTES`] bytes are copied: the window
+/// is centred on the selection and rounded inward to character boundaries. An empty text layer
+/// is `Ok` with `text == ""` and both offsets zero; the result is [`ImeSurroundingUnavailable`]
+/// only when there is no text edit, the target is not a text node, or the selection alone is
+/// wider than the budget.
+///
+/// Cost: one character walk up to the later of the two cursor indices (to turn char indices into
+/// UTF-8 bytes) plus the bounded copy. The caret is a character index, so reaching a caret near
+/// the end of a very large layer is still O(n); the UI calls this once per pass and twice around
+/// each text-affecting event (`ime_stamp`), so such a layer pays O(caret/anchor) per event. The
+/// document is never cloned here.
+pub fn ime_surrounding(s: &Session) -> std::result::Result<ImeSurrounding, ImeSurroundingUnavailable> {
+    let ds = s.ds().map_err(|_| ImeSurroundingUnavailable::NotEditing)?;
+    let te = ds.text_edit.as_ref().ok_or(ImeSurroundingUnavailable::NotEditing)?;
+    let node = ds.doc.node(te.id).ok_or(ImeSurroundingUnavailable::NotText)?;
+    let NodeKind::Text(t) = &node.kind else { return Err(ImeSurroundingUnavailable::NotText) };
+    let text = t.characters.as_str();
+    // One pass for both offsets (the caret and anchor are already clamped by `edit`/`select`).
+    let (cursor, anchor) = char_byte_offsets(text, te.caret, te.anchor);
+    let (selection_start, selection_end) = (cursor.min(anchor), cursor.max(anchor));
+    let selection_len = selection_end - selection_start;
+    if selection_len > MAX_IME_SURROUNDING_BYTES {
+        return Err(ImeSurroundingUnavailable::SelectionTooWide);
+    }
+    // Spend the budget on both sides, giving room unused on one side to the other.
+    let budget = MAX_IME_SURROUNDING_BYTES - selection_len;
+    let before_available = selection_start;
+    let after_available = text.len() - selection_end;
+    let mut before = (budget / 2).min(before_available);
+    let mut after = (budget - before).min(after_available);
+    before = (budget - after).min(before_available);
+    after = (budget - before).min(after_available);
+    let mut window_start = selection_start - before;
+    let mut window_end = selection_end + after;
+    // Round inward so the window stays within the byte budget and on character boundaries.
+    while window_start < window_end && !text.is_char_boundary(window_start) {
+        window_start += 1;
+    }
+    while window_end > window_start && !text.is_char_boundary(window_end) {
+        window_end -= 1;
+    }
+    let Some(window) = text.get(window_start..window_end) else {
+        return Err(ImeSurroundingUnavailable::InvalidWindow);
+    };
+    Ok(ImeSurrounding {
+        owner: ImeEditOwner { document: ds.uid, node: te.id, editing_session: te.editing_session },
+        text: window.to_owned(),
+        cursor: cursor.saturating_sub(window_start),
+        anchor: anchor.saturating_sub(window_start),
+    })
 }
 
 /// Show an IME composition inline at the caret (`cursor` = the IME's cursor inside it, in chars;
@@ -569,12 +913,25 @@ mod tests {
         end(&mut s).unwrap();
     }
 
+    #[test]
+    fn backspace_removes_only_the_final_thai_mark() {
+        let (mut s, id) = setup("น้ำ");
+        begin(&mut s, id, Some(3), false).unwrap();
+
+        key(&mut s, "Backspace", false, false, false).unwrap();
+
+        assert_eq!(data(&s, id).characters, "น้");
+    }
+
     fn ev(kind: PointerKind, x: f64, y: f64, shift: bool) -> PointerEvent {
         let mut e = PointerEvent::at(kind, x, y, 1.0);
         e.shift = shift;
         e
     }
 
+    /// Asserts double-clicking a text layer selects all text, a second double-click selects the
+    /// word without changing the editing session, and drag and Shift+click extend the
+    /// selection.
     #[test]
     fn pointer_double_click_drag_and_shift_click() {
         let (mut s, id) = setup("Hello world");
@@ -591,10 +948,16 @@ mod tests {
         s.pointer(&ev(PointerKind::Up, mid, y, false)).unwrap();
         s.pointer(&ev(PointerKind::DoubleClick, mid, y, false)).unwrap();
         assert_eq!(sel(&s), (0, 11));
+        let epoch = s.ds().unwrap().text_edit.as_ref().unwrap().editing_session;
         s.pointer(&ev(PointerKind::Down, mid, y, false)).unwrap();
         s.pointer(&ev(PointerKind::DoubleClick, mid, y, false)).unwrap();
         s.pointer(&ev(PointerKind::Up, mid, y, false)).unwrap();
         assert_eq!(sel(&s), (6, 11));
+        assert_eq!(
+            s.ds().unwrap().text_edit.as_ref().unwrap().editing_session,
+            epoch,
+            "a double-click inside the edit is an ordinary edit: same IME replacement epoch"
+        );
         // Drag-select from the start of "Hello" to the middle.
         s.pointer(&ev(PointerKind::Down, x_of(0) + 0.5, y, false)).unwrap();
         assert_eq!(sel(&s), (0, 0));
@@ -782,6 +1145,7 @@ mod tests {
         assert!(r.is_null() || r["axes"].is_array());
     }
 
+    /// No text command panics on junk parameters while a text is being edited.
     #[test]
     fn text_commands_survive_junk_while_editing() {
         let junk = [
@@ -793,7 +1157,8 @@ mod tests {
             json!({"variations": {"wght": "heavy", "toolong": 1}, "text": "\u{0}\u{7}", "cursor": 1e300}),
             json!({"variations": {"wght": 1e300, "opsz": -1e300}, "replace": "yes", "text": "日本語", "cursor": -1}),
         ];
-        for spec in crate::cmd::all_commands().iter().filter(|c| c.id.starts_with("text.")) {
+        // `text.rescanFonts` takes no params and walks the font folders: one walk per junk is slow.
+        for spec in crate::cmd::all_commands().iter().filter(|c| c.id.starts_with("text.") && c.id != "text.rescanFonts") {
             for j in &junk {
                 let (mut s, id) = setup("Hi there\nyou");
                 begin(&mut s, id, Some(2), false).unwrap();
@@ -803,5 +1168,204 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Asserts surrounding text is logical UTF-8 text with byte offsets and keeps a reversed
+    /// selection reversed.
+    #[test]
+    fn ime_surrounding_uses_logical_utf8_bytes_and_keeps_selection_direction() {
+        let (mut s, id) = setup("café😀e\u{301}x");
+        begin(&mut s, id, Some(8), false).unwrap();
+        set_caret(&mut s, 8, false).unwrap();
+        set_caret(&mut s, 5, true).unwrap(); // anchor after the emoji, caret before it
+        let ime = ime_surrounding(&s).unwrap();
+        assert_eq!(ime.text, "café😀e\u{301}x");
+        assert_eq!((ime.cursor, ime.anchor), (9, 13), "char 5 and char 8 as UTF-8 bytes");
+        assert!(ime.cursor < ime.anchor, "the reversed selection stays reversed");
+        assert_eq!(ime.owner.node, id);
+        assert_eq!(ime.owner.document, s.ds().unwrap().uid);
+    }
+
+    /// Asserts an active composition is excluded from surrounding text and an empty text layer
+    /// reports an available, empty payload.
+    #[test]
+    fn ime_surrounding_excludes_the_composition_and_empty_text_is_available() {
+        let (mut s, id) = setup("Hi");
+        begin(&mut s, id, Some(2), false).unwrap();
+        preedit(&mut s, "にほ", Some(1)).unwrap();
+        let ime = ime_surrounding(&s).unwrap();
+        assert_eq!(ime.text, "Hi", "the composition is not committed text");
+        assert_eq!((ime.cursor, ime.anchor), (2, 2));
+        end(&mut s).unwrap();
+
+        let (mut s, id) = setup("");
+        begin(&mut s, id, Some(0), false).unwrap();
+        let ime = ime_surrounding(&s).unwrap();
+        assert_eq!((ime.text.as_str(), ime.cursor, ime.anchor), ("", 0, 0), "an empty layer is available, not unavailable");
+    }
+
+    /// Asserts surrounding text is capped at `MAX_IME_SURROUNDING_BYTES`, an exactly budget-sized
+    /// selection is describable, and one byte more is `SelectionTooWide`.
+    #[test]
+    fn ime_surrounding_is_bounded_and_a_too_wide_selection_is_explicitly_unavailable() {
+        let long = "a".repeat(5000);
+        let (mut s, id) = setup(&long);
+        begin(&mut s, id, Some(5000), false).unwrap();
+        let ime = ime_surrounding(&s).unwrap();
+        assert_eq!(ime.text.len(), MAX_IME_SURROUNDING_BYTES);
+        assert_eq!((ime.cursor, ime.anchor), (MAX_IME_SURROUNDING_BYTES, MAX_IME_SURROUNDING_BYTES));
+
+        // Exactly the budget is still describable; one more byte is not.
+        set_caret(&mut s, 1000, false).unwrap();
+        set_caret(&mut s, 5000, true).unwrap();
+        let ime = ime_surrounding(&s).unwrap();
+        assert_eq!(ime.text.len(), 4000);
+        assert_eq!((ime.cursor, ime.anchor), (4000, 0));
+        set_caret(&mut s, 999, false).unwrap();
+        set_caret(&mut s, 5000, true).unwrap();
+        assert_eq!(ime_surrounding(&s), Err(ImeSurroundingUnavailable::SelectionTooWide));
+    }
+
+    /// Asserts edits and caret moves keep the same IME owner, while ending and beginning a new
+    /// edit session changes the generation.
+    #[test]
+    fn ime_owner_is_stable_through_edits_and_the_session_changes_on_begin() {
+        let (mut s, id) = setup("Hello");
+        begin(&mut s, id, Some(0), false).unwrap();
+        let first = ime_surrounding(&s).unwrap().owner;
+        insert(&mut s, "x").unwrap();
+        set_caret(&mut s, 2, false).unwrap();
+        assert_eq!(ime_surrounding(&s).unwrap().owner, first, "edits and caret moves keep the owner");
+        end(&mut s).unwrap();
+        begin(&mut s, id, Some(0), false).unwrap();
+        let replaced = ime_surrounding(&s).unwrap().owner;
+        assert_eq!(replaced.node, id);
+        assert_ne!(replaced.editing_session, first.editing_session, "a new edit session is a replacement epoch");
+    }
+
+    /// Asserts byte deletion around a reversed selection removes whole characters on both
+    /// sides, keeps the selected text and direction, and a final no-op leaves the text alone.
+    #[test]
+    fn ime_delete_surrounding_bytes_keeps_the_reversed_selection_and_deletes_around_it() {
+        let (mut s, id) = setup("ab你好cd");
+        begin(&mut s, id, Some(4), false).unwrap();
+        set_caret(&mut s, 4, false).unwrap();
+        set_caret(&mut s, 2, true).unwrap(); // reversed: caret before 你, anchor after 好
+        assert!(delete_surrounding_bytes(&mut s, 1, 1).unwrap());
+        // "b" (whole character before the selection) and "c" (whole character after it) go; the
+        // selected "你好" stays for the paired commit, and the reversed direction is preserved.
+        assert_eq!(data(&s, id).characters, "a你好d");
+        assert_eq!(sel(&s), (3, 1)); // (anchor, caret), still reversed
+        assert!(delete_surrounding_bytes(&mut s, 1, 1).unwrap());
+        assert_eq!(data(&s, id).characters, "你好");
+        assert_eq!(sel(&s), (2, 0)); // (anchor, caret), still reversed
+        assert!(!delete_surrounding_bytes(&mut s, 1, 1).unwrap(), "nothing is left around the selection");
+        assert_eq!(data(&s, id).characters, "你好", "a no-op delete does not touch the text");
+    }
+
+    /// Asserts character deletion keeps and shifts the selection, and a no-op delete leaves an
+    /// active composition and the revision untouched.
+    #[test]
+    fn ime_delete_surrounding_chars_keeps_the_selection_and_ignores_a_no_op() {
+        let (mut s, id) = setup("ab你好cd");
+        begin(&mut s, id, Some(2), false).unwrap();
+        set_caret(&mut s, 4, true).unwrap(); // "你好"
+        assert!(delete_surrounding_chars(&mut s, 1, 1).unwrap());
+        assert_eq!(data(&s, id).characters, "a你好d");
+        assert_eq!(sel(&s), (1, 3), "the selection is kept, shifted by the deleted prefix");
+        set_caret(&mut s, 0, false).unwrap();
+        // A composition in progress survives a delete that finds nothing to remove.
+        preedit(&mut s, "x", None).unwrap();
+        let revision = s.ds().unwrap().revision;
+        assert!(!delete_surrounding_chars(&mut s, 1, 0).unwrap());
+        assert_eq!(s.ds().unwrap().text_edit.as_ref().and_then(|te| te.preedit.as_ref()).map(|p| p.text.as_str()), Some("x"));
+        assert_eq!(s.ds().unwrap().revision, revision, "a no-op does not bump the revision");
+        assert!(!delete_surrounding_bytes(&mut s, 1, 0).unwrap());
+        assert_eq!(s.ds().unwrap().text_edit.as_ref().and_then(|te| te.preedit.as_ref()).map(|p| p.text.as_str()), Some("x"));
+        assert_eq!(s.ds().unwrap().revision, revision);
+    }
+
+    /// Asserts a text layer in another document has a different IME owner.
+    #[test]
+    fn ime_owner_identity_changes_with_the_document() {
+        let (mut s, id) = setup("Hi");
+        begin(&mut s, id, Some(2), false).unwrap();
+        let first = ime_surrounding(&s).unwrap().owner;
+        end(&mut s).unwrap();
+        s.execute("file.new", &json!({"name": "Second"})).unwrap();
+        let r = s.execute("text.create", &json!({"text": "There", "x": 0, "y": 0})).unwrap();
+        let other = crate::params::id_of(&r["id"]).unwrap();
+        begin(&mut s, other, Some(5), false).unwrap();
+        let second = ime_surrounding(&s).unwrap().owner;
+        assert_ne!(second.document, first.document, "another document is another IME owner");
+        assert_eq!(second.node, other);
+    }
+
+    /// Asserts a space committed after a line-start `-` becomes a bulleted list and reports
+    /// `Transformed`; a plain `"x"` commit reports `Plain`, and an empty commit reports `Nothing`.
+    #[test]
+    fn ime_commit_reports_list_autoformat_as_an_application_transformation() {
+        let (mut s, id) = setup("-");
+        begin(&mut s, id, Some(1), false).unwrap();
+        assert_eq!(insert_ime_commit(&mut s, " ").unwrap(), ImeInsertion::Transformed);
+        assert_eq!(data(&s, id).characters, "");
+        assert_eq!(data(&s, id).para_list(0).list, ListStyle::Bulleted);
+        assert_eq!(insert_ime_commit(&mut s, "x").unwrap(), ImeInsertion::Plain);
+        assert_eq!(insert_ime_commit(&mut s, "").unwrap(), ImeInsertion::Nothing);
+    }
+
+    /// Asserts CRLF normalization reports `Transformed`, control-only input reports `Nothing`,
+    /// and bare newline/CR commits are ignored while a live composition remains.
+    #[test]
+    fn ime_commit_normalisation_is_a_transformation_and_a_bare_newline_is_ignored() {
+        let (mut s, id) = setup("Hi");
+        begin(&mut s, id, Some(2), false).unwrap();
+        // CRLF is inserted as LF, but the editor changed the commit: application-origin.
+        assert_eq!(insert_ime_commit(&mut s, "a\r\nb").unwrap(), ImeInsertion::Transformed);
+        assert_eq!(data(&s, id).characters, "Hia\nb");
+        // Control characters are dropped; the commit itself is a no-op.
+        assert_eq!(insert_ime_commit(&mut s, "\u{0}\u{7}").unwrap(), ImeInsertion::Nothing);
+        assert_eq!(data(&s, id).characters, "Hia\nb");
+        // Stock `TextEdit` ignores a bare newline/CR commit; typing Enter still inserts one.
+        // (It also leaves a live composition alone, unlike the non-ignored commit below.)
+        preedit(&mut s, "x", None).unwrap();
+        assert_eq!(insert_ime_commit(&mut s, "\n").unwrap(), ImeInsertion::Nothing);
+        assert_eq!(insert_ime_commit(&mut s, "\r").unwrap(), ImeInsertion::Nothing);
+        assert_eq!(preedit_state(&s).map(|p| p.text), Some("x".into()));
+        preedit(&mut s, "", None).unwrap();
+        assert_eq!(data(&s, id).characters, "Hia\nb");
+        insert(&mut s, "\n").unwrap();
+        assert_eq!(data(&s, id).characters, "Hia\nb\n");
+    }
+
+    /// Asserts an empty or control-only IME commit ends a live composition (bumping the revision
+    /// once), inserts nothing, and is a harmless no-op when no composition is active.
+    #[test]
+    fn an_empty_ime_commit_ends_the_composition_without_inserting_text() {
+        let (mut s, id) = setup("Hello");
+        begin(&mut s, id, Some(5), false).unwrap();
+        preedit(&mut s, "にほ", None).unwrap();
+        assert_eq!(preedit_state(&s).map(|p| p.text), Some("にほ".into()));
+        let revision = s.ds().unwrap().revision;
+        assert_eq!(insert_ime_commit(&mut s, "").unwrap(), ImeInsertion::Nothing);
+        assert_eq!(s.ds().unwrap().revision, revision + 1, "ending a live composition bumps the revision");
+        assert!(preedit_state(&s).is_none(), "an empty commit ends the composition");
+        assert!(preedit_doc(&s).is_none());
+        assert_eq!(data(&s, id).characters, "Hello", "and inserts nothing");
+
+        // A control-only commit normalises to empty and ends the composition too.
+        preedit(&mut s, "x", None).unwrap();
+        let revision = s.ds().unwrap().revision;
+        assert_eq!(insert_ime_commit(&mut s, "\u{0}\u{7}").unwrap(), ImeInsertion::Nothing);
+        assert_eq!(s.ds().unwrap().revision, revision + 1, "clearing a live composition bumps the revision");
+        assert!(preedit_state(&s).is_none());
+        assert_eq!(data(&s, id).characters, "Hello");
+
+        // With no composition (and not even while editing) an empty commit stays a harmless no-op.
+        let revision = s.ds().unwrap().revision;
+        assert_eq!(insert_ime_commit(&mut s, "").unwrap(), ImeInsertion::Nothing);
+        assert_eq!(s.ds().unwrap().revision, revision);
+        end(&mut s).unwrap();
+        assert_eq!(insert_ime_commit(&mut s, "").unwrap(), ImeInsertion::Nothing);
     }
 }

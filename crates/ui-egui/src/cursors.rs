@@ -121,7 +121,7 @@ impl Shown {
     pub fn show(self, ctx: &egui::Context, at: Pos2) {
         ctx.set_cursor_icon(self.icon());
         if let Shown::Drawn(g) = self {
-            paint(&ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::new("canvas_cursor"))), at, g);
+            paint(&ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, egui::Id::unique("canvas_cursor"))), at, g);
         }
     }
 }

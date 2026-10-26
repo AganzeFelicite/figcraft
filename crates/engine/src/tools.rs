@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use figcraft_color::{ImageScaleMode, PaintKind};
 use figcraft_doc::geometry::select_target;
 use figcraft_doc::*;
 use figcraft_geom::{Affine, Point, Rect, Vec2};
@@ -36,13 +37,22 @@ pub enum ToolId {
     Pen,
     Pencil,
     Text,
+    TextOnPath,
     Comment,
     Eyedropper,
     ShapeBuilder,
+    // Board tools.
+    Sticky,
+    BoardShape,
+    Connector,
+    Marker,
+    Highlighter,
+    Eraser,
+    Stamp,
 }
 
 impl ToolId {
-    pub const ALL: [ToolId; 18] = [
+    pub const ALL: [ToolId; 26] = [
         ToolId::Move,
         ToolId::Scale,
         ToolId::Hand,
@@ -58,9 +68,17 @@ impl ToolId {
         ToolId::Pen,
         ToolId::Pencil,
         ToolId::Text,
+        ToolId::TextOnPath,
         ToolId::Comment,
         ToolId::Eyedropper,
         ToolId::ShapeBuilder,
+        ToolId::Sticky,
+        ToolId::BoardShape,
+        ToolId::Connector,
+        ToolId::Marker,
+        ToolId::Highlighter,
+        ToolId::Eraser,
+        ToolId::Stamp,
     ];
     pub fn id(self) -> &'static str {
         match self {
@@ -79,9 +97,17 @@ impl ToolId {
             ToolId::Pen => "pen",
             ToolId::Pencil => "pencil",
             ToolId::Text => "text",
+            ToolId::TextOnPath => "textOnPath",
             ToolId::Comment => "comment",
             ToolId::Eyedropper => "eyedropper",
             ToolId::ShapeBuilder => "shapeBuilder",
+            ToolId::Sticky => "sticky",
+            ToolId::BoardShape => "shape",
+            ToolId::Connector => "connector",
+            ToolId::Marker => "marker",
+            ToolId::Highlighter => "highlighter",
+            ToolId::Eraser => "eraser",
+            ToolId::Stamp => "stamp",
         }
     }
     pub fn from_id(s: &str) -> Option<ToolId> {
@@ -104,10 +130,26 @@ impl ToolId {
             ToolId::Pen => "Pen",
             ToolId::Pencil => "Pencil",
             ToolId::Text => "Text",
+            ToolId::TextOnPath => "Text on a path",
             ToolId::Comment => "Comment",
             ToolId::Eyedropper => "Pick color",
             ToolId::ShapeBuilder => "Shape builder",
+            ToolId::Sticky => "Sticky note",
+            ToolId::BoardShape => "Shapes",
+            ToolId::Connector => "Connector",
+            ToolId::Marker => "Marker",
+            ToolId::Highlighter => "Highlighter",
+            ToolId::Eraser => "Eraser",
+            ToolId::Stamp => "Stamp",
         }
+    }
+
+    /// The tools of a board's toolbar (a design file's toolbar has the others).
+    pub fn on_boards(self) -> bool {
+        matches!(
+            self,
+            ToolId::Sticky | ToolId::BoardShape | ToolId::Connector | ToolId::Marker | ToolId::Highlighter | ToolId::Eraser | ToolId::Stamp
+        )
     }
     /// The tool's key (from [`crate::keymap`]; empty when it has none).
     pub fn shortcut(self) -> &'static str {
@@ -240,7 +282,8 @@ impl ToolId {
             ToolId::Pen => Cursor::Pen(PenCursor::New),
             ToolId::Comment => Cursor::Comment,
             ToolId::Eyedropper => Cursor::Eyedropper,
-            ToolId::Move | ToolId::Scale => Cursor::Default,
+            // Text on a path acts only over a path, where it shows the I-beam.
+            ToolId::Move | ToolId::Scale | ToolId::TextOnPath => Cursor::Default,
             // The other tools make something where they are pressed: shapes, frames, slices, pencil
             // strokes, a new text (over a text the Text tool shows the I-beam instead).
             _ => Cursor::Crosshair,
@@ -285,6 +328,9 @@ pub struct Overlay {
     pub vector_hover: Option<crate::vectoredit::VHit>,
     /// The edited layer `vector_hover` is on (several layers can be in edit mode).
     pub vector_hover_on: Option<NodeId>,
+    /// Vector edit mode: the point a press on the outline would add (the pen's ghost anchor where
+    /// it is over a segment, or the midpoint of the segment under the Move tool).
+    pub vector_add: Option<VectorAdd>,
     /// Vector edit mode, Variable width tool: the width point, handle or path under the pointer.
     pub width_hover: Option<crate::vectoredit::WHit>,
     pub lasso: Vec<[f64; 2]>,
@@ -307,6 +353,16 @@ pub struct Overlay {
     /// while one is dragged (see [`crate::shape_handles`]).
     pub shape_hover: Option<ShapeHandle>,
     pub shape: Option<ShapeHint>,
+}
+
+/// A point a press would add to the edited vector's outline: page position, whether it is a
+/// segment's midpoint (the Move tool) rather than the pen's place on its segment, and whether the
+/// pointer is on it (a press adds it; otherwise it just shows where one would go).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize)]
+pub struct VectorAdd {
+    pub at: [f64; 2],
+    pub midpoint: bool,
+    pub on: bool,
 }
 
 /// The Scale tool's live readout while dragging a handle.
@@ -344,6 +400,9 @@ pub(crate) enum Gesture {
         targets: Targets,
         duplicate: bool,
         moved: bool,
+        /// A Shift-press on this selected layer: it leaves the selection on release, unless the
+        /// press became a drag.
+        deselect: Option<NodeId>,
     },
     Resize {
         start: Point,
@@ -401,6 +460,22 @@ pub(crate) enum Gesture {
     },
     /// Dragging the rotation origin handle (see [`crate::rotation_origin`]).
     Origin,
+    /// The connector tool: dragging from `from` (pressed at `start`).
+    Connect {
+        from: figcraft_doc::End,
+        start: Point,
+    },
+    /// Dragging the selected connector `id`'s end (`from`: its start, pressed at `start`) to
+    /// attach it elsewhere.
+    Reattach {
+        id: NodeId,
+        from: bool,
+        start: Point,
+    },
+    /// The eraser: the strokes it took so far.
+    Erase {
+        gone: Vec<NodeId>,
+    },
     /// Shape builder: regions collected so far (handled in `shapebuilder`).
     ShapeBuild {
         picked: Vec<usize>,
@@ -408,6 +483,13 @@ pub(crate) enum Gesture {
         start: Point,
         last: Point,
     },
+}
+
+/// Where Shift puts the Pen's next point: as far from `last` as `p` is, at the nearest 45° step.
+fn at_45_degrees(last: Point, p: Point) -> Point {
+    let v = p - last;
+    let ang = (v.atan2() / (std::f64::consts::PI / 4.0)).round() * std::f64::consts::PI / 4.0;
+    last + Vec2::from_angle(ang) * v.hypot()
 }
 
 /// The handles a pen path shows while it is drawn ([`Overlay::pen_handles`]): the last anchor's in
@@ -444,8 +526,10 @@ pub struct ToolState {
     /// removes; Alt merges).
     pub shape_builder: Option<std::sync::Arc<crate::shapebuilder::Arrangement>>,
     pub builder_remove: bool,
-    /// Show distances from the selection on hover without holding Alt (Dev mode inspection).
-    pub redlines: bool,
+    /// Dev Mode: the canvas inspects. Hovering shows distances from the selection without Alt, and
+    /// presses select, pan and comment but never edit the design (no moving, resizing, drawing,
+    /// or editing text or vectors).
+    pub dev_mode: bool,
     /// Pen snap targets, kept while hovering (see `vectoredit::point_snap`).
     pub(crate) pen_targets: Option<crate::vectoredit::point_snap::PenTargets>,
     /// The Scale tool's anchor: column and row (0 start, 1 middle, 2 end) of the point of the
@@ -459,6 +543,13 @@ pub struct ToolState {
     pub labels: Vec<(NodeId, [Point; 4])>,
     /// The brush the Pencil draws with (`tool.pencilBrush`; `None`: a plain stroke).
     pub pencil_brush: Option<figcraft_doc::Brush>,
+    /// The board tools' colours and choices.
+    pub board: crate::board::BoardTool,
+    /// The eyedropper samples for a colour picker (`edit.pickColor` with `apply: false`): the
+    /// colour goes to `picked`, for the picker to write to the paint it edits, not to the fill.
+    pub pick_only: bool,
+    /// The colour the eyedropper sampled for a colour picker, until the picker takes it.
+    pub picked: Option<figcraft_color::Color>,
 }
 
 /// Pen pressure along drawn samples as width profile points `[t, scale]`: `t` by length, at most
@@ -578,6 +669,31 @@ pub(crate) const SNAP_PX: f64 = 5.0;
 /// Screen pixels the pointer travels after a press before a move or resize starts: a click or a
 /// double-click made with an unsteady hand doesn't drag what it lands on.
 const DRAG_SLOP_PX: f64 = 3.0;
+/// Screen pixels from a path within which the Text on a path tool takes it.
+const PATH_REACH_PX: f64 = 6.0;
+
+/// The visible layers under `id` whose box, grown by `reach` (page units), holds `p`, front-most
+/// first: what the Text on a path tool measures its distance to. Content a clipping frame or a
+/// mask hides at `p` and the operands of boolean groups are left out.
+fn path_candidates(doc: &Document, id: NodeId, p: Point, reach: f64, depth: usize, out: &mut Vec<NodeId>) {
+    let Some(n) = doc.node(id) else { return };
+    if !n.visible || depth > 512 || matches!(n.kind, NodeKind::BooleanOp { .. }) {
+        return;
+    }
+    if n.clip && n.kind.is_frame_like() && !n.local_rect().contains(doc.world_transform(id).inverse() * p) {
+        return;
+    }
+    for c in n.paint_order().rev() {
+        let before = out.len();
+        path_candidates(doc, c, p, reach, depth + 1, out);
+        if out.len() > before && figcraft_doc::geometry::masked_out(doc, n, c, p) {
+            out.truncate(before);
+        }
+    }
+    if n.children.is_empty() && !n.is_mask && doc.world_bounds(id).is_some_and(|b| b.inflate(reach, reach).contains(p)) {
+        out.push(id);
+    }
+}
 
 /// Corners of the selection's handle box in page coordinates (tl, tr, br, bl).
 pub fn selection_box(doc: &Document, sel: &[NodeId]) -> Option<[Point; 4]> {
@@ -631,9 +747,33 @@ pub fn locked_in(doc: &Document, id: NodeId) -> bool {
     std::iter::once(id).chain(doc.ancestors(id)).any(|a| doc.node(a).is_some_and(|n| n.locked))
 }
 
+/// Whether layer `t` paints below layer `s`: it holds `s`, or it is behind `s` in the stack of the
+/// nearest layer holding both.
+fn paints_below(doc: &Document, t: NodeId, s: NodeId) -> bool {
+    let chain = |id: NodeId| {
+        let mut c: Vec<NodeId> = std::iter::once(id).chain(doc.ancestors(id)).collect();
+        c.reverse();
+        c
+    };
+    let (ct, cs) = (chain(t), chain(s));
+    let shared = ct.iter().zip(&cs).take_while(|(a, b)| a == b).count();
+    match (ct.get(shared), cs.get(shared)) {
+        (None, Some(_)) => true,
+        (Some(a), Some(b)) => shared.checked_sub(1).and_then(|i| ct.get(i)).and_then(|p| doc.node(*p)).is_some_and(|p| {
+            let order: Vec<NodeId> = p.paint_order().collect();
+            order.iter().position(|c| c == a) < order.iter().position(|c| c == b)
+        }),
+        _ => false,
+    }
+}
+
 /// Which handle (if any) is under `p`. A selection with a locked layer has none.
 pub fn handle_at(doc: &Document, sel: &[NodeId], p: Point, zoom: f64) -> Option<Handle> {
     if sel.is_empty() || sel.iter().any(|i| locked_in(doc, *i)) {
+        return None;
+    }
+    // A connector's handles are its ends (see `board::end_handle_at`): no box to resize or turn.
+    if crate::board::selected_connector_ends(doc, sel).is_some() {
         return None;
     }
     let corners = selection_box(doc, sel)?;
@@ -657,6 +797,9 @@ fn on_corner_square(doc: &Document, sel: &[NodeId], p: Point, zoom: f64) -> bool
 /// A box whose sides are both shorter than this on screen (pixels) would be covered by its
 /// handles: the canvas draws just its outline (the handles still answer just outside it).
 pub const SMALL_BOX_PX: f64 = 16.0;
+
+/// The stroke the Pencil draws: its colour and weight (the canvas previews it the same).
+pub const PENCIL_STROKE: (figcraft_color::Color, f64) = (figcraft_color::Color::BLACK, 2.0);
 
 /// The shorter and longer sides, in screen pixels, of the box with `corners` (tl, tr, br, bl).
 pub fn box_sides_px(corners: &[Point; 4], zoom: f64) -> (f64, f64) {
@@ -873,6 +1016,16 @@ pub(crate) fn scale_factor(handle: Handle, q: Point, w0: f64, h0: f64, anchor: (
 }
 
 impl Session {
+    /// The pointer left the canvas: what hovering there showed goes (the distances Alt or Dev Mode
+    /// measured and the box measured to, a vector region's highlight), unless a gesture holds it.
+    pub fn pointer_left(&mut self) {
+        if !self.tool.busy() {
+            self.tool.overlay.guides.clear();
+            self.tool.overlay.measure_box = None;
+        }
+        self.vector_pointer_left();
+    }
+
     /// What a marquee starting at page point `p` selects inside: the top-level frame it starts in
     /// (its children), or the focus view's frame.
     pub(crate) fn marquee_within(&self, p: Point) -> Result<Option<NodeId>> {
@@ -917,6 +1070,7 @@ impl Session {
         }
         self.tool.tool = t;
         self.tool.gesture = Gesture::None;
+        self.tool.pick_only = false;
         // The tool's cursor shows before the pointer moves.
         self.tool.overlay =
             Overlay { builder_remove: self.tool.builder_remove && t == ToolId::ShapeBuilder, cursor: t.cursor(), ..Overlay::default() };
@@ -927,11 +1081,26 @@ impl Session {
             let _ = crate::shapebuilder::arrangement(self, &sel);
         }
         if let Ok(ds) = self.ds_mut() {
-            if t != ToolId::Text && t != ToolId::Move {
+            if !matches!(t, ToolId::Text | ToolId::TextOnPath | ToolId::Move) {
                 ds.text_edit = None;
             }
             ds.revision += 1;
         }
+    }
+
+    /// The tool pointer events go to: in Dev Mode every tool but the hand and comments selects.
+    fn acting_tool(&self) -> ToolId {
+        match self.tool.tool {
+            t if self.tool.dev_mode && !matches!(t, ToolId::Hand | ToolId::Comment) => ToolId::Move,
+            t => t,
+        }
+    }
+
+    /// Drop the gesture under way (a drag, a resize, a shape being drawn), restoring the document
+    /// as Escape does; the UI calls it when Dev Mode starts, where nothing may move.
+    pub fn drop_gesture(&mut self) -> Result<()> {
+        self.tool.gesture = Gesture::None;
+        self.cancel_interaction()
     }
 
     /// Feed one pointer event to the current tool.
@@ -946,11 +1115,12 @@ impl Session {
             }
             self.tool.last_move = Some(ev.clone());
         }
-        let tool = self.tool.tool;
-        if matches!(tool, ToolId::Move | ToolId::Scale) && self.origin_pointer(ev)? {
+        let tool = self.acting_tool();
+        let edits = matches!(tool, ToolId::Move | ToolId::Scale) && !self.tool.dev_mode;
+        if edits && self.origin_pointer(ev)? {
             return Ok(());
         }
-        if matches!(tool, ToolId::Move | ToolId::Scale) && self.ds().is_ok_and(|d| d.vector_edit.is_some()) && self.vector_pointer(ev)? {
+        if edits && self.ds().is_ok_and(|d| d.vector_edit.is_some()) && self.vector_pointer(ev)? {
             return Ok(());
         }
         if tool == ToolId::ShapeBuilder {
@@ -960,6 +1130,10 @@ impl Session {
             PointerKind::Hover => self.hover(ev),
             PointerKind::Down => match tool {
                 ToolId::Move | ToolId::Scale => {
+                    // While a board's vote runs, a click on an object votes.
+                    if tool == ToolId::Move && !self.tool.dev_mode && self.vote_down(ev)? {
+                        return Ok(());
+                    }
                     // A click on the canvas deselects a ruler guide (the UI selects guides itself).
                     self.ds_mut()?.guide = None;
                     self.move_down(ev)
@@ -971,6 +1145,7 @@ impl Session {
                     Ok(())
                 }
                 ToolId::Text => self.text_down(ev),
+                ToolId::TextOnPath => self.text_on_path_down(ev),
                 ToolId::Pen => self.pen_down(ev),
                 ToolId::Pencil => {
                     self.tool.gesture = Gesture::Pencil { points: vec![ev.p()], pressure: vec![ev.pressure] };
@@ -981,6 +1156,7 @@ impl Session {
                     Ok(())
                 }
                 ToolId::Eyedropper => self.eyedrop(ev),
+                t if t.on_boards() => self.board_down(ev),
                 t if t.draws_shape() => self.draw_down(ev),
                 _ => Ok(()),
             },
@@ -1010,7 +1186,7 @@ impl Session {
     }
 
     fn hover(&mut self, ev: &PointerEvent) -> Result<()> {
-        let tool = self.tool.tool;
+        let tool = self.acting_tool();
         let ds = self.ds()?;
         let (doc, sel, page) = (ds.doc.clone(), ds.selection.clone(), ds.page);
         let mut cursor = tool.cursor();
@@ -1023,6 +1199,9 @@ impl Session {
         let on_text =
             |s: &Self| s.hit(&doc, page, ev.p(), ev.tol() * 2.0).and_then(|l| doc.node(l)).is_some_and(|n| matches!(n.kind, NodeKind::Text(_)));
         if tool == ToolId::Text && (on_edited || on_text(self)) {
+            cursor = Cursor::Text;
+        }
+        if tool == ToolId::TextOnPath && (on_edited || self.path_at(&doc, page, ev).is_some()) {
             cursor = Cursor::Text;
         }
         let mut hover = None;
@@ -1039,7 +1218,7 @@ impl Session {
         if matches!(tool, ToolId::Move | ToolId::Scale) && on_edited {
             cursor = Cursor::Text;
         } else if matches!(tool, ToolId::Move | ToolId::Scale) && arc_hover.is_none() && shape_hover.is_none() {
-            if let Some(h) = handle_at(&doc, &sel, ev.p(), ev.zoom) {
+            if let Some(h) = handle_at(&doc, &sel, ev.p(), ev.zoom).filter(|_| !self.tool.dev_mode) {
                 cursor = resize_cursor(&doc, &sel, h);
             } else {
                 let leaf = self.hit(&doc, page, ev.p(), ev.tol() * 2.0);
@@ -1048,10 +1227,10 @@ impl Session {
                 }
                 hover = label_at(&doc, page, &self.tool.labels, ev.p()).or_else(|| leaf.map(|leaf| select_target(&doc, leaf, &sel, ev.cmd)));
                 // Alt over a selected layer: a drag from here duplicates it.
-                if ev.alt && tool == ToolId::Move && hover.is_some_and(|h| sel.contains(&h) && !locked_in(&doc, h)) {
+                if ev.alt && !self.tool.dev_mode && tool == ToolId::Move && hover.is_some_and(|h| sel.contains(&h) && !locked_in(&doc, h)) {
                     cursor = Cursor::Copy;
                 }
-                if ev.alt || self.tool.redlines {
+                if ev.alt || self.tool.dev_mode {
                     use crate::distance::{Hover, guide_at, hover_lines, padding_frame, parent_of};
                     // Shift+Alt over an auto layout frame: its padding and gaps. Otherwise from the
                     // selection to a ruler guide, the hovered layer or (over empty canvas) the parent.
@@ -1071,6 +1250,9 @@ impl Session {
                 }
             }
         }
+        if tool == ToolId::Move && !self.tool.dev_mode && crate::board::end_handle_at(&doc, &sel, ev.p(), ev.zoom).is_some() {
+            cursor = Cursor::Grab;
+        }
         self.tool.overlay.measure_box = measure_box;
         self.tool.overlay.cursor = cursor;
         if tool == ToolId::Pen {
@@ -1079,6 +1261,8 @@ impl Session {
             guides = g;
             self.tool.overlay.cursor = Cursor::Pen(self.pen_cursor(&doc, &sel, to, ev.zoom));
             if let Some((last, _, out)) = self.tool.pen.as_ref().and_then(|pen| pen.points.last()) {
+                // With Shift the band ends where a click puts the point (#970).
+                let to = if ev.shift { at_45_degrees(*last, to) } else { to };
                 self.tool.overlay.rubber = Some([last.x, last.y, to.x, to.y]);
                 self.tool.overlay.rubber_handle = (out.hypot() > 0.0).then_some([last.x + out.x, last.y + out.y]);
             }
@@ -1131,7 +1315,13 @@ impl Session {
             }
             textedit::end(self)?;
         }
-        // Handles first: a selected ellipse's arc handles (drawn over the box), then the box's.
+        // Handles first: a selected connector's ends, a selected ellipse's arc handles (drawn over
+        // the box), then the box's.
+        let edits = !self.tool.dev_mode;
+        if edits && let Some((id, from)) = crate::board::end_handle_at(&doc, &sel, ev.p(), ev.zoom) {
+            self.tool.gesture = Gesture::Reattach { id, from, start: ev.p() };
+            return Ok(());
+        }
         if self.arc_handles_shown()
             && let Some((id, handle)) = crate::arc_handles::hit(&doc, &sel, ev.p(), ev.zoom)
             && let Some(arc) = crate::arc_handles::arc_of(&doc, id)
@@ -1151,7 +1341,7 @@ impl Session {
             self.tool.overlay.shape = shape_hint(&doc, id, handle, ev.zoom);
             return Ok(());
         }
-        if let Some(h) = handle_at(&doc, &sel, ev.p(), ev.zoom) {
+        if let Some(h) = handle_at(&doc, &sel, ev.p(), ev.zoom).filter(|_| edits) {
             let ids = roots(&doc, &sel);
             if let Handle::Rotate(_) = h {
                 let Some(b) = selection_box(&doc, &ids) else { return Ok(()) };
@@ -1178,31 +1368,46 @@ impl Session {
         }
         // A frame's name label picks the frame itself. The background of a top-level frame with
         // layers in it is like the canvas (a press starts a marquee inside it) unless the frame is
-        // selected; an empty frame (or a widget) is picked and dragged.
+        // selected; an empty frame (or a widget, or a board object such as a sticky) is picked and
+        // dragged.
         let board_background = |leaf: NodeId| {
             !sel.contains(&leaf)
-                && doc
-                    .node(leaf)
-                    .is_some_and(|n| n.parent == Some(page) && n.kind.is_frame_like() && !n.children.is_empty() && !crate::widgets::is_widget(n))
+                && doc.node(leaf).is_some_and(|n| {
+                    n.parent == Some(page) && n.kind.is_frame_like() && !n.children.is_empty() && !crate::widgets::is_widget(n) && !n.is_board_atom()
+                })
         };
-        let target = label_at(&doc, page, &self.tool.labels, ev.p()).or_else(|| {
+        let label = label_at(&doc, page, &self.tool.labels, ev.p());
+        let target = label.or_else(|| {
             self.hit(&doc, page, ev.p(), ev.tol() * 2.0)
                 .filter(|leaf| ev.cmd || !board_background(*leaf))
                 .map(|leaf| select_target(&doc, leaf, &sel, ev.cmd))
         });
+        // A press inside the selection's box that reaches nothing above it (an unfilled shape's
+        // inside, the frame or canvas behind it, or a layer stacked below the selected layer the
+        // press is in) drags the selection. In a gap between selected layers, what's there is hit.
+        let in_own_box = |s: NodeId| selection_box(&doc, &[s]).is_some_and(|q| in_quad(&q, ev.p()));
+        let behind_sel = |t: Option<NodeId>| {
+            t.is_none_or(|t| sel.iter().any(|s| *s != t && (doc.is_ancestor(t, *s) || (in_own_box(*s) && paints_below(&doc, t, *s)))))
+        };
+        let target = match sel.iter().copied().find(|s| !locked_in(&doc, *s)) {
+            Some(first) if label.is_none() && !ev.shift && behind_sel(target) && selection_box(&doc, &sel).is_some_and(|q| in_quad(&q, ev.p())) => {
+                Some(first)
+            }
+            _ => target,
+        };
         match target {
             Some(target) => {
                 // Clicking inside the current selection's box keeps it (drag them all).
                 let in_sel_box = sel.len() > 1 && doc.bounds_of(&sel).is_some_and(|b| b.contains(ev.p())) && !ev.shift;
+                // Shift on a selected layer takes it out on release if the press doesn't become a
+                // drag; a drag moves the selection with it. Where no drag can start, it goes now.
+                let deselect = (ev.shift && sel.contains(&target)).then_some(target);
+                let without_target = || sel.iter().copied().filter(|x| *x != target).collect::<Vec<_>>();
                 let new_sel = if in_sel_box && (sel.contains(&target) || sel.iter().any(|s| doc.is_ancestor(*s, target))) {
                     sel.clone()
-                } else if ev.shift {
+                } else if ev.shift && deselect.is_none() {
                     let mut s2 = sel.clone();
-                    if let Some(pos) = s2.iter().position(|x| *x == target) {
-                        s2.remove(pos);
-                    } else {
-                        s2.push(target);
-                    }
+                    s2.push(target);
                     s2
                 } else if sel.contains(&target) {
                     sel.clone()
@@ -1210,12 +1415,19 @@ impl Session {
                     vec![target]
                 };
                 self.set_selection(new_sel.clone());
-                if new_sel.is_empty() || doc.node(target).is_some_and(|n| n.locked) {
+                // Dev Mode only selects (Shift-click still deselects): nothing moves.
+                if !edits {
+                    if deselect.is_some() {
+                        self.set_selection(without_target());
+                    }
                     return Ok(());
                 }
                 // Locked layers selected in the layers panel stay put.
                 let ids: Vec<NodeId> = roots(&doc, &new_sel).into_iter().filter(|i| !locked_in(&doc, *i)).collect();
-                if ids.is_empty() {
+                if new_sel.is_empty() || doc.node(target).is_some_and(|n| n.locked) || ids.is_empty() {
+                    if deselect.is_some() {
+                        self.set_selection(without_target());
+                    }
                     return Ok(());
                 }
                 let mut targets = Targets::gather(&doc, page, &ids);
@@ -1225,8 +1437,13 @@ impl Session {
                 {
                     targets.add_box(b);
                 }
-                self.begin_interaction(if ev.alt { "Duplicate" } else { "Move" })?;
-                self.tool.gesture = Gesture::Move { start: ev.p(), ids, targets, duplicate: ev.alt, moved: false };
+                if let Err(e) = self.begin_interaction(if ev.alt { "Duplicate" } else { "Move" }) {
+                    if deselect.is_some() {
+                        self.set_selection(without_target());
+                    }
+                    return Err(e);
+                }
+                self.tool.gesture = Gesture::Move { start: ev.p(), ids, targets, duplicate: ev.alt, moved: false, deselect };
                 self.tool.overlay.cursor = if ev.alt { Cursor::Copy } else { Cursor::Default };
             }
             None => {
@@ -1289,8 +1506,11 @@ impl Session {
                         for i in &ids {
                             let parent = doc.get(*i)?.parent.unwrap_or(page);
                             let idx = doc.index_in_parent(*i).map(|x| x + 1);
-                            copies.push(doc.duplicate_into(*i, parent, idx)?);
+                            copies.push(crate::components::copy_in_file(doc, *i, parent, idx)?);
                         }
+                        // Connectors copied with what they join join the copies.
+                        let map = crate::board::copy_map(doc, &ids, &copies);
+                        crate::board::rejoin(doc, &crate::board::copied_items(doc, &map), &map, false);
                         moving = copies;
                         *sel = moving.clone();
                     }
@@ -1455,6 +1675,20 @@ impl Session {
                 Ok(())
             }
             Gesture::Vector(_) | Gesture::ShapeBuild { .. } | Gesture::Origin => Ok(()),
+            Gesture::Connect { from, start } => {
+                let (from, start) = (*from, *start);
+                self.connect_drag(ev, from, start);
+                return Ok(());
+            }
+            Gesture::Erase { gone } => {
+                self.tool.gesture = Gesture::Erase { gone: gone.clone() };
+                return self.erase_at(ev);
+            }
+            Gesture::Reattach { id, from, start } => {
+                let (id, from, start) = (*id, *from, *start);
+                self.reattach_drag(ev, id, from, start);
+                return Ok(());
+            }
             Gesture::PenDrag { anchor } => {
                 // A click's wobble pulls out no handle.
                 let out = if within_slop(ev, *anchor) { Vec2::ZERO } else { ev.p() - *anchor };
@@ -1558,6 +1792,44 @@ impl Session {
                 if flip_y {
                     t *= Affine::new([1.0, 0.0, 0.0, -1.0, 0.0, nh]);
                 }
+                // Text reflow and auto layout can recompute this box after the preview (a size bound
+                // to a variable lets go of it: the resize is an explicit edit).
+                let n = doc.get(*id)?;
+                let crop_images = ev.cmd
+                    && !matches!(n.kind, NodeKind::Text(_))
+                    && !std::iter::once(*id).chain(doc.ancestors(*id)).any(|a| doc.node(a).is_some_and(|n| n.layout.is_some()));
+                if crop_images {
+                    // Crop the layer's image fills without moving their pixels on the page.
+                    // Work from the interaction snapshot, just like the geometry on every move.
+                    let (w, h) = (n.width.max(1e-6), n.height.max(1e-6));
+                    let to_old =
+                        Affine::scale_non_uniform(1.0 / w, 1.0 / h) * world.inverse() * t * Affine::scale_non_uniform(nw.max(0.01), nh.max(0.01));
+                    let mut fills = n.fills.clone();
+                    for paint in &mut fills {
+                        let PaintKind::Image(img) = &mut paint.kind else { continue };
+                        // A repeating image cannot be represented by a single Crop placement.
+                        if img.scale_mode == ImageScaleMode::Tile {
+                            continue;
+                        }
+                        let Some(data) = doc.images.get(&img.image) else { continue };
+                        let (iw, ih) = (f64::from(data.width), f64::from(data.height));
+                        let crop = if img.scale_mode == ImageScaleMode::Crop {
+                            img.effective_crop(iw, ih, w, h)
+                        } else {
+                            let (rw, rh) = img.rotated_size(iw.max(1.0), ih.max(1.0));
+                            let s = if img.scale_mode == ImageScaleMode::Fit { (w / rw).min(h / rh) } else { (w / rw).max(h / rh) };
+                            [w / (rw * s), 0.0, 0.0, h / (rh * s), (rw * s - w) / (2.0 * rw * s), (rh * s - h) / (2.0 * rh * s)]
+                        };
+                        // A degenerate (zero-scale) layer has no inverse: its image keeps its placement.
+                        let crop = (Affine::new(crop) * to_old).as_coeffs();
+                        if !crop.iter().all(|c| c.is_finite()) {
+                            continue;
+                        }
+                        img.crop = Some(crop);
+                        img.scale_mode = ImageScaleMode::Crop;
+                    }
+                    doc.get_mut(*id)?.fills = fills;
+                }
                 doc.set_world_transform(*id, t)?;
                 if kept.is_empty() {
                     crate::cmd::props::resize_node(doc, *id, nw.max(0.01), nh.max(0.01))?;
@@ -1573,10 +1845,11 @@ impl Session {
                     n.child_layout.sizing_v = Sizing::Fixed;
                 }
                 if let NodeKind::Text(t) = &mut n.kind {
-                    t.auto_resize = match handle {
-                        Handle::Edge(1) | Handle::Edge(3) => TextAutoResize::Height,
-                        _ => TextAutoResize::None,
-                    };
+                    match handle {
+                        Handle::Edge(1) | Handle::Edge(3) if t.auto_resize == TextAutoResize::Truncate => {}
+                        Handle::Edge(1) | Handle::Edge(3) => t.auto_resize = TextAutoResize::Height,
+                        _ => t.fix_size(true, true),
+                    }
                 }
                 return Ok(());
             }
@@ -1735,7 +2008,7 @@ impl Session {
         self.tool.overlay.drop_cell = None;
         let drop_target = self.tool.overlay.drop_target.take();
         match g {
-            Gesture::Move { ids, moved, duplicate, start, .. } => {
+            Gesture::Move { ids, moved, duplicate, start, deselect, .. } => {
                 if moved {
                     // A free move lands in the frame under the pointer (or the page) where it was
                     // dropped; layers in an auto layout frame already sit in their slot.
@@ -1777,7 +2050,11 @@ impl Session {
                     }
                 } else {
                     self.cancel_interaction()?;
-                    if !(ev.shift || ev.cmd || duplicate) {
+                    if let Some(d) = deselect {
+                        let sel = self.selection().into_iter().filter(|x| *x != d).collect();
+                        self.set_selection(sel);
+                    }
+                    if deselect.is_none() && !(ev.shift || ev.cmd || duplicate) {
                         self.widget_click(start, ev.tol() * 2.0)?;
                     }
                 }
@@ -1827,10 +2104,18 @@ impl Session {
                     self.tool.tool = t;
                 }
             }
-            Gesture::Pencil { points, pressure } => {
+            Gesture::Pencil { mut points, mut pressure } => {
                 self.tool.overlay.pen.clear();
+                // The stroke ends where the button came up, even without a move to get there.
+                if points.last().is_none_or(|l| (*l - ev.p()).hypot() > 0.5 / ev.zoom.max(1e-6)) {
+                    points.push(ev.p());
+                    pressure.push(ev.pressure);
+                }
                 self.pencil_finish(&points, &pressure)?;
             }
+            Gesture::Connect { from, start } => self.connect_up(ev, from, start)?,
+            Gesture::Erase { .. } => self.erase_up()?,
+            Gesture::Reattach { id, from, start } => self.reattach_up(ev, id, from, start)?,
             Gesture::TextSelect { .. } | Gesture::TextBox { .. } | Gesture::Marquee { .. } | Gesture::None => {}
             Gesture::PenDrag { .. } | Gesture::ShapeBuild { .. } | Gesture::Origin => {}
             Gesture::Vector(_) => self.commit_interaction()?,
@@ -1841,14 +2126,48 @@ impl Session {
         Ok(())
     }
 
+    /// Handle a double-click gesture: finish a pen path, rename or click labels/widgets,
+    /// cancel an in-progress move/resize/draw/marquee, handle board double-clicks, enter text
+    /// editing (select-all on entry, word-select inside the running edit), enter vector editing
+    /// for selected shapes, and step groups/frames one level deeper.
+    /// A double-click on `leaf` that a board object or a widget's editable field takes (typing into
+    /// a sticky or a shape on a board; editing the field like any text, its plugin told when editing
+    /// ends). Whether it was taken.
+    fn object_double_click(&mut self, doc: &Document, leaf: NodeId, sel: &[NodeId], p: Point, edits: bool) -> Result<bool> {
+        if matches!(self.tool.tool, ToolId::Move | ToolId::Scale) && self.board_double_click(doc, leaf, sel)? {
+            return Ok(true);
+        }
+        match crate::widgets::field_at(doc, leaf, p).filter(|_| edits) {
+            Some(field) => textedit::begin(self, field, None, false).map(|()| true),
+            None => Ok(false),
+        }
+    }
+
     fn double_click(&mut self, ev: &PointerEvent) -> Result<()> {
         let ds = self.ds()?;
         let (doc, sel, page) = (ds.doc.clone(), ds.selection.clone(), ds.page);
         if self.tool.tool == ToolId::Pen {
             return self.pen_finish();
         }
+        let edits = !self.tool.dev_mode;
+        // A frame's or section's name label: rename it there (the canvas puts a field over it).
+        // Labels come before widgets, as on a press; the second press began a move: undo it.
+        if edits
+            && matches!(self.tool.tool, ToolId::Move | ToolId::Scale)
+            && !(ev.shift || ev.cmd || ev.alt)
+            && let Some(id) = label_at(&doc, page, &self.tool.labels, ev.p())
+        {
+            self.tool.gesture = Gesture::None;
+            self.cancel_interaction()?;
+            if sel != [id] {
+                self.set_selection(vec![id]);
+            }
+            self.request_ui("canvas.renameLabel", serde_json::json!({"id": id}));
+            return Ok(());
+        }
         // Quick clicks on a widget's clickable part are clicks, one by one.
-        if matches!(self.tool.tool, ToolId::Move | ToolId::Scale)
+        if edits
+            && matches!(self.tool.tool, ToolId::Move | ToolId::Scale)
             && !(ev.shift || ev.cmd || ev.alt)
             && self.hit(&doc, page, ev.p(), ev.tol() * 2.0).and_then(|hit| crate::widgets::target_at(&doc, hit, ev.p())).is_some()
         {
@@ -1863,26 +2182,48 @@ impl Session {
             self.tool.overlay.marquee = None;
             self.cancel_interaction()?;
         }
-        let Some(leaf) = self.hit(&doc, page, ev.p(), ev.tol() * 2.0) else { return Ok(()) };
+        let hit_here = self.hit(&doc, page, ev.p(), ev.tol() * 2.0);
+        // A double-click anywhere on the one selected shape edits its points, like Enter: also
+        // inside a hollow (unfilled) closed shape, where the hit test finds nothing under the
+        // pointer (an open path or a line has no inside: only its stroke counts).
+        if edits
+            && let [id] = sel[..]
+            && doc.node(id).is_some_and(|n| n.kind.is_shape() && figcraft_doc::geometry::is_closed(n))
+            && doc.world_bounds(id).is_some_and(|b| b.contains(ev.p()))
+            && hit_here.is_none_or(|h| h == id || doc.is_ancestor(id, h))
+        {
+            return crate::vectoredit::begin_many(self, &[id]);
+        }
+        let Some(leaf) = hit_here else { return Ok(()) };
+        if self.object_double_click(&doc, leaf, &sel, ev.p(), edits)? {
+            return Ok(());
+        }
         let target = select_target(&doc, leaf, &sel, true);
         // Text: edit at the click.
-        if doc.node(target).is_some_and(|n| matches!(n.kind, NodeKind::Text(_)))
+        if edits
+            && doc.node(target).is_some_and(|n| matches!(n.kind, NodeKind::Text(_)))
             && (sel.contains(&target) || select_target(&doc, leaf, &sel, false) == target)
         {
-            // Entering a text selects all of it; in the text being edited, the word.
+            // Entering a text selects all of it; in the text being edited, the word. A
+            // double-click inside the running edit is an ordinary edit: starting a new session
+            // here would replace the IME owner's epoch and drop a composition on a plain gesture.
             let editing = self.ds()?.text_edit.as_ref().is_some_and(|te| te.id == target);
             let idx = self.text_index_at(target, ev.p())?;
-            textedit::begin(self, target, Some(idx), false)?;
             if editing {
                 textedit::select_word(self, idx)?;
             } else {
+                textedit::begin(self, target, Some(idx), false)?;
                 textedit::key(self, "SelectAll", false, false, false)?;
             }
             return Ok(());
         }
         // Shapes and vectors: enter vector edit mode (every selected shape, the clicked one active).
-        if doc.node(target).is_some_and(|n| n.kind.is_shape()) && sel.contains(&target) {
-            let mut ids = crate::vectoredit::enter_targets(&doc, &sel).unwrap_or_default();
+        // A shape clicked on its own edits even when the click that selects it and the double-click
+        // arrived in one frame (a press and a release the canvas took together), so no selection was
+        // made yet; another layer's shapes are reached one level at a time, as below.
+        if edits && doc.node(target).is_some_and(|n| n.kind.is_shape()) && (sel.contains(&target) || select_target(&doc, leaf, &sel, false) == target)
+        {
+            let mut ids = if sel.contains(&target) { crate::vectoredit::enter_targets(&doc, &sel).unwrap_or_default() } else { vec![target] };
             ids.retain(|i| *i != target);
             ids.insert(0, target);
             return crate::vectoredit::begin_many(self, &ids);
@@ -1968,6 +2309,115 @@ impl Session {
         Ok(())
     }
 
+    /// The layer whose path is under `ev` for the Text on a path tool and where along it the press
+    /// is (0..1 by length): the front-most shape or vector layer within a few screen pixels of its
+    /// first subpath (the one text follows), not locked and not inside an instance. Layers in front
+    /// whose path is further away don't hide it.
+    pub(crate) fn path_at(&self, doc: &Document, page: NodeId, ev: &PointerEvent) -> Option<(NodeId, f64)> {
+        let reach = ev.tol() * PATH_REACH_PX;
+        let near = |id: NodeId| -> Option<(NodeId, f64)> {
+            let n = doc.node(id)?;
+            let shape = matches!(
+                n.kind,
+                NodeKind::Rectangle
+                    | NodeKind::Ellipse { .. }
+                    | NodeKind::Polygon { .. }
+                    | NodeKind::Star { .. }
+                    | NodeKind::Line
+                    | NodeKind::Vector { .. }
+            );
+            if !shape || locked_in(doc, id) || crate::components::inside_instance(doc, id) {
+                return None;
+            }
+            let geom = figcraft_doc::geometry::stroke_geometry(n)?;
+            let line = figcraft_geom::measure::polylines(&geom)?.into_iter().next()?;
+            // Measured on the page (a layer scaled more one way than the other is still reached
+            // where it shows), the start by length along the layer's own path.
+            let world = doc.world_transform(id);
+            let p = ev.p();
+            let mut best: Option<(f64, f64)> = None;
+            for (i, w) in line.points.windows(2).enumerate() {
+                let (a, b) = (world * w[0], world * w[1]);
+                let d = b - a;
+                let l2 = d.hypot2();
+                let u = if l2 > 1e-18 { ((p - a).dot(d) / l2).clamp(0.0, 1.0) } else { 0.0 };
+                let dist = (a.lerp(b, u) - p).hypot();
+                if best.is_none_or(|(_, bd)| dist < bd) {
+                    let (la, lb) = (*line.lengths.get(i)?, *line.lengths.get(i + 1)?);
+                    best = Some((la + u * (lb - la), dist));
+                }
+            }
+            let (along, dist) = best?;
+            let len = line.length();
+            (len > 1e-9 && dist <= reach).then_some((id, along / len))
+        };
+        let mut candidates = Vec::new();
+        path_candidates(doc, page, ev.p(), reach, 0, &mut candidates);
+        candidates.into_iter().find_map(near)
+    }
+
+    /// A press with the Text on a path tool: on a path, a new empty text layer goes onto it,
+    /// starting where it was pressed, and typing starts. The text takes the path layer's place,
+    /// geometry, transform, constraints and effects, and its fills when one of them shows; the path
+    /// layer is removed. Ending the edit with nothing typed puts the path back without an undo step
+    /// ([`textedit::end`]). Elsewhere a press does nothing.
+    fn text_on_path_down(&mut self, ev: &PointerEvent) -> Result<()> {
+        if let Some(te) = self.ds()?.text_edit.clone() {
+            if self.ds()?.doc.world_bounds(te.id).is_some_and(|b| b.contains(ev.p())) {
+                return self.text_click(te.id, ev, ev.shift);
+            }
+            textedit::end(self)?;
+        }
+        let ds = self.ds()?;
+        let (doc, page) = (ds.doc.clone(), ds.page);
+        let Some((path, start)) = self.path_at(&doc, page, ev) else { return Ok(()) };
+        let Some(pn) = doc.node(path) else { return Ok(()) };
+        let (Some(parent), Some(geom)) = (pn.parent, figcraft_doc::geometry::stroke_geometry(pn)) else { return Ok(()) };
+        let index = doc.index_in_parent(path);
+        self.begin_interaction("Text on a path")?;
+        let ds = self.ds_mut()?;
+        let d = ds.doc_mut();
+        let id = d.alloc_id();
+        let mut n = Node::new(id, NodeKind::Text(TextData::default()), "Text", pn.width, pn.height);
+        n.name = String::new();
+        n.transform = pn.transform;
+        n.constraints = pn.constraints;
+        n.child_layout = pn.child_layout.clone();
+        let effects = !pn.effects.is_empty();
+        if effects {
+            n.effects = pn.effects.clone();
+            n.styles.effect = pn.styles.effect.clone();
+        }
+        // A path drawn with a stroke only has no fill to give: the text gets the usual one.
+        let filled = pn.fills.iter().any(|f| f.visible);
+        if filled {
+            n.fills = pn.fills.clone();
+            n.styles.fill = pn.styles.fill.clone();
+        } else if let Some(fills) = readable_text_fills(d, parent) {
+            n.fills = fills;
+        }
+        // As `text.onPath`: a binding goes with the list it binds into (`fill`, `fills`, `fills/N/…`).
+        let carried = |k: &str| match crate::cmd::lists::list_binding(k) {
+            Some((crate::cmd::lists::BoundList::Fills, ..)) => filled,
+            Some((crate::cmd::lists::BoundList::Effects, ..)) => effects,
+            _ => false,
+        };
+        n.bound = pn.bound.iter().filter(|(k, _)| carried(k)).map(|(k, v)| (k.clone(), v.clone())).collect();
+        if let NodeKind::Text(t) = &mut n.kind {
+            let mut tp = TextPath::new(&geom);
+            tp.start = start;
+            t.path = Some(Box::new(tp));
+        }
+        d.insert(n, parent, index)?;
+        d.remove(path)?;
+        ds.selection = vec![id];
+        textedit::begin(self, id, Some(0), true)?;
+        if !self.prefs.keep_tool {
+            self.tool.tool = ToolId::Move;
+        }
+        Ok(())
+    }
+
     /// Drag out a new text box: past the drag slop it has the drag's size (at least one line
     /// tall) and its top-left, and that size is fixed.
     fn text_box_drag(&mut self, ev: &PointerEvent, id: NodeId, start: Point, line: f64) -> Result<()> {
@@ -2003,7 +2453,9 @@ impl Session {
             255,
         );
         let sel = ds.selection.clone();
-        if !sel.is_empty() {
+        if self.tool.pick_only {
+            self.tool.picked = Some(c);
+        } else if !sel.is_empty() {
             self.execute("node.set", &json!({"ids": sel, "props": {"fill": c.to_css_hex()}}))?;
         }
         self.recent_colors.retain(|x| *x != c);
@@ -2039,13 +2491,7 @@ impl Session {
         if self.tool.pen.is_none()
             && let Some((id, v)) = selected_end_at(&doc, &self.selection(), ev.p(), 8.0 / ev.zoom.max(1e-6))
         {
-            self.set_tool(ToolId::Move);
-            crate::vectoredit::begin(self, id)?;
-            crate::vectoredit::set_tool(self, crate::vectoredit::VTool::Pen)?;
-            return crate::vectoredit::set_state(self, |e| {
-                e.anchor = Some(v);
-                e.vertices = vec![v];
-            });
+            return self.pen_edit(id, Some(v));
         }
         let pen = self.tool.pen.get_or_insert_with(PenPath::default);
         // Clicking the first anchor closes the path.
@@ -2071,9 +2517,7 @@ impl Session {
         if ev.shift
             && let Some((last, _, _)) = pen.points.last()
         {
-            let v = p - *last;
-            let ang = (v.atan2() / (std::f64::consts::PI / 4.0)).round() * std::f64::consts::PI / 4.0;
-            p = *last + Vec2::from_angle(ang) * v.hypot();
+            p = at_45_degrees(*last, p);
         }
         pen.points.push((p, Vec2::ZERO, Vec2::ZERO));
         self.tool.gesture = Gesture::PenDrag { anchor: p };
@@ -2163,7 +2607,30 @@ impl Session {
         Ok(())
     }
 
-    /// Finish the pen path (Enter/Escape/double-click).
+    /// Edit `id` as a vector with the pen, going on from point `anchor` (or, without one, starting
+    /// a new path in the same layer at the next click).
+    fn pen_edit(&mut self, id: NodeId, anchor: Option<usize>) -> Result<()> {
+        self.set_tool(ToolId::Move);
+        crate::vectoredit::begin(self, id)?;
+        crate::vectoredit::set_tool(self, crate::vectoredit::VTool::Pen)?;
+        crate::vectoredit::set_state(self, |e| {
+            e.anchor = anchor;
+            e.vertices = anchor.into_iter().collect();
+        })
+    }
+
+    /// Enter/Escape while the pen draws: the path ends but its layer stays in edit mode with the
+    /// pen, so the next path joins the same vector (another Escape leaves edit mode).
+    pub fn pen_end(&mut self) -> Result<()> {
+        let id = self.tool.pen.as_ref().and_then(|p| p.id);
+        self.pen_finish()?;
+        match id {
+            Some(id) if self.doc()?.contains(id) => self.pen_edit(id, None),
+            _ => Ok(()),
+        }
+    }
+
+    /// Finish the pen path (and keep the pen tool: double-click, Delete, a tool switch).
     pub fn pen_finish(&mut self) -> Result<()> {
         let pen = self.tool.pen.take();
         self.tool.overlay.pen.clear();
@@ -2192,14 +2659,17 @@ impl Session {
         }
         let fitted = figcraft_geom::kurbo::simplify::simplify_bezpath(poly.iter(), 0.75, &Default::default());
         let d = fitted.to_svg();
+        if matches!(self.tool.tool, ToolId::Marker | ToolId::Highlighter) {
+            return self.ink_finish(&d);
+        }
         let page = self.page()?;
         let parent = frame_at(self.doc()?, page, points.first().copied().unwrap_or_default(), &[]).unwrap_or(page);
         let pw = self.doc()?.world_transform(parent);
         let mut local = fitted.clone();
         local.apply_affine(pw.inverse());
         let _ = d;
-        let mut props =
-            json!({"fills": [], "strokes": ["#000000"], "strokeWeight": 2, "strokeCap": "round", "strokeJoin": "round", "strokeAlign": "center"});
+        let (color, weight) = PENCIL_STROKE;
+        let mut props = json!({"fills": [], "strokes": [color.to_css_hex()], "strokeWeight": weight, "strokeCap": "round", "strokeJoin": "round", "strokeAlign": "center"});
         // Pen pressure becomes the stroke's width profile (brushes follow it too).
         if let Some(points) = pressure_profile(points, pressure) {
             props["widthProfile"] = json!(points);
@@ -2217,6 +2687,10 @@ impl Session {
     /// Keys the current mode handles before menu shortcuts (vector edit mode's tools and point
     /// keys, Enter to finish the shape builder). Returns whether the key was used.
     pub fn tool_key(&mut self, name: &str, shift: bool, alt: bool, cmd: bool) -> Result<bool> {
+        // Dev Mode edits nothing: keys go to the commands (which it refuses in the app).
+        if self.tool.dev_mode {
+            return Ok(false);
+        }
         if self.ds().is_ok_and(|d| d.vector_edit.is_some()) {
             return crate::vectoredit::key(self, name, shift, alt, cmd);
         }
@@ -2308,7 +2782,7 @@ impl Session {
             return Ok(());
         }
         if self.tool.pen.is_some() {
-            return self.pen_finish();
+            return self.pen_end();
         }
         if self.tool.busy() {
             self.tool.gesture = Gesture::None;
@@ -2358,6 +2832,7 @@ impl Session {
     fn arc_handles_shown(&self) -> bool {
         let arc_drag = matches!(self.tool.gesture, Gesture::Arc { .. } | Gesture::Shape { .. });
         self.tool.tool == ToolId::Move
+            && !self.tool.dev_mode
             && (arc_drag || !self.tool.busy())
             && self.ds().is_ok_and(|ds| ds.vector_edit.is_none() && ds.text_edit.is_none())
     }

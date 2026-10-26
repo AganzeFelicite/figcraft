@@ -49,13 +49,14 @@ struct Placed {
     line: Option<[Point; 2]>,
 }
 
+/// Stable egui id for guide dragging.
 fn drag_id() -> Id {
-    Id::new("guide_drag")
+    Id::unique("guide_drag")
 }
 
 /// The dragged guide as it would land.
 fn preview_id() -> Id {
-    Id::new("guide_preview")
+    Id::unique("guide_preview")
 }
 
 /// The page's guides and those of its top-level frames (frames last, so they're found first).
@@ -268,6 +269,7 @@ pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2) -> bool {
             app.run("guide.select", owned(g.owner, page, json!({"index": g.index})));
             if secondary {
                 app.ui.context_menu = Some((pos, Vec::new()));
+                app.ui.context_menu_shown = false;
             } else {
                 ctx.data_mut(|d| {
                     d.insert_temp(drag_id(), GuideDrag::Move { owner: g.owner, index: g.index, vertical: g.vertical, copy: alt, frame })

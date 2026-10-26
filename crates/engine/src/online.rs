@@ -120,7 +120,12 @@ pub fn same_server(a: &str, b: &str) -> bool {
         let s = plain_server(s).to_ascii_lowercase();
         let s = s.trim_end_matches('/');
         let port = if s.starts_with("wss://") { ":443" } else { ":80" };
-        s.strip_suffix(port).unwrap_or(s).to_string()
+        let start = s.find("://").map_or(0, |i| i + 3);
+        let end = s[start..].find('/').map_or(s.len(), |i| start + i);
+        match s[start..end].strip_suffix(port) {
+            Some(host) => format!("{}{}{}", &s[..start], host, &s[end..]),
+            None => s.to_string(),
+        }
     };
     norm(a) == norm(b)
 }
@@ -516,7 +521,8 @@ fn recover_file(s: &mut Session, p: &Value) -> Result<Value> {
     let i = named(s, CMD, p)?;
     let num = |key: &str| p.get(key).and_then(Value::as_u64).ok_or_else(|| bad(CMD, format!("`{key}` must be a whole number")));
     let client_id = u32::try_from(num("client")?).map_err(|_| bad(CMD, "`client` must be a client id"))?;
-    let at = Resume { session: num("session")?, client_id, seq: num("seq")? };
+    let secret = p.get("secret").and_then(Value::as_u64).unwrap_or(0);
+    let at = Resume { session: num("session")?, client_id, seq: num("seq")?, secret };
     if s.prefs.online_files.get(i).is_some_and(|f| s.online_session(f).is_some()) {
         return Err(bad(CMD, "this file is open already"));
     }
@@ -637,7 +643,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "collab.recoverFile",
             "Recover online file",
-            "{path (a recovery copy of one of your online files), file, server?, session, client, seq (who the app was in the file when the copy was written, and the server's last change it had: from the note beside the copy)} → {session, status: \"connecting\"}: joins the file again as its owner and keeps the copy until the file arrives. Then: the server has everything in the copy → nothing more; the copy has changes of yours the server never confirmed and nothing else changed there → they are applied on top as one edit (\"Recovered changes\", synced to everyone); anything else changed meanwhile → the copy opens beside the file as “<name> (recovered copy)”; the file can't be joined → the copy opens as an unsaved document. The session's message says which",
+            "{path (a recovery copy of one of your online files), file, server?, session, client, seq, secret? (who the app was in the file when the copy was written, and the server's last change it had: from the note beside the copy)} → {session, status: \"connecting\"}: joins the file again as its owner and keeps the copy until the file arrives. Then: the server has everything in the copy → nothing more; the copy has changes of yours the server never confirmed and nothing else changed there → they are applied on top as one edit (\"Recovered changes\", synced to everyone); anything else changed meanwhile → the copy opens beside the file as “<name> (recovered copy)”; the file can't be joined → the copy opens as an unsaved document. The session's message says which",
             false,
             recover_file
         ),

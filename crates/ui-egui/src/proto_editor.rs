@@ -32,7 +32,7 @@ pub struct Slot {
 impl Slot {
     /// A widget id for `what` of this action.
     pub fn id(&self, what: &'static str) -> Id {
-        Id::new((what, self.node, self.k, &self.path))
+        Id::unique((what, self.node, self.k, &self.path))
     }
 }
 
@@ -129,8 +129,9 @@ fn unavailable(label: &str) -> &'static str {
     }
 }
 
+/// Stable egui id for a node interaction's open action path.
 fn open_id(cx: &Cx) -> Id {
-    Id::new(("proto_open_action", cx.node, cx.k))
+    Id::unique(("proto_open_action", cx.node, cx.k))
 }
 
 /// The open action (the conditionals around it are open too); the first one by default.

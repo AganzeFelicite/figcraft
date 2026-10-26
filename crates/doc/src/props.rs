@@ -475,7 +475,7 @@ impl WidthPreset {
     }
 
     pub fn from_id(s: &str) -> Option<WidthPreset> {
-        let s: String = s.chars().filter(|c| c.is_ascii_alphanumeric()).collect();
+        let s: String = s.chars().filter(char::is_ascii_alphanumeric).collect();
         WidthPreset::ALL
             .into_iter()
             .find(|p| p.id().eq_ignore_ascii_case(&s) || p.label().replace(' ', "").eq_ignore_ascii_case(&s))
@@ -795,7 +795,7 @@ fn yes() -> bool {
 
 impl Effect {
     /// Effect types in the order the Design panel lists them: (label, type name).
-    pub const TYPES: [(&'static str, &'static str); 7] = [
+    pub const TYPES: [(&str, &str); 7] = [
         ("Drop shadow", "dropShadow"),
         ("Inner shadow", "innerShadow"),
         ("Layer blur", "layerBlur"),

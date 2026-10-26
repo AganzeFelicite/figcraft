@@ -120,8 +120,7 @@ impl Recovery {
         (0..10).find_map(|n| {
             let dir = root.join(if n == 0 { pid.to_string() } else { format!("{pid}-{n}") });
             std::fs::create_dir_all(&dir).ok()?;
-            let lock = File::options().write(true).create(true).truncate(false).open(dir.join(LOCK)).ok()?;
-            lock.try_lock().ok()?;
+            let lock = lock_folder(&dir).ok()?;
             Some(Self { dir, _lock: lock, written: HashMap::new(), next: 0.0, waiting: Vec::new() })
         })
     }
@@ -207,10 +206,12 @@ impl Recovery {
             let doc = d.doc.clone();
             let (versions, branches) = (d.versions.clone(), figcraft_engine::branches::current(s, d.uid));
             // Which online file it is and what of the server's this very copy has (a line each:
-            // the server, the file's id, then the session, client id and last change), while it
+            // the server, the file's id, then the session, client id, last change and the secret the
+            // client id resumes with), while it
             // is one. Written after the copy, never before: a note must not promise more of the
             // server's changes than its copy holds.
-            let online = s.online_of(d.uid).map(|(server, file, at)| format!("{server}\n{file}\n{} {} {}", at.session, at.client_id, at.seq));
+            let online =
+                s.online_of(d.uid).map(|(server, file, at)| format!("{server}\n{file}\n{} {} {} {}", at.session, at.client_id, at.seq, at.secret));
             let job = move || {
                 if !write_atomic(&path, &doc, &versions, &branches) {
                     return false;
@@ -250,6 +251,17 @@ impl Recovery {
         self.written.insert(uid, Copy { done: None, flight: Some((vec![revision], writer)) });
     }
 
+    /// Quitting: a normal quit ([`finish`](Self::finish)) when the unsaved-changes question was
+    /// `asked` or nothing is unsaved. Otherwise (macOS's Quit menu ends the app without asking) the
+    /// unsaved documents are copied and the copies stay for the next start, as after a crash.
+    pub fn quit(mut self, s: &Session, asked: bool) {
+        if asked || !s.docs.iter().any(|d| needs_copy(s, d)) {
+            return self.finish();
+        }
+        self.write(s, true);
+        self.settle(s);
+    }
+
     /// A normal quit: the documents were saved or their changes discarded on purpose. (Earlier
     /// runs' copies still waiting for their outcome stay for the next start.)
     pub fn finish(self) {
@@ -282,6 +294,17 @@ fn remove_kept(w: Waiting) {
 /// The extension of the note beside the copy of a document that is one of your online files.
 const ONLINE: &str = "online";
 
+/// How long the startup waits, once, for folder locks that may free themselves (#334).
+#[cfg(unix)]
+const LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Lock the folder `dir` (`WouldBlock` while another process holds it).
+fn lock_folder(dir: &Path) -> Result<File, std::fs::TryLockError> {
+    let lock = File::options().write(true).create(true).truncate(false).open(dir.join(LOCK)).map_err(std::fs::TryLockError::Error)?;
+    lock.try_lock()?;
+    Ok(lock)
+}
+
 /// The copy at `file` is of one of your online files: join that file again as its owner, keeping
 /// the copy to compare with what arrives. The session, or `None` when the copy isn't one (or its
 /// file isn't recorded any more, or is open already): then it opens as any other copy.
@@ -291,7 +314,10 @@ fn rejoin_online(file: &Path, s: &mut Session) -> Option<u64> {
     let (server, id, at) = (lines.next()?, lines.next()?, lines.next()?);
     let mut at = at.split(' ').map(|n| n.parse::<u64>().ok());
     let (session, client, seq) = (at.next()??, at.next()??, at.next()??);
-    let params = json!({"path": file.to_string_lossy(), "server": server, "file": id, "session": session, "client": client, "seq": seq});
+    // Absent in notes written before ids had secrets.
+    let secret = at.next().flatten().unwrap_or(0);
+    let params =
+        json!({"path": file.to_string_lossy(), "server": server, "file": id, "session": session, "client": client, "seq": seq, "secret": secret});
     s.execute("collab.recoverFile", &params).ok()?.get("session")?.as_u64()
 }
 
@@ -317,7 +343,24 @@ fn stamp(s: &Session, d: &DocState) -> Vec<u64> {
 fn write_atomic(path: &Path, doc: &figcraft_engine::doc::Document, versions: &[Version], branches: &[Branch]) -> bool {
     let Ok(bytes) = figcraft_format::save_bytes_with_history(doc, None, versions, branches) else { return false };
     let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, bytes).is_ok() && std::fs::rename(&tmp, path).is_ok()
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut opts = std::fs::OpenOptions::new();
+        opts.write(true).create(true).truncate(true).mode(0o600);
+        let Ok(mut f) = opts.open(&tmp) else { return false };
+        if std::io::Write::write_all(&mut f, &bytes).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return false;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        if std::fs::write(&tmp, bytes).is_err() {
+            return false;
+        }
+    }
+    std::fs::rename(&tmp, path).is_ok()
 }
 
 /// [`recover_all`], for a start that keeps nothing waiting: how many documents came back as
@@ -351,6 +394,7 @@ pub fn recover_all(root: &Path, s: &mut Session) -> Recovered {
             }
         }
     };
+    let (mut free, mut held) = (Vec::new(), Vec::new());
     for e in entries.flatten() {
         let path = e.path();
         if !path.is_dir() {
@@ -358,10 +402,22 @@ pub fn recover_all(root: &Path, s: &mut Session) -> Recovered {
             continue;
         }
         // Still running (another window of the app), or not ours to take.
-        let Ok(lock) = File::options().write(true).create(true).truncate(false).open(path.join(LOCK)) else { continue };
-        if lock.try_lock().is_err() {
-            continue;
+        match lock_folder(&path) {
+            Ok(lock) => free.push((path, lock)),
+            Err(std::fs::TryLockError::WouldBlock) => held.push(path),
+            Err(_) => {}
         }
+    }
+    // A child between its `fork` and its `exec` shares the run's open descriptors, and a `flock`
+    // lasts while any of them is open, so an ended run's folder can look held for a moment. Wait
+    // once, however many folders are held, and try those again (#334). Windows doesn't pass the
+    // lock to child processes.
+    #[cfg(unix)]
+    if !held.is_empty() {
+        std::thread::sleep(LOCK_WAIT);
+        free.extend(held.into_iter().filter_map(|path| lock_folder(&path).ok().map(|lock| (path, lock))));
+    }
+    for (path, lock) in free {
         let lock = Arc::new(lock);
         let files: Vec<PathBuf> = std::fs::read_dir(&path).into_iter().flatten().flatten().map(|f| f.path()).collect();
         for f in &files {

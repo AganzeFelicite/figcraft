@@ -116,7 +116,7 @@ pub(crate) fn rule(r: figcraft_render::FillRule) -> FillRule {
 }
 
 /// The renderer's stroke fill rule: even-odd ring paths for aligned strokes, else non-zero.
-fn stroke_rule(n: &Node, closed: bool) -> FillRule {
+pub(crate) fn stroke_rule(n: &Node, closed: bool) -> FillRule {
     if n.stroke.sides.is_some() || (n.stroke.dashes.is_empty() && closed && n.stroke.align != StrokeAlign::Center) {
         FillRule::EvenOdd
     } else {
@@ -318,17 +318,19 @@ impl<'a> Exporter<'a> {
                     && closed
                 {
                     if let NodeKind::Vector { network } = &n.kind
-                        && network.regions.iter().any(|r| r.fills.is_some())
+                        && network.regions.iter().any(|r| r.fills.is_some() || r.paint_space.is_some())
                     {
                         let rounded = network.rounded();
                         let net = rounded.as_ref().unwrap_or(network);
                         for (i, region) in net.regions.iter().enumerate() {
                             let paints = region.fills.as_deref().unwrap_or(&n.fills);
-                            if let Some(region_path) = net.region_path(i) {
+                            if let Some(mut region_path) = net.region_path(i) {
+                                let (pw, ph, frame) = region.paint_frame(w, h);
+                                region_path.apply_affine(frame.inverse());
                                 let fill_rule =
                                     if region.winding == figcraft_doc::WindingRule::EvenOdd { FillRule::EvenOdd } else { FillRule::NonZero };
                                 for p in paints {
-                                    self.fill(s, &region_path, fill_rule, p, w, h, xf);
+                                    self.fill(s, &region_path, fill_rule, p, pw, ph, xf * frame);
                                 }
                             }
                         }

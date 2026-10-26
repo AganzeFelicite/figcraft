@@ -290,7 +290,7 @@ struct Frame {
 /// An icon button on the dark popover.
 fn menu_icon(ui: &mut Ui, rect: Rect, icon: Icon, tip: &str, on: bool) -> Response {
     let t = Tokens::get(ui.ctx());
-    let resp = ui.interact(rect, ui.id().with(("style_picker_btn", tip)), Sense::click()).tip(tip);
+    let resp = ui.interact(rect, ui.scope_id().with(("style_picker_btn", tip)), Sense::click()).tip(tip);
     if on || resp.hovered() {
         ui.painter().rect_filled(rect, CornerRadius::same(5), t.menu_hover);
     }
@@ -482,7 +482,7 @@ fn style_grid(ui: &mut Ui, list: &[(&Style, Key)], applied: Option<&Key>, editab
                     None => preview(ui, r, s, StyleSlot::Fill),
                 }
                 if applied == Some(key) {
-                    ui.painter().rect_stroke(r.expand(2.0), CornerRadius::same(5), Stroke::new(2.0, t.accent), egui::StrokeKind::Inside);
+                    ui.painter().rect_stroke(r.expand(2.0), CornerRadius::same(5), Stroke::new(2.0, crate::theme::ACCENT), egui::StrokeKind::Inside);
                 } else if resp.hovered() && !text {
                     ui.painter().rect_stroke(r.expand(2.0), CornerRadius::same(4), Stroke::new(1.0, t.menu_text), egui::StrokeKind::Inside);
                 }
@@ -555,7 +555,11 @@ fn listing(app: &FigApp, ui: &mut Ui, doc: &Document, p: &mut Picker, out: &mut 
         }
     }
     let colors = if slot.paints() {
-        crate::variable_ui::groups(doc, &libs, |_, v| v.kind == VariableType::Color && (q.is_empty() || v.name.to_lowercase().contains(&q)))
+        // Variables scoped to every selected layer's fill (or stroke), as the Design panel's pickers offer.
+        let scopes: Vec<_> = p.ids.iter().filter_map(|id| figcraft_engine::cmd::variables::field_scope(doc, *id, slot.key())).collect();
+        crate::variable_ui::groups(doc, &libs, |_, v| {
+            v.kind == VariableType::Color && (q.is_empty() || v.name.to_lowercase().contains(&q)) && scopes.iter().all(|s| v.in_scope(s))
+        })
     } else {
         Vec::new()
     };
@@ -664,7 +668,7 @@ fn binding_cell(ui: &mut Ui, doc: &Document, style: &Style, field: &str, kind: f
         }
         return ui.rect_contains_pointer(b);
     };
-    let id = Id::new(("style_binding", &style.id, field));
+    let id = Id::unique(("style_binding", &style.id, field));
     let shown = widgets::elide_font(ui, leaf(name), 90.0, regular(10.0));
     let w = ui.painter().layout_no_wrap(shown.clone(), regular(10.0), t.menu_dim).size().x + 22.0;
     let chip = Rect::from_min_max(pos2(row.max.x - w - 4.0, row.min.y + 4.0), pos2(row.max.x - 4.0, row.max.y - 4.0));
@@ -700,9 +704,33 @@ fn grid_label(g: &figcraft_doc::LayoutGrid) -> String {
     }
 }
 
-/// A text style's typography in the editor: a sample, then font, style, size, line height and
-/// letter spacing; a change redefines the style (every linked char follows).
-fn text_properties(ui: &mut Ui, id: &str, def: &TextStyle, out: &mut Frame) {
+/// The chip in `rect` of the variable `name` bound to `field` of text style `style`. A click on it
+/// opens the variable picker to change it, and its detach button unbinds it.
+#[allow(clippy::too_many_arguments)]
+fn text_binding(ui: &mut Ui, style: &str, field: &str, kind: VariableType, rect: Rect, name: &str, lead: widgets::Lead, out: &mut Frame) {
+    match widgets::bound_field(ui, Id::unique(("ts_bound", style, field)), lead, rect, name) {
+        Some(widgets::BindEvent::Open(at)) => crate::variable_ui::open_style(ui, style, field, kind, at),
+        Some(widgets::BindEvent::Detach) => out.act = Some(Act::Unbind(style.to_string(), field.to_string())),
+        None => {}
+    }
+}
+
+/// The text style's variable name for `field`, or None when the field is not bound.
+fn bound_name(doc: &Document, style: &Style, field: &str) -> Option<String> {
+    style.bound.get(field).map(|v| doc.variables.get(v).map_or_else(|| v.clone(), |x| x.name.clone()))
+}
+
+/// Redefines the text style `def` through `f`; the edit is queued only when it changes the style.
+fn set_text(def: &TextStyle, id: &str, out: &mut Frame, f: impl FnOnce(&mut TextStyle)) {
+    let mut d = def.clone();
+    f(&mut d);
+    if d != *def {
+        out.act = Some(Act::SetText(id.to_string(), d));
+    }
+}
+
+/// The sample of the text style, with its font, style and metrics beside it.
+fn text_sample_header(ui: &mut Ui, def: &TextStyle, out: &mut Frame) {
     let t = Tokens::get(ui.ctx());
     let (r, _) = ui.allocate_exact_size(vec2(W, 40.0), Sense::hover());
     ui.painter().rect_filled(r, CornerRadius::same(5), Color32::from_white_alpha(14));
@@ -711,45 +739,134 @@ fn text_properties(ui: &mut Ui, id: &str, def: &TextStyle, out: &mut Frame) {
     let g = ui.painter().layout(summary, regular(10.5), t.menu_dim, W - 80.0);
     ui.painter().galley(pos2(r.min.x + 72.0, r.center().y - g.size().y / 2.0), g, t.menu_dim);
     ui.add_space(6.0);
-    let set = |out: &mut Frame, f: &dyn Fn(&mut TextStyle)| {
-        let mut d = def.clone();
-        f(&mut d);
-        if d != *def {
-            out.act = Some(Act::SetText(id.to_string(), d));
+}
+
+/// The font field: a variable chip when bound, else a dropdown whose menu is returned.
+fn font_family_field(ui: &mut Ui, doc: &Document, style: &Style, def: &TextStyle, out: &mut Frame) -> Option<Response> {
+    let id = style.id.as_str();
+    match bound_name(doc, style, "fontFamily") {
+        Some(name) => {
+            let (r, _) = ui.allocate_exact_size(vec2(W, widgets::FIELD_H), Sense::hover());
+            text_binding(ui, id, "fontFamily", VariableType::String, r, &name, widgets::Lead::Named(tr("Font")), out);
+            None
         }
-    };
-    let half = (W - 8.0) / 2.0;
-    // The dropdowns' menus open outside the dark scope (they're regular popups).
-    let (family_resp, style_resp) = crate::theme::on_dark(ui, |ui| {
-        ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
-        let family_resp = widgets::dropdown(ui, &def.font_family, W, None).on_hover_text(tr("Font"));
-        let mut style_resp = None;
-        ui.horizontal(|ui| {
-            style_resp = Some(widgets::dropdown(ui, &def.font_style, half, None).on_hover_text(tr("Font style")));
-            if let Some(widgets::FieldEdit::Set(v) | widgets::FieldEdit::Scrub(v, true)) =
-                widgets::number_field(ui, Id::new(("ts_size", id)), widgets::Lead::Text(tr("Size")), Some(def.font_size), "", half, 1.0)
-            {
-                set(out, &|d| d.font_size = v.clamp(1.0, 5000.0));
+        None => Some(widgets::dropdown(ui, &def.font_family, W, None).on_hover_text(tr("Font"))),
+    }
+}
+
+/// The font style field (a dropdown, whose menu is returned, or a variable chip) and the size field, in one row.
+fn font_style_size_row(ui: &mut Ui, doc: &Document, style: &Style, def: &TextStyle, half: f32, out: &mut Frame) -> Option<Response> {
+    let id = style.id.as_str();
+    let mut style_resp = None;
+    ui.horizontal(|ui| {
+        match bound_name(doc, style, "fontStyle") {
+            Some(name) => {
+                let (r, _) = ui.allocate_exact_size(vec2(half, widgets::FIELD_H), Sense::hover());
+                text_binding(ui, id, "fontStyle", VariableType::String, r, &name, widgets::Lead::Named(tr("Font style")), out);
             }
-        });
-        ui.horizontal(|ui| {
-            if let Some(v) = widgets::text_field(ui, Id::new(("ts_lh", id)), &def.line_height.label(), half, tr("Line height"))
+            None => style_resp = Some(widgets::dropdown(ui, &def.font_style, half, None).on_hover_text(tr("Font style"))),
+        }
+        font_size_field(ui, doc, style, def, half, out);
+    });
+    style_resp
+}
+
+/// The font size field, which also takes a variable.
+fn font_size_field(ui: &mut Ui, doc: &Document, style: &Style, def: &TextStyle, half: f32, out: &mut Frame) {
+    let id = style.id.as_str();
+    let size = bound_name(doc, style, "fontSize");
+    let (edit, ev) = widgets::number_field_bindable(
+        ui,
+        Id::unique(("ts_size", id)),
+        widgets::Lead::Text(tr("Size")),
+        Some(def.font_size),
+        "",
+        half,
+        1.0,
+        Some(size.as_deref()),
+        widgets::Empty::Text(tr("Mixed")),
+    );
+    if let Some(widgets::FieldEdit::Set(v) | widgets::FieldEdit::Scrub(v, true)) = edit.and_then(|e| e.settled()) {
+        set_text(def, id, out, |d| d.font_size = v.clamp(1.0, 5000.0));
+    }
+    match ev {
+        Some(widgets::BindEvent::Open(at)) => crate::variable_ui::open_style(ui, id, "fontSize", VariableType::Number, at),
+        Some(widgets::BindEvent::Detach) => out.act = Some(Act::Unbind(id.to_string(), "fontSize".to_string())),
+        None => {}
+    }
+}
+
+/// The line height field: a variable chip when bound, else a text field with a variable button beside it.
+fn line_height_field(ui: &mut Ui, doc: &Document, style: &Style, def: &TextStyle, half: f32, area: Rect, out: &mut Frame) {
+    let id = style.id.as_str();
+    match bound_name(doc, style, "lineHeight") {
+        Some(name) => {
+            let (r, _) = ui.allocate_exact_size(area.size(), Sense::hover());
+            text_binding(ui, id, "lineHeight", VariableType::Number, r, &name, widgets::Lead::Named(tr("Line height")), out);
+        }
+        None => {
+            if let Some(v) = widgets::text_field(ui, Id::unique(("ts_lh", id)), &def.line_height.label(), half, tr("Line height"))
                 && let Some(lh) = crate::typography::parse_line_height(&v, Some(def.line_height)).and_then(|v| crate::typography::line_height_of(&v))
             {
-                set(out, &|d| d.line_height = lh);
+                set_text(def, id, out, |d| d.line_height = lh);
             }
-            if let Some(v) = widgets::text_field(ui, Id::new(("ts_ls", id)), &def.letter_spacing.label(), half, tr("Letter spacing"))
+            if crate::variable_ui::variable_button(ui, area, Id::unique(("ts_bind", id, "lineHeight"))) {
+                crate::variable_ui::open_style(ui, id, "lineHeight", VariableType::Number, area.left_bottom());
+            }
+        }
+    }
+}
+
+/// The letter spacing field: a variable chip when bound, else a text field with a variable button beside it.
+fn letter_spacing_field(ui: &mut Ui, doc: &Document, style: &Style, def: &TextStyle, half: f32, area: Rect, out: &mut Frame) {
+    let id = style.id.as_str();
+    match bound_name(doc, style, "letterSpacing") {
+        Some(name) => {
+            let (r, _) = ui.allocate_exact_size(area.size(), Sense::hover());
+            text_binding(ui, id, "letterSpacing", VariableType::Number, r, &name, widgets::Lead::Named(tr("Letter spacing")), out);
+        }
+        None => {
+            if let Some(v) = widgets::text_field(ui, Id::unique(("ts_ls", id)), &def.letter_spacing.label(), half, tr("Letter spacing"))
                 && let Some(ls) =
                     crate::typography::parse_letter_spacing(&v, Some(def.letter_spacing)).and_then(|v| crate::typography::letter_spacing_of(&v))
             {
-                set(out, &|d| d.letter_spacing = ls);
+                set_text(def, id, out, |d| d.letter_spacing = ls);
             }
-        });
-        (family_resp, style_resp)
+            if crate::variable_ui::variable_button(ui, area, Id::unique(("ts_bind", id, "letterSpacing"))) {
+                crate::variable_ui::open_style(ui, id, "letterSpacing", VariableType::Number, area.left_bottom());
+            }
+        }
+    }
+}
+
+/// The fields of a text style, in rows: font, then style and size, then line height and letter
+/// spacing. Returns the font and style dropdowns, whose menus are opened after the fields.
+fn text_property_fields(ui: &mut Ui, doc: &Document, style: &Style, def: &TextStyle, out: &mut Frame) -> (Option<Response>, Option<Response>) {
+    let half = (W - 8.0) / 2.0;
+    ui.spacing_mut().item_spacing = vec2(8.0, 6.0);
+    let family_resp = font_family_field(ui, doc, style, def, out);
+    let style_resp = font_style_size_row(ui, doc, style, def, half, out);
+    ui.horizontal(|ui| {
+        let area = Rect::from_min_size(ui.cursor().min, vec2(half, widgets::FIELD_H));
+        line_height_field(ui, doc, style, def, half, area, out);
+        let area = Rect::from_min_size(ui.cursor().min, vec2(half, widgets::FIELD_H));
+        letter_spacing_field(ui, doc, style, def, half, area, out);
     });
-    crate::right::menu_popup(&family_resp).width(260.0).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+    (family_resp, style_resp)
+}
+
+/// The font menu: Apply variable, then the installed fonts. Picking a font keeps its style when the
+/// family has one, else falls back to Regular or the first style.
+fn font_family_menu(id: &str, def: &TextStyle, family_resp: &Response, out: &mut Frame) {
+    crate::right::menu_popup(family_resp).width(260.0).close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside).show(|ui| {
+        if crate::right::menu_item(ui, tr("Apply variable"), "") {
+            crate::variable_ui::open_style(ui, id, "fontFamily", VariableType::String, family_resp.rect.left_bottom());
+            ui.close();
+            return;
+        }
+        ui.separator();
         if let Some(f) = crate::typography::font_picker(ui, Some(&def.font_family), family_resp.clicked()).picked {
-            set(out, &|d| {
+            set_text(def, id, out, |d| {
                 d.font_family = f.clone();
                 let styles = figcraft_text::family_styles(&f);
                 if !styles.is_empty() && !styles.contains(&d.font_style) {
@@ -759,18 +876,43 @@ fn text_properties(ui: &mut Ui, id: &str, def: &TextStyle, out: &mut Frame) {
             ui.close();
         }
     });
-    if let Some(sr) = style_resp {
-        crate::right::menu_popup(&sr).width(200.0).show(|ui| {
-            egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
-                for s in figcraft_text::family_styles(&def.font_family) {
-                    let mark = if def.font_style == s { "✓ " } else { "   " };
-                    if crate::right::menu_item(ui, &format!("{mark}{s}"), "") {
-                        set(out, &|d| d.set_font_style(s.clone()));
-                        ui.close();
-                    }
+}
+
+/// The font style menu: Apply variable, then the styles of the current font, the current one checked.
+fn font_style_menu(id: &str, def: &TextStyle, style_resp: &Response, out: &mut Frame) {
+    crate::right::menu_popup(style_resp).width(200.0).show(|ui| {
+        if crate::right::menu_item(ui, tr("Apply variable"), "") {
+            crate::variable_ui::open_style(ui, id, "fontStyle", VariableType::String, style_resp.rect.left_bottom());
+            ui.close();
+            return;
+        }
+        ui.separator();
+        egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+            for s in figcraft_text::family_styles(&def.font_family) {
+                let mark = if def.font_style == s { "✓ " } else { "   " };
+                if crate::right::menu_item(ui, &format!("{mark}{s}"), "") {
+                    set_text(def, id, out, |d| d.set_font_style(s.clone()));
+                    ui.close();
                 }
-            });
+            }
         });
+    });
+}
+
+/// A text style's typography in the editor: a sample, then font, style, size, line height and
+/// letter spacing; a change redefines the style (every linked char follows). Each field takes a
+/// variable: the font and style menus start with Apply variable, the other fields show a variable
+/// button on hover, and a bound field shows its variable instead of its value.
+fn text_properties(ui: &mut Ui, doc: &Document, style: &Style, def: &TextStyle, out: &mut Frame) {
+    let id = style.id.as_str();
+    text_sample_header(ui, def, out);
+    // The dropdowns' menus open outside the dark scope (they're regular popups).
+    let (family_resp, style_resp) = crate::theme::on_dark(ui, |ui| text_property_fields(ui, doc, style, def, out));
+    if let Some(family_resp) = family_resp {
+        font_family_menu(id, def, &family_resp, out);
+    }
+    if let Some(sr) = style_resp {
+        font_style_menu(id, def, &sr, out);
     }
 }
 
@@ -838,7 +980,7 @@ fn editor(ui: &mut Ui, doc: &Document, p: &mut Picker, out: &mut Frame) {
                     binding_cell(ui, doc, &style, &format!("layoutGrids/{i}/size"), figcraft_doc::VariableType::Number, out);
                 }
             }
-            StyleKind::Text { style: def } => text_properties(ui, &style.id, def, out),
+            StyleKind::Text { style: def } => text_properties(ui, doc, &style, def, out),
         }
     });
     ui.add_space(8.0);
@@ -889,7 +1031,7 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
     }
     let y = p.y.clamp(screen.min.y + 48.0, (screen.max.y - 460.0).max(screen.min.y + 48.0));
     let mut out = Frame { act: None, hover: None, budget: 4 };
-    let area = egui::Area::new(Id::new("style_picker_area")).order(egui::Order::Foreground).fixed_pos(pos2(x, y)).show(ctx, |ui| {
+    let area = egui::Area::new(Id::unique("style_picker_area")).order(egui::Order::Foreground).fixed_pos(pos2(x, y)).show(ctx, |ui| {
         egui::Frame::NONE.fill(t.menu).corner_radius(CornerRadius::same(10)).inner_margin(egui::Margin::same(8)).show(ui, |ui| {
             ui.set_width(W);
             if p.edit.is_some() {
@@ -900,7 +1042,7 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
         });
     });
     let rect = area.response.rect;
-    ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::new("style_picker_border"))).rect_stroke(
+    ctx.layer_painter(egui::LayerId::new(egui::Order::Foreground, Id::unique("style_picker_border"))).rect_stroke(
         rect,
         CornerRadius::same(10),
         Stroke::new(1.0, Color32::from_black_alpha(40)),
@@ -909,7 +1051,7 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
     // Clicks in the colour picker editing this picker's style, or in a menu the editor opened,
     // keep it open.
     let picker_rect =
-        app.ui.picker.as_ref().filter(|t| matches!(t, PickerTarget::Style { .. })).and(ctx.memory(|m| m.area_rect(Id::new("color_picker"))));
+        app.ui.picker.as_ref().filter(|t| matches!(t, PickerTarget::Style { .. })).and(ctx.memory(|m| m.area_rect(crate::colorpicker::window_id())));
     // So do clicks in the variable picker binding one of its fields (Escape closes that first).
     let variables = crate::variable_ui::picker_rect(ctx);
     let in_popup = egui::Popup::is_any_open(ctx) || variables.is_some();
@@ -1018,7 +1160,7 @@ fn drop_move(shown: &[&Style], from: usize, to: usize) -> Option<Value> {
 
 /// The id of the folder caption being renamed in the Local styles list (temp data).
 fn folder_rename_id() -> Id {
-    Id::new("local_style_folder_rename")
+    Id::unique("local_style_folder_rename")
 }
 
 /// The Design panel's Local styles (shown with nothing selected): this file's styles by type

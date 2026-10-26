@@ -72,7 +72,7 @@ fn manage(app: &mut FigApp, ctx: &egui::Context, f: (&str, &str), action: &str, 
 }
 
 /// Open recorded file `f` as its owner; its tab shows once the file arrives.
-fn open(app: &mut FigApp, f: &OnlineFile) {
+pub(crate) fn open(app: &mut FigApp, f: &OnlineFile) {
     let Some(r) = app.run("collab.openFile", json!({"server": f.server, "file": f.file})) else { return };
     if r["alreadyOpen"] == true && !r["document"].is_null() {
         app.ui.home = false;
@@ -163,8 +163,9 @@ fn row(app: &mut FigApp, ui: &mut Ui, t: &Tokens, f: &OnlineFile, busy: bool) {
     let shown = FileRow { mark: Some((glyph, tint)), name: &f.name, ink, detail: &details, detail_size: 11.0, detail_ink: t.text_secondary };
     file_row(ui, t, r.with_max_x(more.min.x - 4.0), &resp, &shown);
     // The menu button takes its own clicks.
-    let mresp =
-        ui.interact(more, ui.id().with(("online_more", &f.server, &f.file)), Sense::click()).tip(trf("Actions for {name}", &[("name", &f.name)]));
+    let mresp = ui
+        .interact(more, ui.scope_id().with(("online_more", &f.server, &f.file)), Sense::click())
+        .tip(trf("Actions for {name}", &[("name", &f.name)]));
     a11y::menu_button(&mresp, &trf("Actions for {name}", &[("name", &f.name)]), a11y::menu_open(&mresp));
     if mresp.hovered() {
         ui.painter().rect_filled(more, CornerRadius::same(5), t.pressed);
@@ -199,14 +200,14 @@ fn row(app: &mut FigApp, ui: &mut Ui, t: &Tokens, f: &OnlineFile, busy: bool) {
         if let Some(code) = shared.and_then(|s| s.edit.code.as_deref())
             && item(ui, tr("Copy code"), true)
         {
-            app.services.clipboard_set_text(&figcraft_engine::figcraft_collab::code::grouped(code));
+            app.clipboard_set_text(&figcraft_engine::figcraft_collab::code::grouped(code));
             app.toast(tr("Join code copied"));
             ui.close();
         }
         if let Some(s) = shared
             && item(ui, tr("Copy link"), true)
         {
-            app.services.clipboard_set_text(&s.edit.link);
+            app.clipboard_set_text(&s.edit.link);
             app.toast(tr("Invite link copied"));
             ui.close();
         }
@@ -257,7 +258,7 @@ pub fn dialogs(app: &mut FigApp, ctx: &egui::Context) {
     let t = Tokens::get(ctx);
     if let Some((server, file, name)) = app.ui.online.remove.take() {
         let (mut open, mut cancel, mut go) = (true, false, false);
-        crate::dialogs::window(tr("Remove from server"), ctx).id(egui::Id::new("Remove online file")).open(&mut open).show(ctx, |ui| {
+        crate::dialogs::window(tr("Remove from server"), ctx).id(egui::Id::unique("Remove online file")).open(&mut open).show(ctx, |ui| {
             ui.set_width(380.0);
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             widgets::label(ui, &trf("Remove {name} from {server}?", &[("name", &name), ("server", &server_host(&server))]), t.text);
@@ -282,11 +283,11 @@ pub fn dialogs(app: &mut FigApp, ctx: &egui::Context) {
     if let Some((server, file, mut name)) = app.ui.online.rename.take() {
         let (mut open, mut cancel, mut go) = (true, false, false);
         let focus = std::mem::take(&mut app.ui.online.focus_rename);
-        crate::dialogs::window(tr("Rename on the server"), ctx).id(egui::Id::new("Rename online file")).open(&mut open).show(ctx, |ui| {
+        crate::dialogs::window(tr("Rename on the server"), ctx).id(egui::Id::unique("Rename online file")).open(&mut open).show(ctx, |ui| {
             ui.set_width(380.0);
             ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
             widgets::label(ui, tr("The name in your online files and on the server. The document inside keeps its own name."), t.text_secondary);
-            let resp = widgets::text_input(ui, egui::Id::new("online_rename"), &mut name, 380.0, tr("File name"));
+            let resp = widgets::text_input(ui, egui::Id::unique("online_rename"), &mut name, 380.0, tr("File name"));
             a11y::text(&resp, tr("File name"), &name);
             if focus {
                 resp.request_focus();

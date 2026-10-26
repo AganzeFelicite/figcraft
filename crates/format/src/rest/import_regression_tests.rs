@@ -48,6 +48,7 @@ fn public_rest_ignores_region_fills_and_private_fig_handoff() {
         "vertices": [{"x": 0, "y": 0}, {"x": 10, "y": 0}, {"x": 10, "y": 10}],
         "segments": [{"a": 0, "b": 1}, {"a": 1, "b": 2}, {"a": 2, "b": 0}],
         "regions": [{"loops": [[0, 1, 2]], "winding": "nonZero", "fills": [{"type": "solid", "color": {"r": 0, "g": 1, "b": 0}}],
+                     "paint_space": {"width": 10, "height": 10, "transform": [1, 0, 0, 1, 5, 5]},
                      "_figRegionFills": [{"type": "SOLID", "color": {"r": 1, "g": 0, "b": 0}}]}]
     });
     let node = json!({"id": "1:1", "name": "Vector", "type": "VECTOR", "relativeTransform": at(0.0, 0.0),
@@ -56,6 +57,7 @@ fn public_rest_ignores_region_fills_and_private_fig_handoff() {
     let vector = named(&doc, "Vector");
     let NodeKind::Vector { network } = &vector.kind else { panic!("{:#?}", vector.kind) };
     assert!(network.regions[0].fills.is_none());
+    assert!(network.regions[0].paint_space.is_none());
 }
 
 #[test]

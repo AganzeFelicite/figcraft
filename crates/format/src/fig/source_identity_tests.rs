@@ -379,7 +379,7 @@ fn public_rest_import_ignores_private_fig_provenance() {
     assert!(doc.library_store().is_none() && doc.nodes().all(|node| node.name != "Must not import"));
     // Valid provenance on mapped layers links nothing either.
     for message in [message(false), external_namespace_message()] {
-        let (json, _) = super::map::to_rest(&message, "Identity");
+        let (json, _, _) = super::map::to_rest(&message, "Identity", crate::rest::MAX_NODES);
         let (doc, _) = crate::rest::import(&json, &|_| None).unwrap();
         assert!(doc.nodes().all(|n| n.source.is_none()));
     }
@@ -806,7 +806,7 @@ fn edit_node(value: &mut Value, id: &str, edit: &mut dyn FnMut(&mut Value)) {
 #[test]
 fn missing_foreign_self_and_wrong_namespace_provenance_is_not_guessed() {
     for (origin, id) in [("1:99999", "I1:70;1:40"), ("1:12", "I1:70;1:40"), ("1:70", "1:70"), ("1:40", "I1:70;1:40")] {
-        let (mut json, _) = super::map::to_rest(&message(false), "Identity");
+        let (mut json, _, _) = super::map::to_rest(&message(false), "Identity", crate::rest::MAX_NODES);
         edit_node(&mut json["document"]["children"][0], id, &mut |node| {
             node[crate::rest::FIG_SOURCE_FIELD]["origin"] = json!(origin);
             if id == "1:70" {
@@ -825,7 +825,7 @@ fn missing_foreign_self_and_wrong_namespace_provenance_is_not_guessed() {
 
 #[test]
 fn forward_main_references_and_duplicate_ids_are_conservative() {
-    let (mut json, _) = super::map::to_rest(&message(false), "Identity");
+    let (mut json, _, _) = super::map::to_rest(&message(false), "Identity", crate::rest::MAX_NODES);
     json["document"]["children"][0]["children"].as_array_mut().unwrap().rotate_right(1);
     let (doc, _) = crate::rest::import_fig(&json, &|_| None).unwrap();
     assert!(doc.node(named(&doc, "Copy")).unwrap().source.is_some());
@@ -838,7 +838,7 @@ fn forward_main_references_and_duplicate_ids_are_conservative() {
 
 #[test]
 fn missing_contextual_targets_do_not_fall_back_to_a_global_slot() {
-    let (mut json, _) = super::map::to_rest(&message(false), "Identity");
+    let (mut json, _, _) = super::map::to_rest(&message(false), "Identity", crate::rest::MAX_NODES);
     edit_node(&mut json["document"]["children"][0], "1:40", &mut |node| {
         node["children"].as_array_mut().unwrap().retain(|n| n["id"] != "I1:40;1:60");
     });
@@ -1019,7 +1019,7 @@ fn absent_external_mains_keep_known_owned_instances_and_contextual_copies() {
 #[test]
 fn external_namespace_is_private_and_requires_actual_wire_instances() {
     for mode in 0..3 {
-        let (mut json, _) = super::map::to_rest(&external_namespace_message(), "External");
+        let (mut json, _, _) = super::map::to_rest(&external_namespace_message(), "External", crate::rest::MAX_NODES);
         if mode == 0 {
             let (doc, _) = crate::rest::import(&json, &|_| None).unwrap();
             assert!(doc.nodes().all(|n| n.source.is_none()));
@@ -1042,7 +1042,7 @@ fn external_namespace_is_private_and_requires_actual_wire_instances() {
 #[test]
 fn external_namespace_does_not_cover_present_wrong_kind_or_blocked_main() {
     for mode in 0..3 {
-        let (mut json, _) = super::map::to_rest(&external_namespace_message(), "External");
+        let (mut json, _, _) = super::map::to_rest(&external_namespace_message(), "External", crate::rest::MAX_NODES);
         let page = &mut json["document"]["children"][0];
         match mode {
             0 => page["children"].as_array_mut().unwrap().push(json!({"id":"1:99", "type":"FRAME", "name":"Wrong kind",
@@ -1066,7 +1066,7 @@ fn external_namespace_does_not_cover_present_wrong_kind_or_blocked_main() {
 #[test]
 fn external_namespace_rejects_foreign_siblings_duplicates_and_bad_paths() {
     for mode in 0..4 {
-        let (mut json, _) = super::map::to_rest(&external_namespace_message(), "External");
+        let (mut json, _, _) = super::map::to_rest(&external_namespace_message(), "External", crate::rest::MAX_NODES);
         let page = &mut json["document"]["children"][0];
         match mode {
             0 => {
@@ -1113,7 +1113,7 @@ fn an_explicit_no_style_detaches_and_beats_the_older_style_field() {
             node(7, Some(2), "RECTANGLE", "Linked", vec![("inheritFillStyleID", g(5))]),
         ]),
     )]);
-    let (json, _) = super::map::to_rest(&message, "Detach");
+    let (json, _, _) = super::map::to_rest(&message, "Detach", crate::rest::MAX_NODES);
     let find = |name: &str| json["document"]["children"][0]["children"].as_array().unwrap().iter().find(|n| n["name"] == name).unwrap().clone();
     assert!(find("Box")["styles"].get("fill").is_none(), "{}", find("Box")["styles"]);
     assert!(find("Linked")["styles"].get("fill").is_some(), "the older field still links when nothing detaches");

@@ -114,6 +114,16 @@ pub(crate) struct PointSnap {
 /// Eraser brush radius in screen pixels.
 const ERASER_PX: f64 = 8.0;
 
+/// A segment's midpoint is a point a press adds when the pointer is this close (screen pixels).
+const MIDPOINT_PX: f64 = 6.0;
+
+/// The page point at `t` (0..1) along segment `seg` of vector `id`.
+fn segment_point(doc: &Document, id: NodeId, seg: usize, t: f64) -> Option<Point> {
+    use figcraft_geom::kurbo::ParamCurve;
+    let c = network(doc, id)?.cubic(seg)?;
+    Some(doc.world_transform(id) * c.eval(t.clamp(0.0, 1.0)))
+}
+
 fn erase_all(net: &mut VectorNetwork, stamps: &[Point], radius: f64) -> bool {
     stamps.iter().fold(false, |acc, c| ops::erase(net, *c, radius) | acc)
 }
@@ -262,7 +272,7 @@ impl Session {
     }
 
     /// Every edited layer's selected points (segment ends included) other than the active one's.
-    fn others_moving(doc: &Document, ve: &VectorEdit) -> Vec<(NodeId, Vec<usize>)> {
+    pub(super) fn others_moving(doc: &Document, ve: &VectorEdit) -> Vec<(NodeId, Vec<usize>)> {
         ve.others
             .iter()
             .filter_map(|o| {
@@ -310,7 +320,7 @@ impl Session {
         let Some(b) = transform::shown_box(&doc, ve) else { return Ok(()) };
         match bh {
             BoxHit::Inside => {
-                let g = self.points_gesture(ve.id, ev.p(), b.points, vec![], None, true)?;
+                let g = self.points_gesture(ve.id, ev.p(), b.points, b.others, None, true)?;
                 self.begin_interaction("Move points")?;
                 self.vgesture(g);
             }
@@ -320,7 +330,7 @@ impl Session {
                 self.vgesture(VGesture::BoxRotate { b, start_angle, angle: 0.0 });
             }
             BoxHit::Handle(handle) => {
-                let targets = Arc::new(point_snap::targets(&doc, page, Some(ve.id), &b.points, &[]));
+                let targets = Arc::new(point_snap::targets_moving(&doc, page, Some(ve.id), &b.points, &[], &b.others));
                 self.begin_interaction("Scale points")?;
                 self.vgesture(VGesture::BoxScale { b, handle, targets, pick });
             }
@@ -337,9 +347,22 @@ impl Session {
         let shown = if width_tool { None } else { h.map(|h| (ve.id, h)).or_else(|| hit_any(&doc, ve, ev.p(), tol)) };
         // A pen click on empty canvas lands where it snaps.
         let pen_at = if ve.tool == VTool::Pen && h.is_none() && !ev.shift { Some(self.snap_pen(ev, Some(ve.id), &[])?) } else { None };
+        // A point a press on the outline would add: the pen's place under its pointer on a segment
+        // (its ghost anchor), or the midpoint of the segment under the Move tool.
+        let add = match (ve.tool, h) {
+            (VTool::Pen, Some(VHit::Segment { seg, t })) => {
+                segment_point(&doc, ve.id, seg, t).map(|at| crate::tools::VectorAdd { at: [at.x, at.y], midpoint: false, on: true })
+            }
+            (VTool::Move, Some(VHit::Segment { seg, .. })) if !ev.cmd && !ev.alt => segment_point(&doc, ve.id, seg, 0.5).map(|at| {
+                let on = (at - ev.p()).hypot() * ev.zoom.max(1e-6) <= MIDPOINT_PX;
+                crate::tools::VectorAdd { at: [at.x, at.y], midpoint: true, on }
+            }),
+            _ => None,
+        };
         let ov = &mut self.tool.overlay;
         ov.vector_hover = shown.map(|x| x.1);
         ov.vector_hover_on = shown.map(|x| x.0);
+        ov.vector_add = add;
         ov.width_hover = None;
         ov.face.clear();
         ov.rubber = None;
@@ -351,6 +374,8 @@ impl Session {
             (VTool::Move, Some(_)) if ev.cmd => Cursor::Pen(PenCursor::Bend),
             (VTool::Move, _) if ev.cmd => Cursor::Crosshair,
             (VTool::Move, Some(VHit::Segment { .. })) if ev.alt => Cursor::Pen(PenCursor::Add),
+            // On a segment's midpoint the arrow turns into the pen: a press adds a point there.
+            (VTool::Move, Some(VHit::Segment { .. })) if add.is_some_and(|a| a.on) => Cursor::Pen(PenCursor::Add),
             (VTool::Move, _) => Cursor::Default,
             (VTool::Pen, Some(VHit::Vertex { .. })) => Cursor::Pen(PenCursor::Close),
             (VTool::Pen, Some(VHit::Segment { .. })) => Cursor::Pen(PenCursor::Add),
@@ -370,11 +395,13 @@ impl Session {
                 {
                     self.tool.overlay.cursor = crate::tools::handle_cursor(&b.corners(), handle);
                     self.tool.overlay.vector_hover = None;
+                    self.tool.overlay.vector_add = None;
                 } else if shown.is_none_or(|(on, h)| on == ve.id && !matches!(h, VHit::Handle { .. })) {
                     region = Self::region_under(&doc, ve, h, ev);
                     if region.is_some() {
                         self.tool.overlay.vector_hover = None;
                         self.tool.overlay.vector_hover_on = None;
+                        self.tool.overlay.vector_add = None;
                     }
                 }
             }
@@ -428,11 +455,11 @@ impl Session {
     }
 
     /// The region of the active layer a press at `ev` would take (Move tool, `h` the network's part
-    /// there). Inside the transform box around points selected in their own right, the box keeps
-    /// its drag unless the region is already selected.
+    /// there). Inside the transform box around points selected in their own right (in any edited
+    /// layer), the box keeps its drag unless the region is already selected.
     fn region_under(doc: &Document, ve: &VectorEdit, h: Option<VHit>, ev: &PointerEvent) -> Option<usize> {
         let r = region_hit(doc, ve, ev.p(), ev.zoom)?;
-        let own = !ve.shown_vertices().is_empty() || !ve.segments.is_empty();
+        let own = !ve.shown_vertices().is_empty() || !ve.segments.is_empty() || ve.others_selected();
         let in_box = !ev.shift && own && transform::box_hit(doc, ve, h, ev.p(), ev.zoom) == Some(BoxHit::Inside);
         (!in_box || ve.regions.contains(&r)).then_some(r)
     }
@@ -510,6 +537,7 @@ impl Session {
         };
         let h = hit(&doc, ve, ev.p(), tol);
         self.tool.overlay.vector_hover = None;
+        self.tool.overlay.vector_add = None;
         self.tool.overlay.face.clear();
         self.tool.overlay.guides.clear();
         let tool = if ev.cmd && ve.tool == VTool::Move { VTool::Bend } else { ve.tool };
@@ -626,8 +654,14 @@ impl Session {
                     self.vgesture(g);
                 }
                 Some(VHit::Segment { seg, t }) => {
-                    if ev.alt {
+                    // A press on the midpoint the hover showed adds a point exactly there; Alt adds
+                    // one anywhere else on the segment.
+                    let midpoint = !ev.alt
+                        && !ev.shift
+                        && segment_point(&doc, id, seg, 0.5).is_some_and(|m| (m - ev.p()).hypot() * ev.zoom.max(1e-6) <= MIDPOINT_PX);
+                    if ev.alt || midpoint {
                         // Add a point on the segment and drag it.
+                        let t = if midpoint { 0.5 } else { t };
                         self.begin_interaction("Add point")?;
                         let mut v = None;
                         self.preview(|doc, _| {
@@ -661,10 +695,14 @@ impl Session {
                     }
                 }
                 None => {
-                    // Outside every edited layer (and not shift): leave edit mode.
+                    // A press on another layer (and not shift) leaves edit mode, so the normal tool
+                    // takes it; empty canvas only clears the points and starts a marquee (a
+                    // double-click or Escape leaves edit mode).
                     let inside =
                         ve.parts().iter().any(|p| doc.world_render_bounds(p.id).is_some_and(|b| b.inflate(tol * 4.0, tol * 4.0).contains(ev.p())));
-                    if !inside && !ev.shift {
+                    let page = self.ds()?.page;
+                    let other = !inside && self.hit(&doc, page, ev.p(), tol * 2.0).is_some();
+                    if other && !ev.shift {
                         super::end(self)?;
                         return Ok(false);
                     }
@@ -883,7 +921,7 @@ impl Session {
                 let q = b.frame.inverse() * (ev.p() + c);
                 let (x0, y0, x1, y1) = crate::tools::resized_box(handle, q, b.width, b.height, ev.shift, ev.alt);
                 let m = b.onto(x0, y0, x1, y1);
-                self.preview(|doc, _| transform::transform_points(doc, id, &b.points, m))?;
+                self.preview(|doc, _| transform::transform_box(doc, id, &b, m))?;
             }
             VGesture::BoxRotate { b, start_angle, .. } => {
                 let c = b.center();
@@ -892,7 +930,7 @@ impl Session {
                     angle = (angle / 15.0).round() * 15.0;
                 }
                 let m = figcraft_geom::rotate_about(Affine::IDENTITY, c, -angle);
-                self.preview(|doc, _| transform::transform_points(doc, id, &b.points, m))?;
+                self.preview(|doc, _| transform::transform_box(doc, id, &b, m))?;
                 self.tool.overlay.cursor = Cursor::Rotate((ev.p() - c).atan2().to_degrees());
                 self.vgesture(VGesture::BoxRotate { b, start_angle, angle });
             }
@@ -996,16 +1034,18 @@ impl Session {
         self.tool.overlay.guides.clear();
         let Gesture::Vector(g) = g else { return Ok(()) };
         match g {
-            VGesture::Points { moved, split, click_clears, .. } => {
+            VGesture::Points { verts, others, moved, split, click_clears, .. } => {
                 if moved || split.is_some() {
+                    if let ([v], None) = (verts.as_slice(), split)
+                        && others.iter().all(|(_, o)| o.is_empty())
+                    {
+                        self.merge_dropped_point(ve.id, *v, 6.0 / ev.zoom.max(1e-6))?;
+                    }
                     self.commit_interaction()?;
                 } else {
                     self.cancel_interaction()?;
                     if click_clears {
-                        set_state(self, |e| {
-                            e.vertices.clear();
-                            e.segments.clear();
-                        })?;
+                        self.clear_points()?;
                     }
                 }
             }
@@ -1032,23 +1072,7 @@ impl Session {
                 }
             })?,
             VGesture::Erase { .. } | VGesture::Paint { .. } => self.commit_interaction()?,
-            VGesture::BoxScale { pick, .. } => {
-                let ds = self.ds()?;
-                let clicked = ds.interaction.as_ref().is_some_and(|it| Arc::ptr_eq(&it.doc, &ds.doc));
-                match pick.filter(|_| clicked) {
-                    Some(v) => {
-                        self.cancel_interaction()?;
-                        set_state(self, |e| {
-                            if let Some(i) = e.vertices.iter().position(|x| *x == v) {
-                                e.vertices.remove(i);
-                            } else {
-                                e.vertices.push(v);
-                            }
-                        })?;
-                    }
-                    None => self.commit_interaction()?,
-                }
-            }
+            VGesture::BoxScale { pick, .. } => self.box_scale_up(pick)?,
             VGesture::Cut { start, hit } => self.cut_up(ve, start, hit, ev)?,
             VGesture::Width(g) => self.width_up(g)?,
         }
@@ -1056,5 +1080,69 @@ impl Session {
             ds.revision += 1;
         }
         Ok(())
+    }
+
+    /// Clears the point selection of the active layer and of the other layers being edited.
+    fn clear_points(&mut self) -> Result<()> {
+        set_state(self, |e| {
+            e.vertices.clear();
+            e.segments.clear();
+            for o in &mut e.others {
+                o.vertices.clear();
+                o.segments.clear();
+            }
+        })
+    }
+
+    /// The transform box's corner or edge was let go: a Shift-click (no drag) on the corner's
+    /// point `pick` toggles it in the selection; anything else keeps the scale.
+    fn box_scale_up(&mut self, pick: Option<usize>) -> Result<()> {
+        let ds = self.ds()?;
+        let clicked = ds.interaction.as_ref().is_some_and(|it| Arc::ptr_eq(&it.doc, &ds.doc));
+        let Some(v) = pick.filter(|_| clicked) else { return self.commit_interaction() };
+        self.cancel_interaction()?;
+        set_state(self, |e| {
+            if let Some(i) = e.vertices.iter().position(|x| *x == v) {
+                e.vertices.remove(i);
+            } else {
+                e.vertices.push(v);
+            }
+        })
+    }
+
+    /// Point `v` of vector `id`, dragged and dropped within `tol` (page units) of another of its
+    /// points, merges into that point (in the same undo step as the move), which stays selected.
+    fn merge_dropped_point(&mut self, id: NodeId, v: usize, tol: f64) -> Result<()> {
+        let moved = self.ds()?.doc.get(id)?.clone();
+        let w = self.ds()?.doc.world_transform(id);
+        let NodeKind::Vector { network: net } = &moved.kind else { return Ok(()) };
+        let Some(p) = net.vertices.get(v).map(|x| w * x.point()) else { return Ok(()) };
+        let Some(keep) = net
+            .vertices
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != v)
+            .map(|(i, x)| (i, (w * x.point() - p).hypot()))
+            .filter(|(_, d)| *d <= tol)
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .map(|(i, _)| i)
+        else {
+            return Ok(());
+        };
+        let mut merged = net.clone();
+        ops::merge_vertices(&mut merged, keep, v);
+        // A merge that would leave no segment (a 2-point line's ends dropped together) only moves.
+        if merged.segments.is_empty() {
+            return Ok(());
+        }
+        // The preview starts again from the document before the drag: bring the moved layer.
+        self.preview(|doc, _| {
+            *doc.get_mut(id)? = moved;
+            edit(doc, id, |net| *net = merged)
+        })?;
+        set_state(self, |e| {
+            e.vertices = vec![if keep > v { keep - 1 } else { keep }];
+            e.segments.clear();
+        })
     }
 }

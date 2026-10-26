@@ -4,20 +4,21 @@ use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use figcraft_color::{BlendMode, Paint};
+use figcraft_color::{BlendMode, Paint, PaintKind};
 use figcraft_doc::{Document, EffectKind, Node, NodeId, NodeKind, StrokeAlign};
 use figcraft_geom::{Affine, BezPath, Rect, Shape};
-use tiny_skia::{FillRule, IntRect, Mask, MaskType, Pixmap, PixmapPaint, Transform};
+use tiny_skia::{FillRule, FilterQuality, IntRect, Mask, MaskType, Pixmap, PixmapPaint, Transform};
 
 use crate::backdrop::{self, Under};
 use crate::boolean::{PathCache, locked};
-use crate::paint::{composite, prepare_at, ts_blend};
+use crate::paint::{Prepared, composite, prepare_at, ts_blend};
 use crate::{blur, grain, lod, shadow};
 
 /// Shared state for one render.
 #[derive(Clone, Copy)]
-pub struct Ctx<'a> {
-    pub doc: &'a Document,
+/// `'d`: the document's (layers looked up for the render are kept that long), `'a`: the rest.
+pub struct Ctx<'a, 'd> {
+    pub doc: &'d Document,
     /// Device pixels per document unit (for effect radii).
     pub scale: f64,
     pub outline_mode: bool,
@@ -29,11 +30,71 @@ pub struct Ctx<'a> {
     pub skip: &'a [NodeId],
     /// Approximate what's too small to see in detail (canvas previews; see [`crate::lod`]).
     pub lod: bool,
+    pub magnified_image_pixels: bool,
     /// The surfaces under the one being drawn into, when it is an isolated layer (for backdrops).
     pub under: Option<&'a Under<'a>>,
     /// Seconds into animated GIFs (0: their first frame; only the presenter plays them).
     pub time: f64,
+    /// Paint bounds already worked out in this render.
+    pub bounds: &'a Bounds<'d>,
 }
+
+/// What one render works out about layers with children, which a walk down their subtree finds:
+/// their local paint bounds by greeking scale, and whether they can be splatted (see
+/// [`lod::splattable`]). Culling asks for a node's and then for each of its children's, so without
+/// them every layer's subtree was walked again at each level above it. Each answer keeps how many
+/// levels its walk went down.
+/// It also keeps the layers it looked up: the walks for culling, splatting and drawing go down the
+/// same layers, and in a large document a lookup is a good part of a layer's cost.
+#[derive(Default)]
+pub struct Bounds<'a> {
+    paint: std::cell::RefCell<IdMap<BoundsKey, (Rect, usize)>>,
+    pub(crate) splat: std::cell::RefCell<IdMap<NodeId, (bool, usize)>>,
+    nodes: std::cell::RefCell<IdMap<NodeId, Option<&'a Node>>>,
+}
+
+impl<'a> Bounds<'a> {
+    /// Node `id` of `doc`, looked up once for the render.
+    pub(crate) fn node(&self, doc: &'a Document, id: NodeId) -> Option<&'a Node> {
+        if let Some(n) = self.nodes.borrow().get(&id) {
+            return *n;
+        }
+        let n = doc.node(id);
+        self.nodes.borrow_mut().insert(id, n);
+        n
+    }
+}
+
+/// A hash map keyed by node ids, which need no SipHash: they are counters (or a peer's range of
+/// them), and SipHash took a good part of a render.
+type IdMap<K, V> = HashMap<K, V, std::hash::BuildHasherDefault<IdHash>>;
+
+/// Mixes each word in with a multiply (Fibonacci hashing), so ids that differ in low bits spread.
+#[derive(Default)]
+pub(crate) struct IdHash(u64);
+
+impl Hasher for IdHash {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.write_u64(u64::from(*b));
+        }
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+    fn write_usize(&mut self, v: usize) {
+        self.write_u64(v as u64);
+    }
+}
+
+/// A layer, and the scale its text is greeked at (none: drawn in full).
+type BoundsKey = (NodeId, Option<u64>);
+
+/// Deepest nesting the paint bounds walk follows.
+const MAX_BOUNDS_DEPTH: usize = 64;
 
 pub fn ts_transform(a: Affine) -> Transform {
     let c = a.as_coeffs();
@@ -56,10 +117,21 @@ pub fn ts_path(p: &BezPath) -> Option<tiny_skia::Path> {
     b.finish()
 }
 
+const IMAGE_PIXELS_SHOWN_FROM_MAGNIFICATION: f64 = 2.0;
+
+fn pixels_when_magnified(prep: Prepared, device_scale: f64) -> Prepared {
+    let Prepared::Pattern { pixmap, mode, quality, opacity, transform } = prep else { return prep };
+    let image_scale = f64::from(transform.sx * transform.sy - transform.kx * transform.ky).abs().sqrt();
+    let magnification = device_scale * image_scale;
+    let quality = if magnification >= IMAGE_PIXELS_SHOWN_FROM_MAGNIFICATION { FilterQuality::Nearest } else { quality };
+    Prepared::Pattern { pixmap, mode, quality, opacity, transform }
+}
+
 fn fill_with(pix: &mut Pixmap, path: &tiny_skia::Path, paints: &[Paint], w: f64, h: f64, xf: Affine, rule: FillRule, ctx: &Ctx, mask: Option<&Mask>) {
     let scale = xf.determinant().abs().sqrt();
     for p in paints {
         let Some(prep) = prepare_at(p, w, h, scale, ctx.doc, ctx.time) else { continue };
+        let prep = if ctx.magnified_image_pixels && matches!(p.kind, PaintKind::Image(_)) { pixels_when_magnified(prep, scale) } else { prep };
         let paint = tiny_skia::Paint { shader: prep.shader(), anti_alias: true, blend_mode: ts_blend(p.blend), ..Default::default() };
         if p.blend == BlendMode::PlusDarker {
             // No tiny-skia mode: the paint alone over its pixels, then blended in.
@@ -96,15 +168,26 @@ pub(crate) fn hash_path(p: &BezPath, h: &mut impl Hasher) {
     }
 }
 
+/// Per-side strokes on rectangles and frames (a ring under non-zero winding too), if `n` has them.
+fn side_strokes(n: &Node) -> Option<Arc<BezPath>> {
+    let props = &n.stroke;
+    let sides = props.sides?;
+    if !matches!(n.kind, NodeKind::Rectangle | NodeKind::Frame | NodeKind::Component { .. } | NodeKind::Instance { .. }) {
+        return None;
+    }
+    let c = &n.corners;
+    Some(Arc::new(if c.uniform() == Some(0.0) {
+        figcraft_pathops::rect_side_strokes(n.width, n.height, sides, props.align)
+    } else {
+        figcraft_pathops::rounded_side_strokes(n.width, n.height, c.radii, c.smoothing, sides, props.align)
+    }))
+}
+
 /// The stroke area of a node in local coordinates.
 pub fn stroke_area(n: &Node, path: &BezPath, closed: bool) -> Arc<BezPath> {
     let props = &n.stroke;
-    // Per-side strokes on rectangles/frames.
-    if let Some(sides) = props.sides
-        && matches!(n.kind, NodeKind::Rectangle | NodeKind::Frame | NodeKind::Component { .. } | NodeKind::Instance { .. })
-        && n.corners.uniform() == Some(0.0)
-    {
-        return Arc::new(figcraft_pathops::rect_side_strokes(n.width, n.height, sides, props.align));
+    if let Some(p) = side_strokes(n) {
+        return p;
     }
     // Rect/ellipse inside/outside strokes without booleans: an even-odd ring of two outlines.
     if props.dashes.is_empty() && props.profile().is_none() && props.brush.is_none() && closed && props.align != StrokeAlign::Center {
@@ -145,6 +228,18 @@ pub fn stroke_area(n: &Node, path: &BezPath, closed: bool) -> Arc<BezPath> {
             return Arc::new(o);
         }
     }
+    cached_stroke_outline(n, path, closed)
+}
+
+/// The stroke a boolean operand contributes: like [`stroke_area`], but never an even-odd ring
+/// (boolean folding uses non-zero winding).
+fn operand_stroke(n: &Node, path: &BezPath, closed: bool) -> Arc<BezPath> {
+    side_strokes(n).unwrap_or_else(|| cached_stroke_outline(n, path, closed))
+}
+
+/// A non-zero stroke outline (cached), shared by painting and boolean operands.
+fn cached_stroke_outline(n: &Node, path: &BezPath, closed: bool) -> Arc<BezPath> {
+    let props = &n.stroke;
     let mut h = std::collections::hash_map::DefaultHasher::new();
     hash_path(path, &mut h);
     (props.weight.to_bits(), props.align as u8, props.cap_start as u8, props.cap_end as u8, props.join as u8, props.miter_limit.to_bits(), closed)
@@ -153,11 +248,12 @@ pub fn stroke_area(n: &Node, path: &BezPath, closed: bool) -> Arc<BezPath> {
         d.to_bits().hash(&mut h);
     }
     props.dashes.len().hash(&mut h);
-    // Points' own caps and joins (vector networks).
+    // Points' own caps and joins and the fill rule Inside/Outside clip by (vector networks).
     let net = match &n.kind {
-        NodeKind::Vector { network } if network.has_point_styles() => Some(network),
+        NodeKind::Vector { network } => Some(network),
         _ => None,
     };
+    net.is_some_and(|n| n.regions.iter().any(|r| r.winding == figcraft_doc::WindingRule::EvenOdd)).hash(&mut h);
     for v in net.map(|n| n.vertices.as_slice()).unwrap_or_default() {
         (v.cap.map(|c| c as u8), v.join.map(|j| j as u8)).hash(&mut h);
     }
@@ -216,7 +312,7 @@ fn node_outline_at(doc: &Document, n: &Node, depth: usize) -> Option<(BezPath, F
                 .filter_map(|c| doc.node(*c))
                 .filter(|c| c.visible)
                 .filter_map(|c| {
-                    let (mut p, _) = subtree_outline(doc, c, depth + 1)?;
+                    let (mut p, _) = subtree_outline_at(doc, c, depth + 1, true)?;
                     p.apply_affine(c.transform);
                     Some((p, c.bool_op.unwrap_or(*op)))
                 })
@@ -261,6 +357,11 @@ fn node_outline_at(doc: &Document, n: &Node, depth: usize) -> Option<(BezPath, F
 
 /// The union outline of a node and its descendants (for booleans of groups/frames).
 pub fn subtree_outline(doc: &Document, n: &Node, depth: usize) -> Option<(BezPath, FillRule)> {
+    subtree_outline_at(doc, n, depth, false)
+}
+
+/// Boolean operands with only a stroke contribute the painted band, not their interior.
+fn subtree_outline_at(doc: &Document, n: &Node, depth: usize, stroke_only: bool) -> Option<(BezPath, FillRule)> {
     if depth > 64 {
         return None;
     }
@@ -269,20 +370,29 @@ pub fn subtree_outline(doc: &Document, n: &Node, depth: usize) -> Option<(BezPat
             let mut out = BezPath::new();
             if n.kind.is_frame_like()
                 && let Some(p) = figcraft_doc::geometry::shape_path(n)
-                && n.fills.iter().any(|f| f.visible)
             {
-                out.extend(p.elements().iter().copied());
+                if n.fills.iter().any(|f| f.visible) {
+                    out.extend(p.elements().iter().copied());
+                } else if stroke_only && n.has_visible_stroke() {
+                    out.extend(operand_stroke(n, &p, true).elements().iter().copied());
+                }
             }
             for c in n.children.iter().filter_map(|c| doc.node(*c)) {
                 if !c.visible {
                     continue;
                 }
-                if let Some((mut p, _)) = subtree_outline(doc, c, depth + 1) {
+                if let Some((mut p, _)) = subtree_outline_at(doc, c, depth + 1, stroke_only) {
                     p.apply_affine(c.transform);
                     out.extend(p.elements().iter().copied());
                 }
             }
             Some((out, FillRule::Winding))
+        }
+        _ if stroke_only && !n.fills.iter().any(|p| p.visible) && n.has_visible_stroke() => {
+            let (path, _) = node_outline_at(doc, n, depth)?;
+            let path = if matches!(n.kind, NodeKind::Text(_)) { path } else { figcraft_doc::geometry::stroke_geometry(n).unwrap_or(path) };
+            let closed = figcraft_doc::geometry::is_closed(n) || matches!(n.kind, NodeKind::BooleanOp { .. });
+            Some(((*operand_stroke(n, &path, closed)).clone(), FillRule::Winding))
         }
         _ => node_outline_at(doc, n, depth),
     }
@@ -300,32 +410,63 @@ fn text_box_bounds(n: &Node) -> Rect {
 /// Local bounds a node paints into (its box grown by stroke/effect reach, plus unclipped children).
 /// Text that overflows its box counts where its glyphs are, so it isn't culled while visible;
 /// text greeked at `greek_scale` (see [`lod::greeked`]) paints only inside [`text_box_bounds`].
-fn local_paint_bounds(doc: &Document, n: &Node, depth: usize, greek_scale: Option<f64>) -> Rect {
+pub(crate) fn local_paint_bounds(doc: &Document, n: &Node, depth: usize, greek_scale: Option<f64>) -> Rect {
+    bounds_within(doc, n, depth, greek_scale, None).0
+}
+
+/// [`local_paint_bounds`], kept in and read from `memo` when there is one. Also returns how many
+/// levels the walk went down, or `None` when the nesting cap cut it short: such bounds depend on
+/// the depth they were asked at and aren't kept, and kept bounds are read only where their levels
+/// still fit under the cap.
+pub(crate) fn bounds_within<'a>(
+    doc: &'a Document,
+    n: &Node,
+    depth: usize,
+    greek_scale: Option<f64>,
+    memo: Option<&Bounds<'a>>,
+) -> (Rect, Option<usize>) {
+    // A layer without children is quicker to work out again than to look up.
+    let memo = memo.filter(|_| !n.children.is_empty());
+    let key = (n.id, greek_scale.map(f64::to_bits));
+    if let Some((r, levels)) = memo.and_then(|m| m.paint.borrow().get(&key).copied())
+        && depth + levels <= MAX_BOUNDS_DEPTH
+    {
+        return (r, Some(levels));
+    }
     let reach = n.paint_reach();
     let mut r = n.local_rect().inflate(reach, reach);
+    let mut levels = Some(0);
     let clips = n.clip && n.kind.is_frame_like();
-    if (!clips || n.kind.bounds_follow_children()) && depth < 64 && !n.hides_contents() {
-        for c in n.children.iter().filter_map(|c| doc.node(*c)) {
-            if !c.visible {
-                continue;
+    if (!clips || n.kind.bounds_follow_children()) && !n.hides_contents() {
+        if depth < MAX_BOUNDS_DEPTH {
+            let mut below = Some(0);
+            for c in n.children.iter().filter_map(|c| memo.map_or_else(|| doc.node(*c), |m| m.node(doc, *c))) {
+                if !c.visible {
+                    continue;
+                }
+                let (cb, c_levels) = bounds_within(doc, c, depth + 1, greek_scale, memo);
+                below = below.zip(c_levels).map(|(b, l)| b.max(l));
+                r = r.union(figcraft_geom::transform_rect_bbox(c.transform, cb));
             }
-            let cb = local_paint_bounds(doc, c, depth + 1, greek_scale);
-            r = r.union(figcraft_geom::transform_rect_bbox(c.transform, cb));
+            levels = below.map(|b| b + 1);
+        } else if !n.children.is_empty() {
+            levels = None;
         }
     }
     // Text can overflow its box.
     if let NodeKind::Text(_) = n.kind {
         r = r.union(text_box_bounds(n).inflate(reach, reach));
-        if greek_scale.is_some_and(|s| lod::greeked(n, s)) {
-            return r;
-        }
-        if let Some((l, dy)) = figcraft_text::layout_node(n)
+        if !greek_scale.is_some_and(|s| lod::greeked(n, s))
+            && let Some((l, dy)) = figcraft_text::layout_node(n)
             && let Some(ink) = l.ink_bounds()
         {
             r = r.union(ink + figcraft_geom::kurbo::Vec2::new(0.0, dy));
         }
     }
-    r
+    if let (Some(m), Some(l)) = (memo, levels) {
+        m.paint.borrow_mut().insert(key, (r, l));
+    }
+    (r, levels)
 }
 
 /// How far (document units) effects that read outside a node's paint bounds reach: blurs, glass,
@@ -388,10 +529,17 @@ const MAX_EFFECT_MARGIN_PX: f64 = 2048.0;
 
 /// Draw node `id` onto `pix`, where `parent_xf` maps the parent's space to `pix` pixels.
 pub fn draw_node(ctx: &Ctx, pix: &mut Pixmap, id: NodeId, parent_xf: Affine, depth: usize) {
+    if let Some(n) = ctx.doc.node(id) {
+        draw_layer(ctx, pix, n, parent_xf, depth);
+    }
+}
+
+/// [`draw_node`] for a node already looked up.
+fn draw_layer(ctx: &Ctx, pix: &mut Pixmap, n: &Node, parent_xf: Affine, depth: usize) {
+    let id = n.id;
     if depth > crate::MAX_EXPORT_DEPTH || ctx.skip.contains(&id) {
         return;
     }
-    let Some(n) = ctx.doc.node(id) else { return };
     let outline = ctx.outline_mode || ctx.outlined.contains(&id);
     if n.is_mask || n.opacity <= 0.0 && n.visible {
         return;
@@ -406,7 +554,7 @@ pub fn draw_node(ctx: &Ctx, pix: &mut Pixmap, id: NodeId, parent_xf: Affine, dep
     }
     let xf = parent_xf * n.transform;
     let (pw, ph) = (pix.width(), pix.height());
-    let local = local_paint_bounds(ctx.doc, n, 0, ctx.lod.then_some(ctx.scale));
+    let local = bounds_within(ctx.doc, n, 0, ctx.lod.then_some(ctx.scale), Some(ctx.bounds)).0;
     let dev = device_rect(xf, local);
     // Effects that read outside (blur) need a margin when culling. Absurd effects (a spread or
     // blur of millions of pixels) keep a sane layer: what lies further off reads as empty.
@@ -419,7 +567,7 @@ pub fn draw_node(ctx: &Ctx, pix: &mut Pixmap, id: NodeId, parent_xf: Affine, dep
         draw_outline(&Ctx { outline_mode: true, ..*ctx }, pix, n, xf, depth);
         return;
     }
-    if ctx.lod && dev.width().max(dev.height()) < lod::TINY_PX && lod::splattable(ctx.doc, n, 0) {
+    if ctx.lod && dev.width().max(dev.height()) < lod::TINY_PX && lod::splattable_within(ctx.doc, n, 0, Some(ctx.bounds)).0 {
         lod::splat_subtree(ctx, pix, n, xf, None, 1.0, depth);
         return;
     }
@@ -642,11 +790,11 @@ fn draw_content(ctx: &Ctx, pix: &mut Pixmap, n: &Node, xf: Affine, depth: usize,
                 f(pix);
             }
             if n.has_visible_stroke() {
-                let props = figcraft_doc::StrokeProps { align: StrokeAlign::Center, ..n.stroke.clone() };
+                // Glyph outlines are closed: inside and outside strokes clip to them (#615).
                 for path in keys.iter().filter_map(|k| by_style.get(k)) {
-                    let s = figcraft_pathops::stroke_center(path, props.weight, &props);
+                    let s = stroke_area(n, path, true);
                     if let Some(ts) = ts_path(&s) {
-                        fill_with(pix, &ts, &n.strokes, w, h, gxf, FillRule::Winding, ctx, None);
+                        fill_with(pix, &ts, &n.strokes, w, h, gxf, stroke_rule(n, true), ctx, None);
                     }
                 }
             }
@@ -657,7 +805,7 @@ fn draw_content(ctx: &Ctx, pix: &mut Pixmap, n: &Node, xf: Affine, depth: usize,
             let splatted = ctx.lod && closed && lod::splat_fills(pix, n, xf);
             let clips = n.clip && n.kind.is_frame_like() && !n.children.is_empty();
             let styled_network = match &n.kind {
-                NodeKind::Vector { network } if network.regions.iter().any(|r| r.fills.is_some()) => Some(network),
+                NodeKind::Vector { network } if network.regions.iter().any(|r| r.fills.is_some() || r.paint_space.is_some()) => Some(network),
                 _ => None,
             };
             // The outline fills, clips children to rounded corners and strokes booleans.
@@ -669,11 +817,12 @@ fn draw_content(ctx: &Ctx, pix: &mut Pixmap, n: &Node, xf: Affine, depth: usize,
                     let net = rounded.as_ref().unwrap_or(network);
                     for (i, region) in net.regions.iter().enumerate() {
                         let paints = region.fills.as_deref().unwrap_or(&n.fills);
-                        if let Some(path) = net.region_path(i)
-                            && let Some(tp) = ts_path(&path)
-                        {
+                        if let Some(mut path) = net.region_path(i) {
+                            let (pw, ph, frame) = region.paint_frame(w, h);
+                            path.apply_affine(frame.inverse());
+                            let Some(tp) = ts_path(&path) else { continue };
                             let rule = if region.winding == figcraft_doc::WindingRule::EvenOdd { FillRule::EvenOdd } else { FillRule::Winding };
-                            fill_with(pix, &tp, paints, w, h, xf, rule, ctx, None);
+                            fill_with(pix, &tp, paints, pw, ph, xf * frame, rule, ctx, None);
                         }
                     }
                 } else if let Some((path, rule)) = &outline
@@ -710,13 +859,15 @@ fn draw_content(ctx: &Ctx, pix: &mut Pixmap, n: &Node, xf: Affine, depth: usize,
 
 fn draw_children(ctx: &Ctx, pix: &mut Pixmap, n: &Node, xf: Affine, depth: usize) {
     let kids = &n.children;
-    for run in ctx.doc.paint_runs(n) {
-        let Some(&c) = kids.get(run.start) else { continue };
-        if ctx.doc.node(c).is_some_and(|cn| cn.is_mask && cn.visible) {
+    // Each child looked up once: in a large document a lookup is a good part of a layer's cost.
+    let nodes: Vec<Option<&Node>> = kids.iter().map(|c| ctx.bounds.node(ctx.doc, *c)).collect();
+    for run in Document::paint_runs_of(&nodes, n.layout.as_ref().is_some_and(|l| l.reverse_z)) {
+        let (Some(&c), Some(Some(cn))) = (kids.get(run.start), nodes.get(run.start)) else { continue };
+        if cn.is_mask && cn.visible {
             // Everything above the mask (until the next mask) is clipped by its alpha.
             draw_masked(ctx, pix, c, kids.get(run.start + 1..run.end).unwrap_or(&[]), xf, depth);
         } else {
-            draw_node(ctx, pix, c, xf, depth + 1);
+            draw_layer(ctx, pix, cn, xf, depth + 1);
         }
     }
 }

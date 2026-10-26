@@ -75,7 +75,7 @@ pub fn banner(app: &mut FigApp, ctx: &egui::Context, canvas: Rect) {
     let Some(b) = m.branches.iter().find(|b| b.id == id) else { return };
     let (file, name, active) = (m.doc.name.clone(), b.name.clone(), b.state == BranchState::Active);
     let t = Tokens::get(ctx);
-    let review = widgets::canvas_banner(ctx, Id::new("branch_banner"), canvas, |ui| {
+    let review = widgets::canvas_banner(ctx, Id::unique("branch_banner"), canvas, |ui| {
         ui.label(egui::RichText::new(format!("“{name}”")).font(semibold(11.0)).color(t.text));
         let state =
             if active { trf("Branch of {file}", &[("file", &file)]) } else { trf("Branch of {file} · merged or archived", &[("file", &file)]) };
@@ -146,7 +146,7 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
     let mut open = true;
     let mut action = None;
     egui::Window::new("Review and merge")
-        .id(Id::new("branch_review_window"))
+        .id(Id::unique("branch_review_window"))
         .title_bar(false)
         .collapsible(false)
         .resizable(false)

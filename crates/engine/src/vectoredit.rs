@@ -4,7 +4,7 @@
 //! Entering edit mode on a non-vector shape converts it to a vector first (like the incumbent).
 //! Vertex coordinates are node-local; after each edit the node is re-fitted so its box wraps the
 //! network again. The network edits themselves live in [`ops`]; pointer gestures in `pointer.rs`,
-//! the transform box around several points in [`transform`], point snapping in `point_snap.rs` and
+//! the transform box around several points (in one layer or several) in [`transform`], point snapping in `point_snap.rs` and
 //! hovering, hatching and selecting filled regions in [`regions`].
 
 pub mod ops;
@@ -508,16 +508,15 @@ pub fn begin_many(s: &mut Session, ids: &[NodeId]) -> Result<()> {
     let before = s.ds()?.doc.clone();
     let mut edited = Vec::new();
     let mut first_err = None;
-    {
-        let doc = s.doc_mut()?;
-        for id in ids.iter().take(MAX_EDITED) {
-            if edited.contains(id) {
-                continue;
-            }
-            match ensure_vector(doc, *id) {
-                Ok(()) => edited.push(*id),
-                Err(e) => first_err = first_err.or(Some(e)),
-            }
+    for id in ids.iter().take(MAX_EDITED) {
+        if edited.contains(id) {
+            continue;
+        }
+        // Vectors are left untouched, so editing only them records no undo step.
+        let is_vector = before.node(*id).is_some_and(|n| matches!(n.kind, NodeKind::Vector { .. }));
+        match if is_vector { Ok(()) } else { ensure_vector(s.doc_mut()?, *id) } {
+            Ok(()) => edited.push(*id),
+            Err(e) => first_err = first_err.or(Some(e)),
         }
     }
     let Some((&id, rest)) = edited.split_first() else {
@@ -540,9 +539,28 @@ pub fn begin_many(s: &mut Session, ids: &[NodeId]) -> Result<()> {
 /// At most this many layers are edited at once.
 const MAX_EDITED: usize = 500;
 
+/// The edited layers left without a single segment: they draw nothing (isolated points included),
+/// so their layer would only leave an empty box behind.
+fn empty_layers(doc: &Document, ids: &[NodeId]) -> Vec<NodeId> {
+    ids.iter().copied().filter(|id| network(doc, *id).is_some_and(|n| n.segments.is_empty())).collect()
+}
+
+/// Leave edit mode. Layers whose every point was deleted go with it (the undo step that deleted
+/// the last points brings them back).
 pub fn end(s: &mut Session) -> Result<()> {
+    let empty = {
+        let ds = s.ds()?;
+        ds.vector_edit.as_ref().map(|ve| empty_layers(&ds.doc, &ve.parts().iter().map(|p| p.id).collect::<Vec<_>>())).unwrap_or_default()
+    };
+    if !empty.is_empty() {
+        let doc = s.doc_mut()?;
+        for id in &empty {
+            let _ = doc.remove(*id);
+        }
+    }
     let ds = s.ds_mut()?;
     ds.vector_edit = None;
+    ds.selection.retain(|id| !empty.contains(id));
     ds.revision += 1;
     s.tool.overlay = Default::default();
     Ok(())
@@ -1201,20 +1219,31 @@ pub(crate) fn cut_across(s: &mut Session, a: Point, b: Point) -> Result<Vec<Node
 /// under it, the others get the same (points outside closed areas are skipped). A vector without
 /// fills gets the default fill so the painted area shows.
 pub fn paint_all(doc: &mut Document, id: NodeId, pts: &[Point]) -> Result<bool> {
-    if doc.node(id).is_some_and(|n| matches!(&n.kind, NodeKind::Vector { network } if network.regions.iter().any(|r| r.fills.is_some()))) {
-        return Err(EngineError::Disabled("vector.edit.paint".into(), "paint bucket cannot normalize a vector with region paints".into()));
-    }
+    let inherited = doc.get(id)?.fills.clone();
     let filled = edit(doc, id, |net| {
         let mut want = None;
         for p in pts {
-            want = net.paint_to(*p, want).or(want);
+            want = net.paint_to_with(*p, want, Some(&inherited)).or(want);
         }
         want
     })?
     .ok_or_else(|| bad("vector.edit.paint", "click inside a closed area"))?;
     let n = doc.get_mut(id)?;
     if filled && n.fills.iter().all(|f| !f.visible) {
-        n.fills = vec![figcraft_color::Paint::solid(figcraft_color::Color::DEFAULT_SHAPE)];
+        let default = figcraft_color::Paint::solid(figcraft_color::Color::DEFAULT_SHAPE);
+        let targets: std::collections::BTreeSet<usize> = match &n.kind {
+            NodeKind::Vector { network } => pts.iter().filter_map(|point| network.region_at(*point)).collect(),
+            _ => std::collections::BTreeSet::new(),
+        };
+        if let NodeKind::Vector { network } = &mut n.kind {
+            for (index, region) in network.regions.iter_mut().enumerate() {
+                if region.fills.is_none() && !targets.contains(&index) {
+                    // Freeze an untouched inherited region before adding a node-wide default.
+                    region.fills = Some(Vec::new());
+                }
+            }
+        }
+        n.fills = vec![default];
     }
     Ok(filled)
 }

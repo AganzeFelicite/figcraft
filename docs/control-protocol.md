@@ -37,11 +37,21 @@ requests still queued after the UI timeout are discarded, including requests def
 window. A command already running is not interrupted.
 
 A minimised or covered window (the main one or another, see Windows below) draws no frames, but
-still answers `engine.execute`, `engine.commands`, `document.inspect`, `node.get`, `window.list`
-and `ui.render`, acting on the file that window shows, so an attached agent can edit, inspect and
-save while the app is out of sight. Screenshots, input (`ui.input`,
-`ui.pointer`, `ui.key`, `ui.type`) and the interface's own state wait for the window to show, and
-time out after 60 s if it doesn't.
+still answers every method that acts on the app's state (`engine.execute`, `document.inspect`,
+`node.get`, `ui.inspect`, `ui.pointer`, `ui.key`, `ui.type`, `ui.set`, `ui.render`, `window.list`,
+…), in the file that window shows, so an attached agent can edit, inspect and save while the app is
+out of sight. The app is not drawn meanwhile and only wakes for requests, at most ten times a
+second while minimised, so a request there takes up to about 0.1 s. A request that needs a drawn
+frame (`ui.screenshot`, `ui.input`) is kept queued while the window is hidden and asks it to paint
+(`RequestPaintWhileHidden`; native eframe honours that). A screenshot whose window reports no
+visibility at all is parked the same way with its deadline, so it cannot wait forever in the
+queue. A screenshot settles on three completed, presented UI frames (a discarded sizing pass does
+not count), then is issued, and expires once at its 60 s deadline if no paint arrives. `window.new`
+remains an error at once (`window 0 is minimised or hidden: …`) instead of waiting for the window
+to show; `ui.render` draws the document without it. Under Wayland the app can't tell that its
+window is minimised: where the compositor then stops drawing it, a request waits for the window
+and gets the 60 s timeout error. The browser's shared eframe runner does not implement
+`RequestPaintWhileHidden` yet, so hidden-tab screenshots and injected input are unqualified there.
 
 Coordinates are page units, y down. `x`/`y` in `node.set`/`node.create` are relative to the parent
 frame (groups have no coordinate space of their own).
@@ -52,6 +62,32 @@ window, with its tabs, panels and canvas: `engine.execute` acts on the file it s
 `ui.screenshot` captures it, `ui.input` reaches it. Without `window`, a request goes to the window
 last in front (the one the user clicked last, or the last `window.new` / `window.focus`). An
 unknown id is an error.
+
+## Confining file access
+
+```sh
+figcraft --control 7979 --automation-read-root /work/project --automation-write-root /work/project/out
+```
+
+`--automation-read-root <dir>` and `--automation-write-root <dir>` (each repeatable, `--flag=<dir>`
+works too; the same flags as `figcraft-cli mcp`) confine the files the app reads and writes for
+whoever asks: every control request (`engine.execute`, `ui.render`, `ui.screenshot`, `window.new`,
+`ui.key`, `ui.menu.invoke`…) and every frame of every window, so input injected with `ui.input`
+and what a person does in the window are held to the same folders. Files are read only inside a
+read or write root and written only inside a write root; anything else is an ordinary error reply
+(`automation path rejected: …`), and recent files outside the roots aren't listed. Paths are
+resolved as `docs/mcp.md` › Confining file access describes. A root that isn't an existing folder
+stops the app before its window opens, and so does any option the app doesn't know (a mistyped
+flag such as `--automation-write-roots` exits with `unknown option`, never starts unconfined).
+Without the flags nothing changes. The flags arrived in FigCraft 0.7.0: 0.6.0 and earlier ignore
+them and confine nothing.
+
+Not confined: opening the files given on the command line when the app starts and the documents
+the system hands over (Finder, Open With; saving them later is confined like any write), and the
+app's own folders (preferences, recovery copies, plugins installed from a plugin directory). Run `figcraft-cli mcp --attach PORT` without the flags against
+such an app (it refuses them: the app does the confining). `ui.screenshot` and `ui.render` without a
+`path` return the PNG as data, which is how the attached MCP server takes them, so it writes no
+temporary files.
 
 ## Methods
 
@@ -70,13 +106,17 @@ JSON or the gradient shorthand `{"type":"linearGradient","stops":["#hex","#hex"]
 {"id":3,"method":"engine.execute","params":{"command":"command.batch","params":{"label":"Tidy","commands":[{"command":"align.left","params":{"ids":[2,3]}},{"command":"distribute.vertical","params":{"ids":[2,3]}}]}}}
 ```
 
-Inside `command.batch`, `{"$step": n}` in a step's params stands for the `id` in step `n`'s result
-(zero-based; `{"$step": n, "field": "…"}` for another field; any object with a `$step` key is read
-as one, and a nested `command.batch` step keeps its own references to its own steps), so one batch
-can create a frame and fill it:
+Inside `command.batch`, a step can name itself with `"as"` and later steps use its result:
+`{"$ref": "name"}` in a step's params stands for the `id` in that step's result, and `{"$step": n}`
+for the `id` in step `n`'s result (zero-based). Either takes `"field"` for another key or a slash
+path into the result, such as `ids/0` for the first copy `edit.duplicate` returned. Any object with a
+`$ref` or `$step` key is read as a reference, names are unique within a batch, and a nested
+`command.batch` step keeps its own references to its own steps (see [MCP: Step
+references](mcp.md#step-references) for the rules and errors). So one batch can create a frame, fill
+it and duplicate it:
 
 ```json
-{"id":4,"method":"engine.execute","params":{"command":"command.batch","params":{"commands":[{"command":"node.create","params":{"type":"frame","width":200,"height":100}},{"command":"node.create","params":{"type":"rectangle","parent":{"$step":0},"width":20,"height":20}}]}}}
+{"id":4,"method":"engine.execute","params":{"command":"command.batch","params":{"commands":[{"command":"node.create","as":"card","params":{"type":"frame","width":200,"height":100}},{"command":"node.create","params":{"type":"rectangle","parent":{"$ref":"card"},"width":20,"height":20}},{"command":"edit.duplicate","as":"copy","params":{"ids":[{"$ref":"card"}]}},{"command":"node.set","params":{"ids":[{"$ref":"copy","field":"ids/0"}],"props":{"name":"Card copy"}}}]}}}
 ```
 
 ### `engine.commands {}`
@@ -101,7 +141,10 @@ component/instance links, overrides, `slot` (a slot layer's property name), boun
 `devStatus` (handoff status), `devChanged` (changed since it was marked ready for dev),
 `annotations` (Dev Mode notes: `[{label, properties, category?}]`), `codeLinks` (a component's
 links to code: `[{language, importPath, name, template}]`), `devResources` (links for developers,
-its own and inherited: `[{name, url, index?, from?}]`). The auto layout props
+its own and inherited: `[{name, url, index?, from?}]`), `measurements` (Dev Mode measurements
+starting from the layer: `[{to} | {side}]`), `pluginData` (layer data written with
+`node.set {props: {pluginData: {key: value}}}`, pages included: `{key: value}`, values as strings;
+only when there is some). The auto layout props
 that `node.set` accepts are listed in [mcp.md](mcp.md#conventions-agents-must-know).
 
 ### `ui.inspect {}`
@@ -117,7 +160,13 @@ zoom preview or the refined image (`canvas.quality`: `preview` or `refined`) and
 asking for a render to its preview and its refined image being handed to egui as the canvas
 texture (`canvas.previewLatencyMs`, `canvas.refineLatencyMs`, on a monotonic clock, rendering
 included in the browser too; the GPU upload and presenting the frame come after; `null` until
-there was one). While a prototype plays, `presenter`
+there was one). `importReport` holds the Import report window's content (`{name, pages, layers, images, appended, placed, warnings, warningCount}`,
+`null` while none is open). The window opens only for a file the user opened or imported in the app
+(File ▸ Open or Import, Open recent, a recent file on the home screen, a drop, a paste, the system's open event).
+Emulated user input counts as the user's action: `ui.input` and `ui.key` (for example a Cmd+V paste or a click
+on a menu item) can open it. Commands sent through this channel with `engine.execute`, MCP, `window.new {path}`
+and files named on the command line never open it.
+`file.open` and `file.import` return the counts as `summary`. While a prototype plays, `presenter`
 (full window) and `preview` (the preview pane) hold the player's state: the `current` frame and its
 `name`, `start`, `history`, open `overlays`, how many delayed mouse triggers are `waiting`, the screen's `scroll` offset and `scrollRange`, the
 `device` (and whether it is turned to `landscape`, its `deviceColor`) and the `viewport` of the frame
@@ -128,7 +177,8 @@ far the view is panned (`pan`, `panRange`), whether a scroll is still coasting (
 active screen's `hotspots` (`[{id, rect: [x0, y0, x1, y1]}]` in window points, bottom-most first),
 whether a click where nothing reacts flashes them (`hotspotHints`) and they are flashing now
 (`hotspotFlash`), and whether the Inspect panel shows (`inspect`) with the layer it shows
-(`inspected`) (`null` when nothing plays). `presentOptions` holds the options the next presentation
+(`inspected`), and the link an Open link notice waits to open (`linkNotice`, else `null`) (`null`
+when nothing plays). `presentOptions` holds the options the next presentation
 starts with (`scale`, `deviceFrame`, `comments`, `hotspotHints`, `inspect`).
 `textPreview` is true while a live text preview shows on the canvas (a hovered text style or named
 instance, a dragged axis slider; see `text.preview` in [mcp.md](mcp.md)).
@@ -136,7 +186,10 @@ instance, a dragged axis slider; see `text.preview` in [mcp.md](mcp.md)).
 `canvas` or `properties`), whether `keyboard` mode is on (F6 or Tab moved the focus since the last
 pointer press, so the focus ring shows) and the name of the `control` with the keyboard (what a
 screen reader announces; empty when nothing has it). `reduceMotion` is true when the preference or
-the system's accessibility setting turns the interface's animations off. `live` is the live
+the system's accessibility setting turns the interface's animations off. `uiScale` is the interface
+size: the `choice` (relative to the system's display scale, `pref.uiScale`), the `zoom` drawn
+(relative too), what that is in physical pixels per point (`drawn`) and whether the window is too
+small for the choice (`limited`, so `zoom` is smaller). `live` is the live
 session of the window's active file as the window shows it (sessions are per file: another tab
 shows its own, or `status: "off"`): `session` (its id, null when the file isn't in one),
 `sessions` (how many the app has running), `status`, `role`, the number of `peers`, who you `follow`, the
@@ -165,7 +218,8 @@ A mouse gesture with the current tool. `kind`: `down`, `move`, `up`, `click`, `d
 (`x`, `y`) or screen pixels (`sx`, `sy`). `pressure` (0–1) is pen pressure (the Pencil records
 it); a drag's pressure goes from `pressure` to `pressureTo`. Returns `{selection, tool}`. With the Move and Scale
 tools, a press on a frame's or section's name label (as the canvas last drew it, along a rotated
-frame's top edge) selects and drags that frame.
+frame's top edge) selects and drags that frame; a double-click there renames the frame in place in
+the desktop app (the name field opens over the label).
 
 ```json
 {"id":4,"method":"engine.execute","params":{"command":"tool.set","params":{"tool":"ellipse"}}}
@@ -214,12 +268,13 @@ separate calls. Returns `{queued}`.
 
 Invoke a menu item exactly like clicking it (this may open a dialog). Returns `{ok, lastError}`.
 
-### `ui.set {rightTab?, leftTab?, theme?, home?, homeSection?, homeRecentsView?, homeRecentsSort?, homeRecentsOrder?, palette?, mainMenu?, focusRegion?, colorPicker?, variables?, layerFilter?, collapseLayers?, exportPreview?, preview?, presentScroll?, colorProfileDialog?, stylePicker?, stylePickerEdit?, stylePickerView?, iconGallery?, protoEditor?, contextMenu?, contextSelectLayer?, commentOpen?, commentDraft?, commentFilter?, commentSort?, commentSearch?, commentReply?, commentEdit?, presentComments?, devCompare?, devCompareMode?, devCompareSplit?, annotationFilter?, resetFrameStats?, pluginsWindow?, pluginsTab?, pluginConfirm?, pluginForm?}`
+### `ui.set {rightTab?, leftTab?, theme?, home?, homeSection?, homeSearch?, homeRecentsView?, homeRecentsSort?, homeRecentsOrder?, palette?, mainMenu?, focusRegion?, colorPicker?, variables?, layerFilter?, collapseLayers?, exportPreview?, preview?, presentScroll?, colorProfileDialog?, stylePicker?, stylePickerEdit?, stylePickerView?, iconGallery?, protoEditor?, contextMenu?, contextSelectLayer?, commentOpen?, commentDraft?, commentFilter?, commentSort?, commentSearch?, commentReply?, commentEdit?, presentComments?, devCompare?, devCompareMode?, devCompareSplit?, annotationFilter?, resetFrameStats?, pluginsWindow?, pluginsTab?, pluginConfirm?, pluginForm?, devCompareVersion?}`
 
 Switch panels and modes: `rightTab` `design|prototype|inspect`, `leftTab` `file|assets`, `theme`,
 `home` (bool), `homeSection` (`recents`, `online` or `templates`: which section the home screen shows, as `ui.inspect` reports it; opening
 `online` asks each server once what became of your online files), `homeRecentsView` (`grid|list`), `homeRecentsSort` (`modified|name|created`) and `homeRecentsOrder` (`desc|asc`): how the home screen shows its recent files (kept in the preferences; `ui.inspect` reports them under `homeRecents` with each file and whether its picture is in), `palette` (bool: the Actions palette), `mainMenu` (bool, or a top-level menu such
-as `"Plugins"` to open the main menu with it open), `pluginsWindow` (bool: Plugins ▸ Manage
+as `"Plugins"` to open the main menu with it open), `homeSearch` (text, at most 256 characters: filters locally known open, recent and online files plus starter templates in Home; an empty string returns to the selected section),
+`pluginsWindow` (bool: Plugins ▸ Manage
 plugins…), `pluginsTab` (`installed|browse`: that window's tab), `pluginConfirm` (a plugin id of the
 directory listed last: its install confirmation shows, as its Install button would; `null` closes
 it), `pluginForm` (`{id, command?}`: start that plugin command like its menu item, opening
@@ -250,24 +305,37 @@ closes it), `commentDraft` (`{x, y}`: start a new comment there), `commentFilter
 text, focused with the cursor at its end: an `@` there shows the mention picker), `commentEdit` (a
 message index of the open thread to edit, 0 for the first; `null` stops), `presentComments` (bool:
 the presenter shows the presented frame's comments, also Shift+C there). Dev Mode: `devCompare` (a
-ready-for-dev frame or section id opens the Compare changes view, like `dev.compare {id, show:
-true}`; `null` closes it) with `devCompareMode` (`sideBySide|overlay`) and `devCompareSplit` (the
+frame or section id opens the Compare changes view, like `dev.compare {id, show:
+true}`; `null` closes it) with `devCompareVersion` (a version id to compare with; `null`: when it
+was marked ready for dev), `devCompareMode` (`sideBySide|overlay`) and `devCompareSplit` (the
 overlay slider, 0–1), `annotationFilter` (`all`, `none` for uncategorised, or a category id or name:
 the annotations the canvas shows). `resetFrameStats` (true: start `framesDrawn` and
 `repaintCauses` over). Returns `ui.inspect` (which reports `stylePicker`,
 `stylePickerView`, `comments`: `open`, `draft`, `filter`, `sort`, `search`, `editing` and the
-`mentions` the picker offers, `devCompare` (`{id, mode, split}` or `null`), `devFocus` (the frame the
+`mentions` the picker offers, `devCompare` (`{id, mode, split, version}` or `null`), `devFocus` (the frame the
 focus view shows, or `null`) and `annotationFilter`).
 
-### `ui.screenshot {path}`
+### `ui.screenshot {path?}`
 
-PNG of the whole window (`window` picks one), UI included (needs a visible window; an idle one draws the frame to
-capture). Returns `{path, width, height}`, or an error after 60 s when the window doesn't deliver.
+PNG of the whole window (`window` picks one), UI included (an idle one draws the frame to capture;
+a hidden one, or one whose platform visibility is not reported, is asked to paint and the request
+is parked with its deadline until it does). Returns
+`{path, width, height}`, without `path` `{format: "png", width, height, data}` (base64). Requests
+are bounded to four pending, 128 MiB of pixels per image and 256 MiB in flight or
+completed-but-undrained. The reservation is the larger of the encoder phase (readback +
+straight-RGBA copy + PNG) and the reply phase (readback + PNG + base64); the encoder copy is
+dropped before base64 is built, and an oversized encoded reply is refused before base64 is
+allocated. The reply carries the request's own id, and the capture belongs to the document and
+window it was admitted for; cancellation, a tab switch, a resize/DPI/zoom between issuance and
+arrival (retried twice, then an error), an unrepresentable current surface (fail closed), and the
+60 s deadline never write late files. A hidden window whose pixels arrived is asked to paint the
+pass that drains them, so a completed readback is not left to time out.
 
-### `ui.render {path, scale?, ids?}`
+### `ui.render {path?, scale?, ids?}`
 
 PNG of the document without UI chrome (works without a window). Without `ids` it exports the
-selection, else the page's top-level layers. Returns the export result.
+selection, else the page's top-level layers. Returns the export result: written to `path`, or
+`{format: "png", data}` (base64) without one.
 
 ### `window.new {path?, index?}`
 
@@ -309,3 +377,24 @@ read -r reply <&3; echo "$reply"
 
 For agents, prefer the MCP server (`figcraft-cli mcp --attach 7979`, see `docs/mcp.md`): it wraps
 these methods in documented tools and returns images inline.
+
+## In the browser: `window.figcraft`
+
+The web build has no TCP server (a page can't listen on a socket), so it offers the same methods to the
+page itself, as promises on `window.figcraft` (`apps/figcraft-web/src/api.rs`). An agent driving FigCraft in a
+browser tab, or a host app showing it in an `<iframe>`, uses the commands it would send to the desktop
+app. It is opt-in: the page installs `window.figcraft` only when its URL has a `control` query entry
+(`index.html?control`, which can be combined with other flags: `?webgl&control`).
+
+| Call | |
+|---|---|
+| `figcraft.request(method, params)` | any control method of this document → its `result` |
+| `figcraft.execute(command, params)` | `engine.execute` |
+| `figcraft.commands()` / `figcraft.inspect()` | `engine.commands` / the inspect method |
+| `figcraft.screenshot(params)` | `ui.screenshot` (no `path`: the PNG comes back inline) |
+| `figcraft.openFile(name, bytes)` | runs `file.open` with the bytes as `data` and resolves with its result |
+| `figcraft.captureDownloads(on)` | while on, a save or export is kept in the page instead of downloaded |
+| `figcraft.files()` / `figcraft.readFile(name)` | the kept files (`{path, size}`) / one of them as a `Uint8Array` |
+
+Errors reject with an `Error` carrying the method's message. Requests run on the UI's next frame, so a
+hidden tab (whose frames the browser pauses) answers when it is shown again.

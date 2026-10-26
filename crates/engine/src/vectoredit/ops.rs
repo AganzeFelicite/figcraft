@@ -19,13 +19,19 @@ pub fn move_vertices(net: &mut VectorNetwork, idx: &[usize], d: Vec2) {
     if !finite(d) {
         return;
     }
-    let mut seen = std::collections::BTreeSet::new();
-    for i in idx {
-        if seen.insert(*i)
-            && let Some(v) = net.vertices.get_mut(*i)
-        {
+    let seen: std::collections::BTreeSet<usize> = idx.iter().copied().filter(|i| *i < net.vertices.len()).collect();
+    for i in &seen {
+        if let Some(v) = net.vertices.get_mut(*i) {
             v.x += d.x;
             v.y += d.y;
+        }
+    }
+    if seen.len() == net.vertices.len() {
+        let translate = Affine::translate(d);
+        for region in &mut net.regions {
+            if let Some(frame) = &mut region.paint_space {
+                frame.transform = translate * frame.transform;
+            }
         }
     }
 }
@@ -62,6 +68,13 @@ pub fn transform_vertices(net: &mut VectorNetwork, idx: &[usize], m: Affine) {
                 s.ta = t;
             } else {
                 s.tb = t;
+            }
+        }
+    }
+    if set.len() == net.vertices.len() {
+        for region in &mut net.regions {
+            if let Some(frame) = &mut region.paint_space {
+                frame.transform = m * frame.transform;
             }
         }
     }
@@ -648,7 +661,7 @@ pub fn connect(net: &mut VectorNetwork, a: usize, b: usize, ta: (f64, f64), tb: 
         let unfilled = !net.regions.iter().any(|r| r.loops.iter().flatten().any(|s| lp.contains(s)));
         if unfilled {
             lp.insert(0, si);
-            net.regions.push(Region { loops: vec![lp], winding: WindingRule::NonZero, fills: None });
+            net.regions.push(Region { loops: vec![lp], winding: WindingRule::NonZero, fills: None, ..Default::default() });
         }
     }
     Some(si)
@@ -907,7 +920,7 @@ mod tests {
         // Triangle closed 0→2: its loop [2, 1, 0] walks segment 1 backwards.
         let mut n = VectorNetwork::from_points(&[Point::new(0.0, 0.0), Point::new(100.0, 0.0), Point::new(100.0, 100.0)], false);
         n.segments.push(Segment::line(0, 2));
-        n.regions.push(Region { loops: vec![vec![2, 1, 0]], winding: WindingRule::NonZero, fills: None });
+        n.regions.push(Region { loops: vec![vec![2, 1, 0]], winding: WindingRule::NonZero, fills: None, ..Default::default() });
         let p = Point::new(25.0, 10.0);
         assert!(n.fill_contains(p));
         for (seg, lp) in [(1, vec![2, 1, 0]), (2, vec![2, 1, 0]), (1, vec![0, 1, 2])] {

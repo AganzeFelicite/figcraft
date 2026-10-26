@@ -176,6 +176,30 @@ fn double_click_enters_one_level() {
 }
 
 #[test]
+fn a_double_click_anywhere_on_the_selected_shape_edits_its_points() {
+    let mut s = Session::new();
+    let r = id(&ex(&mut s, "shape.rectangle", json!({"x": 0, "y": 0, "width": 100, "height": 100})));
+    ex(&mut s, "node.set", json!({"ids": [r], "props": {"fills": []}}));
+    ex(&mut s, "stroke.add", json!({"ids": [r]}));
+    // Selected by its outline; the empty middle is no hit at all (the shape has no fill).
+    click(&mut s, 0.0, 50.0, NONE);
+    assert_eq!(s.selection(), vec![r]);
+    s.pointer(&ev(PointerKind::DoubleClick, 50.0, 50.0, NONE)).unwrap();
+    assert_eq!(s.ds().unwrap().vector_edit.as_ref().map(|v| v.id), Some(r), "a double-click on the shape edits its points");
+}
+
+#[test]
+fn a_double_click_on_an_unselected_shape_edits_it_without_a_selecting_click() {
+    let mut s = Session::new();
+    let r = id(&ex(&mut s, "shape.rectangle", json!({"x": 0, "y": 0, "width": 100, "height": 100})));
+    ex(&mut s, "select.none", json!({}));
+    // The press and release of the click that selects it, and the double-click, came in one frame:
+    // only the double-click reached the tool, with nothing selected.
+    s.pointer(&ev(PointerKind::DoubleClick, 50.0, 50.0, NONE)).unwrap();
+    assert_eq!(s.ds().unwrap().vector_edit.as_ref().map(|v| v.id), Some(r));
+}
+
+#[test]
 fn marquee_selects_what_it_touches() {
     let mut s = Session::new();
     let k = scene(&mut s);
@@ -274,4 +298,187 @@ fn locked_layers_selected_in_the_layers_panel_stay_put() {
     // Layers inside a locked layer are locked too.
     ex(&mut s, "object.toggleLock", json!({"ids": [k.g], "locked": true}));
     assert_eq!(handle_at(s.doc().unwrap(), &[k.a], Point::new(60.0, 60.0), 1.0), None);
+}
+
+#[test]
+fn shift_drag_moves_the_selection() {
+    let mut s = Session::new();
+    let k = scene(&mut s);
+    let at = |s: &Session, i: NodeId| s.doc().unwrap().world_bounds(i).unwrap().origin();
+    let home = (Point::new(500.0, 0.0), Point::new(600.0, 0.0));
+    // (selection before, Shift-drag to (from r at 520,20), selection after, where r and empty end up, derivation)
+    let rows: Vec<(Vec<NodeId>, (f64, f64), Vec<NodeId>, (Point, Point), &str)> = vec![
+        (
+            vec![k.r],
+            (560.0, 22.0),
+            vec![k.r],
+            (Point::new(540.0, 0.0), Point::new(600.0, 0.0)),
+            "Shift-drag on the selected layer moves it along one axis and keeps it selected",
+        ),
+        (
+            vec![k.r, k.empty],
+            (560.0, 22.0),
+            vec![k.r, k.empty],
+            (Point::new(540.0, 0.0), Point::new(640.0, 0.0)),
+            "Shift-drag on one of several selected layers moves them all",
+        ),
+        (
+            vec![k.empty],
+            (560.0, 22.0),
+            vec![k.r, k.empty],
+            (Point::new(540.0, 0.0), Point::new(640.0, 0.0)),
+            "Shift-drag on an unselected layer adds it and moves the selection",
+        ),
+        (vec![k.r, k.empty], (521.0, 21.0), vec![k.empty], home, "a Shift-press that wobbles under the drag threshold is a click: the layer leaves"),
+    ];
+    for (before, to, after, end, why) in rows {
+        ex(&mut s, "select.set", json!({"ids": before}));
+        drag(&mut s, (520.0, 20.0), to, SHIFT);
+        assert_eq!(sorted(s.selection()), sorted(after), "{why}");
+        assert_eq!((at(&s, k.r), at(&s, k.empty)), end, "{why}");
+        if end != home {
+            assert!(s.undo().unwrap(), "{why}: one undo step");
+            assert_eq!((at(&s, k.r), at(&s, k.empty)), home, "{why}: undone");
+        }
+    }
+    // Shift let go before the button: still a Shift-click.
+    ex(&mut s, "select.set", json!({"ids": [k.r, k.empty]}));
+    s.pointer(&ev(PointerKind::Down, 520.0, 20.0, SHIFT)).unwrap();
+    s.pointer(&ev(PointerKind::Up, 520.0, 20.0, NONE)).unwrap();
+    assert_eq!(s.selection(), vec![k.empty], "Shift let go before the button still takes the layer out");
+}
+
+#[test]
+fn a_drag_inside_the_selection_box_moves_it_where_nothing_is_hit() {
+    let mut s = Session::new();
+    let k = scene(&mut s);
+    for i in [k.r, k.c] {
+        ex(&mut s, "node.set", json!({"ids": [i], "props": {"fills": [], "strokes": ["#000000"], "strokeWeight": 1}}));
+    }
+    let at = |s: &Session, i: NodeId| s.doc().unwrap().world_bounds(i).unwrap().origin();
+    // (selection before, drag from, selection after, the layers that move by (10, 10), derivation)
+    let rows: Vec<(Vec<NodeId>, (f64, f64), Vec<NodeId>, Vec<NodeId>, &str)> = vec![
+        (vec![k.r], (520.0, 20.0), vec![k.r], vec![k.r], "a selected unfilled shape drags from its inside, not only its stroke"),
+        (vec![k.c], (40.0, 140.0), vec![k.c], vec![k.c], "the same in a top-level frame, whose background is under the inside"),
+        (vec![k.r, k.empty], (570.0, 20.0), vec![k.r, k.empty], vec![k.r, k.empty], "a gap inside a multiple selection's box drags them all"),
+        (vec![], (520.0, 20.0), vec![k.r], vec![], "an unselected unfilled shape is hit on its stroke only: the drag is a marquee, which touches it"),
+    ];
+    for (before, from, after, moved, why) in rows {
+        let home: Vec<Point> = [k.r, k.c, k.empty].iter().map(|i| at(&s, *i)).collect();
+        ex(&mut s, "select.set", json!({"ids": before}));
+        drag(&mut s, from, (from.0 + 10.0, from.1 + 10.0), NONE);
+        assert_eq!(sorted(s.selection()), sorted(after), "{why}");
+        for (i, h) in [k.r, k.c, k.empty].iter().zip(&home) {
+            let d = if moved.contains(i) { 10.0 } else { 0.0 };
+            assert_eq!(at(&s, *i), Point::new(h.x + d, h.y + d), "{why}");
+        }
+        if !moved.is_empty() {
+            assert!(s.undo().unwrap(), "{why}: one undo step");
+        }
+    }
+    // A turned layer's box is turned with it: the corners of its page-aligned bounds are outside.
+    ex(&mut s, "node.set", json!({"ids": [k.r], "props": {"rotation": 45}}));
+    let b = s.doc().unwrap().world_bounds(k.r).unwrap();
+    ex(&mut s, "select.set", json!({"ids": [k.r]}));
+    drag(&mut s, (b.x0 + 2.0, b.y0 + 2.0), (b.x0 + 12.0, b.y0 + 12.0), NONE);
+    assert_eq!(at(&s, k.r), b.origin(), "a press outside a turned layer's box is a marquee: it doesn't move the layer");
+    ex(&mut s, "select.set", json!({"ids": [k.r]}));
+    let c = b.center();
+    drag(&mut s, (c.x, c.y), (c.x + 10.0, c.y + 10.0), NONE);
+    assert_eq!(s.selection(), vec![k.r], "inside the turned box it drags");
+    // Pixel snapping rounds the turned box's origin, so the move is about the pointer's.
+    let d = at(&s, k.r) - b.origin();
+    assert!((d.x - 10.0).abs() < 2.0 && (d.y - 10.0).abs() < 2.0, "it moves with the pointer: {d:?}");
+}
+
+#[test]
+fn a_layer_stacked_below_the_selection_doesnt_take_a_drag_from_inside_it() {
+    // #1370: inside a selected unfilled shape, a filled layer behind it doesn't take the press (the
+    // selection drags); a filled layer above it still does.
+    let mut s = Session::new();
+    let at = |s: &Session, i: NodeId| s.doc().unwrap().world_bounds(i).unwrap().origin();
+    let frame = id(&ex(&mut s, "frame.create", json!({"x": 300, "y": 0, "width": 200, "height": 200})));
+    for (parent, dx, where_) in [(None, 0.0, "on the canvas"), (Some(frame), 300.0, "in a top-level frame")] {
+        // `back` (0,0) filled, `front` (20,20) stroke only, `top` (60,60) filled; each 100×100, so
+        // the presses are well clear of the stroke.
+        let square = |s: &mut Session, x: f64| {
+            let mut p = json!({"x": x, "y": x, "width": 100, "height": 100});
+            if let Some(parent) = parent {
+                p["parent"] = json!(parent);
+            }
+            id(&ex(s, "shape.rectangle", p))
+        };
+        let back = square(&mut s, 0.0);
+        let front = square(&mut s, 20.0);
+        ex(&mut s, "node.set", json!({"ids": [front], "props": {"fills": [], "strokes": ["#000000"], "strokeWeight": 1}}));
+        let top = square(&mut s, 60.0);
+        // (drag from, selection after (the layer that moves by (10, 10)), derivation)
+        let rows = [
+            ((dx + 40.0, 40.0), front, "a filled layer behind the selected shape doesn't take the press: the selection drags"),
+            ((dx + 90.0, 90.0), top, "a filled layer above the selected shape still takes the press"),
+        ];
+        for (from, moved, why) in rows {
+            let home: Vec<Point> = [back, front, top].iter().map(|i| at(&s, *i)).collect();
+            ex(&mut s, "select.set", json!({"ids": [front]}));
+            drag(&mut s, from, (from.0 + 10.0, from.1 + 10.0), NONE);
+            assert_eq!(s.selection(), vec![moved], "{why} ({where_})");
+            for (i, h) in [back, front, top].iter().zip(&home) {
+                let d = if *i == moved { 10.0 } else { 0.0 };
+                assert_eq!(at(&s, *i), Point::new(h.x + d, h.y + d), "{why} ({where_})");
+            }
+            assert!(s.undo().unwrap(), "{why}: one undo step");
+        }
+    }
+    // A filled layer below two selected shapes, in the gap between them (inside the selection's
+    // box but neither shape's), is still hit there.
+    let rect_at = |s: &mut Session, x: f64, w: f64| id(&ex(s, "shape.rectangle", json!({"x": x, "y": 400, "width": w, "height": 100})));
+    let gap = rect_at(&mut s, 720.0, 60.0);
+    let (a, b) = (rect_at(&mut s, 600.0, 100.0), rect_at(&mut s, 800.0, 100.0));
+    ex(&mut s, "node.set", json!({"ids": [a, b], "props": {"fills": [], "strokes": ["#000000"], "strokeWeight": 1}}));
+    ex(&mut s, "select.set", json!({"ids": [a, b]}));
+    let home = at(&s, gap);
+    drag(&mut s, (750.0, 450.0), (760.0, 460.0), NONE);
+    assert_eq!(s.selection(), vec![gap], "a layer in the gap between selected layers takes the press");
+    assert_eq!(at(&s, gap), Point::new(home.x + 10.0, home.y + 10.0));
+}
+
+#[test]
+fn alt_shift_drag_on_a_selected_layer_duplicates_it() {
+    let mut s = Session::new();
+    let k = scene(&mut s);
+    let layers = |s: &Session| s.doc().unwrap().node(s.page().unwrap()).unwrap().children.len();
+    let n = layers(&s);
+    let alt_shift = |kind, x, y| {
+        let mut e = ev(kind, x, y, SHIFT);
+        e.alt = true;
+        e
+    };
+    ex(&mut s, "select.set", json!({"ids": [k.r]}));
+    s.pointer(&alt_shift(PointerKind::Down, 520.0, 20.0)).unwrap();
+    s.pointer(&alt_shift(PointerKind::Up, 520.0, 20.0)).unwrap();
+    assert_eq!(s.selection(), Vec::<NodeId>::new(), "an Alt+Shift-click is a Shift-click: the layer leaves the selection");
+    assert_eq!(layers(&s), n, "and nothing is copied");
+    ex(&mut s, "select.set", json!({"ids": [k.r]}));
+    s.pointer(&alt_shift(PointerKind::Down, 520.0, 20.0)).unwrap();
+    s.pointer(&alt_shift(PointerKind::Move, 560.0, 22.0)).unwrap();
+    s.pointer(&alt_shift(PointerKind::Up, 560.0, 22.0)).unwrap();
+    let sel = s.selection();
+    assert_eq!(layers(&s), n + 1, "an Alt+Shift-drag copies the layer");
+    assert!(sel.len() == 1 && sel[0] != k.r, "the copy is selected");
+    let doc = s.doc().unwrap();
+    assert_eq!(doc.world_bounds(sel[0]).unwrap().origin(), Point::new(540.0, 0.0), "the copy moves along one axis");
+    assert_eq!(doc.world_bounds(k.r).unwrap().origin(), Point::new(500.0, 0.0), "the original stays");
+}
+
+#[test]
+fn shift_click_takes_a_layer_out_where_nothing_can_move() {
+    let mut s = Session::new();
+    let k = scene(&mut s);
+    // A version being viewed is read-only: the press can't start a move.
+    let v = ex(&mut s, "file.saveVersion", json!({"name": "v"}));
+    ex(&mut s, "version.preview", json!({"id": v["id"]}));
+    ex(&mut s, "select.set", json!({"ids": [k.r, k.empty]}));
+    assert!(s.pointer(&ev(PointerKind::Down, 520.0, 20.0, SHIFT)).is_err(), "a version being viewed can't be edited");
+    s.pointer(&ev(PointerKind::Up, 520.0, 20.0, SHIFT)).unwrap();
+    assert_eq!(s.selection(), vec![k.empty], "Shift-click still takes the layer out");
 }

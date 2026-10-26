@@ -8,9 +8,12 @@
 //!   length (u32 LE), CRC-32 (u32 LE), one [`Journal`] entry in the wire encoding.
 //!
 //! Compaction writes the next generation's snapshot, then an empty log of that generation. A log
-//! whose generation isn't the snapshot's is from before a compaction that was cut short: what it
-//! holds is in the snapshot already. A log ends at its first damaged record (a write cut short).
+//! whose generation isn't the snapshot's is usually from before a compaction that was cut short
+//! (what it holds is in the snapshot already), but no checksum covers either generation, so the
+//! store replays such a log anyway and reports any change the snapshot lacked. A log ends at its
+//! first damaged record (a write cut short).
 
+use std::ffi::OsStr;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -47,7 +50,7 @@ pub fn free_bytes(path: &Path) -> Option<u64> {
 
 /// `path` with `.tmp` added: where its next version is written first.
 pub fn temp_of(path: &Path) -> PathBuf {
-    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_default();
+    let mut name = path.file_name().map(OsStr::to_os_string).unwrap_or_default();
     name.push(".tmp");
     path.with_file_name(name)
 }
@@ -125,13 +128,14 @@ fn u64_at(b: &[u8], at: usize) -> Option<u64> {
 
 /// A snapshot file's bytes.
 pub fn encode_snapshot(generation: u64, state: &SessionState) -> Result<Vec<u8>, String> {
-    let body = message::encode(state).map_err(|e| e.to_string())?;
-    let mut out = Vec::with_capacity(SNAP_HEADER + body.len());
+    let mut out = Vec::with_capacity(SNAP_HEADER);
     out.extend_from_slice(SNAP_MAGIC);
     out.push(FORMAT);
     out.extend_from_slice(&generation.to_le_bytes());
-    out.extend_from_slice(&crc(&body).to_le_bytes());
-    out.extend_from_slice(&body);
+    out.extend_from_slice(&0u32.to_le_bytes());
+    let mut out = message::encode_into(state, out).map_err(|e| e.to_string())?;
+    let sum = crc(&out[SNAP_HEADER..]);
+    out[SNAP_HEADER - 4..SNAP_HEADER].copy_from_slice(&sum.to_le_bytes());
     Ok(out)
 }
 

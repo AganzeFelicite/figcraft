@@ -6,13 +6,18 @@
 //! of it the plugin named as a target calls the plugin back with that state, in a fresh sandbox
 //! (deterministic: the state is all it remembers), as one undo step; the plugin hands back the new
 //! state and layers. A callback can only rebuild its own widget; other layers change only through
-//! the commands its manifest permits. See `docs/plugins.md`.
+//! the commands its manifest permits. Since API 4 a text layer can be an editable field (edited on
+//! the canvas like any text, or with `widget.setText`: the value goes into the state under the
+//! field's name and the plugin is called back), and a widget can have a small property menu
+//! (actions, toggles, a colour from a few) shown while it's selected (`widget.menu`). See
+//! `docs/plugins.md`.
 
 use figcraft_color::{ImageScaleMode, Paint};
 use figcraft_doc::{Document, Node, NodeId, NodeKind, TextData};
 use figcraft_geom::{Affine, Point};
-use figcraft_plugin::widget::{MAX_IMAGE_BYTES, MAX_STATE_BYTES};
+use figcraft_plugin::widget::{MAX_IMAGE_BYTES, MAX_STATE_BYTES, check_menu, check_state, clean_field};
 use figcraft_plugin::{Instance, Manifest, RunOutput, WidgetKind, WidgetNode, WidgetRender};
+pub use figcraft_plugin::{MenuItem, MenuKind};
 use serde_json::{Map, Value, json};
 
 use crate::cmd::CommandSpec;
@@ -25,8 +30,12 @@ pub const DATA_PREFIX: &str = "figcraft.widget";
 /// On a widget's own layer: its plugin's id, and its state (JSON).
 const PLUGIN: &str = "figcraft.widget";
 const STATE: &str = "figcraft.widget.state";
+/// On a widget's own layer: its property menu (JSON).
+const MENU: &str = "figcraft.widget.menu";
 /// On a layer inside a widget: the name its plugin gets when it's clicked.
 const TARGET: &str = "figcraft.widget.target";
+/// On a text layer inside a widget: the name of the editable field it is.
+const FIELD: &str = "figcraft.widget.field";
 /// Images in a widget are at most this many pixels on a side.
 const MAX_IMAGE_SIDE: u32 = 4096;
 
@@ -40,18 +49,44 @@ pub fn widget_of(doc: &Document, id: NodeId) -> Option<NodeId> {
     std::iter::once(id).chain(doc.ancestors(id)).find(|a| doc.node(*a).is_some_and(is_widget))
 }
 
-/// The clickable part of a widget at page point `p`, given the layer a click there hits: the widget
-/// and its target. The layers inside a widget are locked, so the hit stops at the widget itself;
-/// the front-most target whose box holds the point wins.
-pub fn target_at(doc: &Document, hit: NodeId, p: Point) -> Option<(NodeId, String)> {
+/// The part of a widget at page point `p` marked with layer data `key`, given the layer a click
+/// there hits: the widget, the part and its name. The layers inside a widget are locked, so the
+/// hit stops at the widget itself; the front-most part whose box holds the point wins.
+fn part_at(doc: &Document, hit: NodeId, p: Point, key: &str) -> Option<(NodeId, NodeId, String)> {
     let w = widget_of(doc, hit)?;
-    let target = doc
-        .subtree(w)
+    doc.subtree(w)
         .into_iter()
         .filter(|i| doc.world_bounds(*i).is_some_and(|b| b.contains(p)))
-        .filter_map(|i| doc.node(i).filter(|n| n.visible)?.plugin_data.get(TARGET).cloned())
-        .last()?;
-    Some((w, target))
+        .filter_map(|i| Some((w, i, doc.node(i).filter(|n| n.visible)?.plugin_data.get(key).cloned()?)))
+        .last()
+}
+
+/// The clickable part of a widget at page point `p`, given the layer a click there hits: the widget
+/// and its target.
+pub fn target_at(doc: &Document, hit: NodeId, p: Point) -> Option<(NodeId, String)> {
+    part_at(doc, hit, p, TARGET).map(|(w, _, t)| (w, t))
+}
+
+/// The editable text field of a widget at page point `p`, given the layer a click there hits: its
+/// text layer.
+pub fn field_at(doc: &Document, hit: NodeId, p: Point) -> Option<NodeId> {
+    part_at(doc, hit, p, FIELD).map(|(_, f, _)| f).filter(|f| field_of(doc, *f).is_some())
+}
+
+/// The widget and field name text layer `id` is the editable field of.
+pub fn field_of(doc: &Document, id: NodeId) -> Option<(NodeId, String)> {
+    let field = doc.node(id).filter(|n| matches!(n.kind, NodeKind::Text(_)))?.plugin_data.get(FIELD)?.clone();
+    Some((widget_of(doc, id)?, field))
+}
+
+/// Widget `w`'s property menu (empty when it has none or it's unusable: it may come from a file).
+pub fn menu_of(doc: &Document, w: NodeId) -> Vec<MenuItem> {
+    doc.node(w)
+        .and_then(|n| n.plugin_data.get(MENU))
+        .filter(|s| s.len() <= MAX_STATE_BYTES)
+        .and_then(|s| serde_json::from_str::<Vec<MenuItem>>(s).ok())
+        .and_then(|mut m| check_menu(&mut m).is_ok().then_some(m))
+        .unwrap_or_default()
 }
 
 /// A widget's state (an empty object when it has none or it's unusable).
@@ -67,10 +102,11 @@ fn state_of(doc: &Document, w: NodeId) -> Map<String, Value> {
         .unwrap_or_default()
 }
 
-/// The targets inside widget `w`, each once, in layer order.
-fn targets(doc: &Document, w: NodeId) -> Vec<String> {
+/// The names of the parts inside widget `w` marked with layer data `key` (its targets or its
+/// fields), each once, in layer order.
+fn names(doc: &Document, w: NodeId, key: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for t in doc.subtree(w).into_iter().filter_map(|i| doc.node(i)?.plugin_data.get(TARGET).cloned()) {
+    for t in doc.subtree(w).into_iter().filter_map(|i| doc.node(i)?.plugin_data.get(key).cloned()) {
         if !out.contains(&t) {
             out.push(t);
         }
@@ -89,20 +125,22 @@ fn widget_plugin(s: &Session, cmd: &str, plugin: &str) -> Result<InstalledPlugin
     Ok(p)
 }
 
-/// Call widget `w`'s plugin `p` back (`target`: what was clicked; none when it's inserted) and
-/// build what it hands back. Part of the caller's undo step; a failure rolls the whole step back.
-fn callback(s: &mut Session, p: &InstalledPlugin, w: NodeId, target: Option<&str>, fuel: Option<f64>) -> Result<RunOutput> {
+/// Call widget `w`'s plugin `p` back (`event`: what happened, a click, an edit or a menu item;
+/// none when it's inserted) and build what it hands back. Part of the caller's undo step; a failure
+/// rolls the whole step back.
+fn callback(s: &mut Session, p: &InstalledPlugin, w: NodeId, event: Option<Value>, fuel: Option<f64>) -> Result<RunOutput> {
     let m = &p.manifest;
     let wasm = module_of(s, p)?;
-    let event = target.map(|t| json!({"target": t}));
+    let inserting = event.is_none();
     let state = state_of(s.doc()?, w);
     let input =
         json!({"api": m.api, "command": "widget", "params": {}, "selection": s.selection(), "widget": {"id": w, "state": state, "event": event}});
     let mut instance = Instance::new(&wasm, &limits(fuel)).map_err(|e| plugin_error(&m.name, e))?;
     let mut out = call_plugin(s, m, &m.name, &mut instance, &input.to_string()).map_err(|(e, _)| e)?;
     match out.widget.take() {
+        Some(r) if m.api < 4 && r.uses_api_4() => return Err(bad("widget.render", format!("{}: fields and menus need plugin API 4", m.name))),
         Some(r) => build(s, &m.id, w, &r)?,
-        None if target.is_none() => return Err(bad("widget.insert", format!("{} drew no widget", m.name))),
+        None if inserting => return Err(bad("widget.insert", format!("{} drew no widget", m.name))),
         None => {}
     }
     Ok(out)
@@ -130,6 +168,10 @@ fn build(s: &mut Session, plugin: &str, w: NodeId, r: &WidgetRender) -> Result<(
     if let Some(state) = &r.state {
         n.plugin_data.insert(STATE.into(), Value::Object(state.clone()).to_string());
     }
+    match serde_json::to_string(&r.menu) {
+        Ok(menu) if !r.menu.is_empty() => n.plugin_data.insert(MENU.into(), menu),
+        _ => n.plugin_data.remove(MENU),
+    };
     for c in &r.root.children {
         add(doc, w, c, cmd)?;
     }
@@ -153,6 +195,9 @@ fn add(doc: &mut Document, parent: NodeId, d: &WidgetNode, cmd: &str) -> Result<
     n.locked = true;
     if !d.target.is_empty() {
         n.plugin_data.insert(TARGET.into(), d.target.clone());
+    }
+    if !d.field.is_empty() {
+        n.plugin_data.insert(FIELD.into(), d.field.clone());
     }
     if d.kind == WidgetKind::Image {
         use base64::Engine as _;
@@ -230,12 +275,13 @@ fn props(d: &WidgetNode, root: bool) -> Map<String, Value> {
     p
 }
 
-/// What `widget.insert` and `widget.click` return.
+/// What `widget.insert` and the callbacks return.
 fn report(s: &Session, w: NodeId, m: &Manifest, out: RunOutput) -> Result<Value> {
     let doc = s.doc()?;
     let output = serde_json::from_str::<Value>(&out.output).unwrap_or(Value::String(out.output));
+    let (targets, fields, menu) = (names(doc, w, TARGET), names(doc, w, FIELD), menu_of(doc, w));
     Ok(
-        json!({"id": w, "plugin": m.id, "state": state_of(doc, w), "targets": targets(doc, w), "output": output, "logs": out.logs, "calls": out.calls, "fuel": out.fuel}),
+        json!({"id": w, "plugin": m.id, "state": state_of(doc, w), "targets": targets, "fields": fields, "menu": menu, "output": output, "logs": out.logs, "calls": out.calls, "fuel": out.fuel}),
     )
 }
 
@@ -272,21 +318,87 @@ fn insert(s: &mut Session, p: &Value) -> Result<Value> {
     report(s, w, m, out)
 }
 
+/// The widget param `id` is, or is inside.
+fn widget_param(s: &Session, cmd: &str, p: &Value) -> Result<NodeId> {
+    let nid = id(p, "id").ok_or_else(|| bad(cmd, "`id` required (a widget, or a layer in one)"))?;
+    widget_of(s.doc()?, nid).ok_or_else(|| bad(cmd, format!("{nid} isn't a widget or inside one")))
+}
+
+/// Call widget `w`'s plugin back with `ev`, after `prep` (which may change the widget first), as
+/// one undo step.
+fn event(s: &mut Session, cmd: &str, w: NodeId, ev: Value, p: &Value, prep: impl FnOnce(&mut Session) -> Result<()>) -> Result<Value> {
+    let plugin = s.doc()?.node(w).and_then(|n| n.plugin_data.get(PLUGIN)).cloned().unwrap_or_default();
+    let wp = widget_plugin(s, cmd, &plugin)?;
+    let out = s.grouped(&wp.manifest.name, |s| {
+        prep(s)?;
+        callback(s, &wp, w, Some(ev), num(p, "fuel"))
+    })?;
+    report(s, w, &wp.manifest, out)
+}
+
 fn click(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "widget.click";
-    let nid = id(p, "id").ok_or_else(|| bad(cmd, "`id` required (a widget, or a layer in one)"))?;
+    let w = widget_param(s, cmd, p)?;
     let target = string(p, "target").ok_or_else(|| bad(cmd, "`target` required (see widget.list)"))?;
-    let doc = s.doc()?;
-    let w = widget_of(doc, nid).ok_or_else(|| bad(cmd, format!("{nid} isn't a widget or inside one")))?;
-    let all = targets(doc, w);
+    let all = names(s.doc()?, w, TARGET);
     if !all.contains(&target) {
         return Err(bad(cmd, format!("the widget has no `{target}` to click (it has: {})", all.join(", "))));
     }
-    let plugin = doc.node(w).and_then(|n| n.plugin_data.get(PLUGIN)).cloned().unwrap_or_default();
-    let fuel = num(p, "fuel");
-    let wp = widget_plugin(s, cmd, &plugin)?;
-    let out = s.grouped(&wp.manifest.name, |s| callback(s, &wp, w, Some(&target), fuel))?;
-    report(s, w, &wp.manifest, out)
+    event(s, cmd, w, json!({"target": target}), p, |_| Ok(()))
+}
+
+fn set_text(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "widget.setText";
+    let w = widget_param(s, cmd, p)?;
+    let field = string(p, "field").ok_or_else(|| bad(cmd, "`field` required (see widget.list)"))?;
+    let all = names(s.doc()?, w, FIELD);
+    if !all.contains(&field) {
+        return Err(bad(cmd, format!("the widget has no field `{field}` (it has: {})", all.join(", "))));
+    }
+    let value = match p.get("value") {
+        Some(Value::String(v)) => clean_field(v).map_err(|e| bad(cmd, e))?,
+        _ => return Err(bad(cmd, "`value` required (text)")),
+    };
+    let ev = json!({"field": field, "value": value});
+    // The value goes into the state and the field's text before the plugin hears of it, so a
+    // plugin that doesn't redraw still keeps (and shows) it.
+    event(s, cmd, w, ev, p, |s| {
+        let ds = s.ds_mut()?;
+        let before = ds.doc.clone();
+        let mut state = state_of(&ds.doc, w);
+        state.insert(field.clone(), Value::String(value.clone()));
+        check_state(&state).map_err(|e| bad(cmd, e))?;
+        let doc = ds.doc_mut();
+        let text = Map::from_iter([("characters".to_string(), Value::String(value))]);
+        for l in doc.subtree(w) {
+            if doc.node(l).is_some_and(|n| n.plugin_data.get(FIELD) == Some(&field) && matches!(n.kind, NodeKind::Text(_))) {
+                crate::cmd::props::apply(cmd, doc, l, &text)?;
+            }
+        }
+        doc.get_mut(w)?.plugin_data.insert(STATE.into(), Value::Object(state).to_string());
+        crate::normalize(doc, &before);
+        Ok(())
+    })
+}
+
+fn menu(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "widget.menu";
+    let w = widget_param(s, cmd, p)?;
+    let item = string(p, "item").ok_or_else(|| bad(cmd, "`item` required (see widget.list)"))?;
+    let all = menu_of(s.doc()?, w);
+    let Some(m) = all.iter().find(|m| m.item == item) else {
+        let names: Vec<&str> = all.iter().map(|m| m.item.as_str()).collect();
+        return Err(bad(cmd, format!("the widget has no menu item `{item}` (it has: {})", names.join(", "))));
+    };
+    let value = match m.kind {
+        MenuKind::Action => Value::Null,
+        MenuKind::Toggle => json!(p.get("value").and_then(Value::as_bool).unwrap_or(!m.checked)),
+        MenuKind::Color => {
+            let hex = string(p, "value").filter(|v| v.len() <= 9).and_then(|v| figcraft_color::Color::from_hex(&v)).map(|c| c.to_css_hex());
+            json!(hex.filter(|h| m.options.contains(h)).ok_or_else(|| bad(cmd, format!("`value` must be one of {}", m.options.join(", "))))?)
+        }
+    };
+    event(s, cmd, w, json!({"menu": item, "value": value}), p, |_| Ok(()))
 }
 
 /// Click `target` of the widget `id` is (or is in) on `doc`, a document that isn't one of the
@@ -311,7 +423,10 @@ fn list(s: &mut Session, _p: &Value) -> Result<Value> {
         .filter_map(|i| {
             let n = doc.node(i).filter(|n| is_widget(n))?;
             let state = Value::Object(state_of(doc, i));
-            Some(json!({"id": i, "plugin": n.plugin_data.get(PLUGIN), "name": n.name, "page": doc.page_of(i), "state": state, "targets": targets(doc, i)}))
+            let (targets, fields, menu) = (names(doc, i, TARGET), names(doc, i, FIELD), menu_of(doc, i));
+            Some(
+                json!({"id": i, "plugin": n.plugin_data.get(PLUGIN), "name": n.name, "page": doc.page_of(i), "state": state, "targets": targets, "fields": fields, "menu": menu}),
+            )
         })
         .collect();
     Ok(json!({"widgets": widgets}))
@@ -333,6 +448,20 @@ pub fn specs() -> Vec<CommandSpec> {
             false,
             click
         ),
-        spec!("widget.list", "List widgets", "{} → {widgets: [{id, plugin, name, page, state, targets}]}", false, list),
+        spec!(
+            "widget.setText",
+            "Edit widget field",
+            "{id (a widget or a layer in one), field (see widget.list), value (text, up to 1000 characters), fuel?} sets an editable field as typing in it would: the value goes into the state under the field's name and the plugin is called back; one undo step → like widget.insert",
+            false,
+            set_text
+        ),
+        spec!(
+            "widget.menu",
+            "Widget menu",
+            "{id (a widget or a layer in one), item (see widget.list), value? (a toggle: on or off, default the opposite of now; a colour: one of its options), fuel?} picks an item of the widget's property menu: the plugin is called back; one undo step → like widget.insert",
+            false,
+            menu
+        ),
+        spec!("widget.list", "List widgets", "{} → {widgets: [{id, plugin, name, page, state, targets, fields, menu}]}", false, list),
     ]
 }

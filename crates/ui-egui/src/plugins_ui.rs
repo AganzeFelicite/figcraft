@@ -81,8 +81,8 @@ pub(crate) fn field_value(app: &FigApp, plugin: &str, control: &str) -> Option<S
 /// open, else its panel), as last drawn.
 pub(crate) fn field_window(app: &FigApp, ctx: &Context, plugin: &str) -> Option<egui::Rect> {
     let id = match &app.ui.plugin_form {
-        Some(f) if f.id == plugin => Id::new("plugin_form"),
-        _ => Id::new(("plugin_panel", plugin)),
+        Some(f) if f.id == plugin => Id::unique("plugin_form"),
+        _ => Id::unique(("plugin_panel", plugin)),
     };
     ctx.memory(|m| m.area_rect(id))
 }
@@ -108,6 +108,36 @@ pub fn start(app: &mut FigApp, id: &str, command: &str) {
         }
         _ => run(app, "plugin.run", json!({"id": id, "command": command})),
     }
+}
+
+/// A plugin offered a file to save (`dialog.pluginSave`: `name`, `data` as base64): the user picks
+/// where it goes in FigCraft's own save dialog, or the browser downloads it. The plugin never learns
+/// the path.
+pub(crate) fn save_file(app: &mut FigApp, data: &Value) {
+    use base64::Engine as _;
+    let name = data["name"].as_str().unwrap_or_default().to_string();
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(data["data"].as_str().unwrap_or_default()) else {
+        app.toast(tr("Couldn't save the file"));
+        return;
+    };
+    if app.services.downloads() {
+        if app.services.download(&name, &bytes) {
+            app.toast(trf("Saved {name}", &[("name", &name)]));
+        } else {
+            app.toast(tr("Couldn't save the file"));
+        }
+        return;
+    }
+    let ext = std::path::Path::new(&name).extension().and_then(|e| e.to_str()).unwrap_or_default().to_string();
+    let exts: Vec<&str> = if ext.is_empty() { Vec::new() } else { vec![ext.as_str()] };
+    let shown = name.clone();
+    app.pick_save(tr("Save file"), &name, &exts, move |app, path| {
+        let file = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or(shown);
+        match std::fs::write(&path, &bytes) {
+            Ok(()) => app.toast(trf("Saved {name}", &[("name", &file)])),
+            Err(_) => app.toast(tr("Couldn't save the file")),
+        }
+    });
 }
 
 /// Run `plugin.run` or `plugin.event`; a text output is shown as a toast unless the plugin showed
@@ -151,7 +181,7 @@ pub fn menu(app: &mut FigApp, ui: &mut Ui, t: &Tokens) -> bool {
                 }
             }
             commands => {
-                let picked = crate::menus::submenu(ui, "Plugins", &format!("Plugins/plugin:{}", m.id), &m.name, t, |ui| {
+                let picked = crate::menus::submenu(ui, &format!("Plugins/plugin:{}", m.id), &m.name, t, |ui| {
                     commands.iter().find(|c| crate::menus::item(ui, &c.label, "", true, false, t)).map(|c| c.id.clone())
                 });
                 if let Some(c) = picked {
@@ -164,7 +194,7 @@ pub fn menu(app: &mut FigApp, ui: &mut Ui, t: &Tokens) -> bool {
         app.session.prefs.plugins.iter().filter(|p| p.manifest.widget).map(|p| (p.manifest.id.as_str(), p.manifest.name.as_str())).collect();
     let widget = (!widgets.is_empty())
         .then(|| {
-            crate::menus::submenu(ui, "Plugins", "Plugins/widgets", tr("Widgets"), t, |ui| {
+            crate::menus::submenu(ui, "Plugins/widgets", tr("Widgets"), t, |ui| {
                 widgets.iter().find(|(_, name)| crate::menus::item(ui, name, "", true, false, t)).map(|(id, _)| id.to_string())
             })
         })
@@ -206,7 +236,7 @@ fn panel_windows(app: &mut FigApp, ctx: &Context) {
         let mut used = None;
         // Side by side leftwards from the properties panel, three to a row.
         let at = egui::pos2(right - PANEL_STEP * (i % 3) as f32, 52.0 + 28.0 * (i / 3) as f32);
-        floating(open.title(), ctx).id(Id::new(("plugin_panel", id))).pivot(Align2::RIGHT_TOP).default_pos(at).open(&mut keep).show(ctx, |ui| {
+        floating(open.title(), ctx).id(Id::unique(("plugin_panel", id))).pivot(Align2::RIGHT_TOP).default_pos(at).open(&mut keep).show(ctx, |ui| {
             ui.set_width(320.0);
             used = controls(ui, id, &open.panel.controls, &open.values, &t);
         });
@@ -245,12 +275,15 @@ const INSTALL: &str = "plugin.directory.install";
 const MANAGE_W: f32 = 400.0;
 const ROW_TEXT_W: f32 = 300.0;
 
+/// Draw the Plugins window with installed and browse tabs, dispatching remove, import,
+/// browse, confirm and stop actions; closing the window cancels its directory requests and
+/// clears confirmation.
 fn manage_window(app: &mut FigApp, ctx: &Context) {
     let t = Tokens::get(ctx);
     let mut open = true;
     let mut asked = None;
     let mut tab = app.ui.plugins_manage.tab;
-    window(tr("Plugins"), ctx).id(Id::new("Plugins")).open(&mut open).show(ctx, |ui| {
+    window(tr("Plugins"), ctx).id(Id::unique("Plugins")).open(&mut open).show(ctx, |ui| {
         ui.set_width(MANAGE_W);
         tab_strip(ui, &t, &PluginsTab::ALL, PluginsTab::label, &mut tab);
         ui.add_space(12.0);
@@ -326,7 +359,7 @@ fn browse_tab(app: &mut FigApp, ui: &mut Ui, t: &Tokens) -> Option<Manage> {
         // The field commits on Enter (which also browses) or when Browse takes the focus.
         let mut enter = false;
         if let Some(s) =
-            widgets::text_field(ui, Id::new("plugin_directory_server"), &server, MANAGE_W - 90.0, tr("Server address (ws://host:47900/)"))
+            widgets::text_field(ui, Id::unique("plugin_directory_server"), &server, MANAGE_W - 90.0, tr("Server address (ws://host:47900/)"))
         {
             enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
             server = s.clone();
@@ -351,7 +384,7 @@ fn browse_tab(app: &mut FigApp, ui: &mut Ui, t: &Tokens) -> Option<Manage> {
         return asked;
     };
     ui.add_space(8.0);
-    if let Some(q) = widgets::text_field(ui, Id::new("plugin_directory_query"), &app.ui.plugins_manage.query, MANAGE_W, tr("Search plugins")) {
+    if let Some(q) = widgets::text_field(ui, Id::unique("plugin_directory_query"), &app.ui.plugins_manage.query, MANAGE_W, tr("Search plugins")) {
         app.ui.plugins_manage.query = q;
     }
     ui.add_space(8.0);
@@ -432,7 +465,7 @@ fn confirm_window(app: &mut FigApp, ctx: &Context, t: &Tokens) {
     let installing = app.session.waiting_for(INSTALL);
     let title = if update { tr("Update plugin") } else { tr("Install plugin") };
     let (mut open, mut install, mut cancel) = (true, false, false);
-    window(title, ctx).id(Id::new("plugin_install_confirm")).open(&mut open).show(ctx, |ui| {
+    window(title, ctx).id(Id::unique("plugin_install_confirm")).open(&mut open).show(ctx, |ui| {
         ui.set_width(340.0);
         ui.label(RichText::new(format!("{} {}", e.name, e.version)).font(semibold(13.0)).color(t.text));
         widgets::label(ui, &trf("From {server}", &[("server", &server)]), t.text_secondary);
@@ -446,6 +479,12 @@ fn confirm_window(app: &mut FigApp, ctx: &Context, t: &Tokens) {
         });
         if e.widget {
             asks.push(tr("put a widget on the canvas").to_string());
+        }
+        // shortcut: a directory entry doesn't say whether the manifest asks for `saveFile` (a new
+        // field would break the entries' postcard wire format), so every API 4 plugin says it may;
+        // carry the permission in the entry once the directory protocol negotiates new fields.
+        if e.api >= 4 {
+            asks.push(tr("offer files to save if it asks to (you choose where each one goes)").to_string());
         }
         for a in asks {
             ui.add(egui::Label::new(RichText::new(format!("•  {a}")).font(regular(11.0)).color(t.text)).wrap());
@@ -501,6 +540,9 @@ fn summary(p: &InstalledPlugin) -> String {
         parts.push(m.version.clone());
     }
     parts.push(access.to_string());
+    if m.permissions.save_file {
+        parts.push(tr("can save files").to_string());
+    }
     parts.push(match (&p.source, &p.path) {
         (Some(server), _) => trf("from {server}", &[("server", server)]),
         (None, Some(path)) => trf("development: {path}", &[("path", path)]),
@@ -509,6 +551,8 @@ fn summary(p: &InstalledPlugin) -> String {
     parts.join(" · ")
 }
 
+/// Draw a plugin command's parameter form: close it when the plugin or command disappeared,
+/// edit values and colour picks, run `plugin.run` on Run, and close on Cancel.
 fn form_window(app: &mut FigApp, ctx: &Context) {
     let Some(mut form) = app.ui.plugin_form.clone() else { return };
     let Some((name, command)) = app
@@ -529,7 +573,7 @@ fn form_window(app: &mut FigApp, ctx: &Context) {
     let mut pick = None;
     let label = command.label.trim_end_matches(['…', '.']).trim();
     let title = if label.contains(name.as_str()) { label.to_string() } else { format!("{name}: {label}") };
-    window(&title, ctx).id(Id::new("plugin_form")).open(&mut open).show(ctx, |ui| {
+    window(&title, ctx).id(Id::unique("plugin_form")).open(&mut open).show(ctx, |ui| {
         ui.set_width(320.0);
         match controls(ui, &format!("{}/{}", form.id, form.command), &command.params, &form.values, &t) {
             Some(Used::Set(name, v)) => {
@@ -586,7 +630,7 @@ fn controls(ui: &mut Ui, salt: &str, params: &[Param], values: &Map<String, Valu
                 }
                 _ => {
                     let current = values.get(&p.name).cloned().unwrap_or_else(|| p.default_value());
-                    field(ui, Id::new(("plugin_control", salt, &p.name)), p, &current)
+                    field(ui, Id::unique(("plugin_control", salt, &p.name)), p, &current)
                 }
             };
             if hit.is_some() {
@@ -643,7 +687,8 @@ fn field(ui: &mut Ui, id: Id, p: &Param, current: &Value) -> Option<Used> {
             let (picked, typed) = ui
                 .horizontal(|ui| {
                     let color = figcraft_color::Color::from_hex(hex).unwrap_or(figcraft_color::Color::BLACK);
-                    let picked = widgets::swatch(ui, &figcraft_color::Paint::solid(color), widgets::FIELD_H).clicked();
+                    let label = format!("{name} {}", tr("Color"));
+                    let picked = widgets::swatch_named(ui, &figcraft_color::Paint::solid(color), widgets::FIELD_H, &label).clicked();
                     (picked, widgets::text_field_named(ui, id, hex, FIELD_W - widgets::FIELD_H - 8.0, name).and_then(|s| p.coerce(&json!(s)).ok()))
                 })
                 .inner;

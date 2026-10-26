@@ -4,6 +4,13 @@
 //! both sides with it. Branches are saved in the main file ([`figcraft_format::Branch`]); a
 //! branch tab's edits and its own version history go into its branch ([`sync`]) and are saved with
 //! the main file. Merging adds a version to the main file's history; the branch keeps its own.
+//!
+//! In a live session a branch stays with the person who made it (others don't see it), and
+//! merging it is one edit of the session document, which syncs to everyone like any other. The
+//! session server takes new layers only in the sender's own id space, so a branch made in the
+//! session makes its ids in yours, far above the ids the main file makes there ([`WINDOW`]).
+//! Merging a branch made outside the session is refused when it adds layers, styles, variables or
+//! comments (their ids are in another space).
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -11,6 +18,7 @@ use std::sync::Arc;
 pub use figcraft_collab::merge::Side;
 use figcraft_collab::merge::{self, Conflict, Key, Plan};
 use figcraft_collab::{Change, Entry, Prop, Target};
+use figcraft_doc::ids::space_of;
 use figcraft_doc::{Document, NodeId};
 use figcraft_format::Branch;
 pub use figcraft_format::BranchState;
@@ -27,7 +35,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "branch.create",
             "Create branch",
-            "{name?}  a copy of the file to work on separately, opened in a new tab; it remembers the file as it is now (its base) → {id, name, index (its tab)}",
+            "{name?}  a copy of the file to work on separately, opened in a new tab; it remembers the file as it is now (its base); in a live session it stays yours → {id, name, index (its tab)}",
             false,
             create
         ),
@@ -53,14 +61,14 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "branch.updateFromMain",
             "Update from main",
-            "{id?, resolutions? ({<conflict key>: \"branch\" | \"main\"})}  bring the main file's changes since the branch was made into the branch; refused while a conflict has no resolution. Not undoable (the branch tab's undo history starts over) → {updated, changes, conflicts}",
+            "{id?, resolutions? ({<conflict key>: \"branch\" | \"main\"})}  bring the main file's changes since the branch was made into the branch (a version in its history); refused while a conflict has no resolution. Not undoable (the branch tab's undo history starts over) → {updated, changes, conflicts}",
             false,
             |s, p| combine(s, p, Side::Main)
         ),
         spec!(
             "branch.merge",
             "Merge branch",
-            "{id?, resolutions? ({<conflict key>: \"branch\" | \"main\"})}  merge the branch into the main file as one undo step, then archive it and show the main file; refused while a conflict has no resolution → {merged, changes, conflicts, index}",
+            "{id?, resolutions? ({<conflict key>: \"branch\" | \"main\"})}  merge the branch into the main file as one undo step (in a live session one edit everyone gets; refused on a view link), then archive it and show the main file; refused while a conflict has no resolution → {merged, changes, conflicts, index}",
             false,
             |s, p| combine(s, p, Side::Branch)
         ),
@@ -186,7 +194,7 @@ pub fn tab_of(s: &Session, main: u64, id: &str) -> Option<usize> {
 /// branch's). Their edits are already in the branches ([`sync`]).
 pub(crate) fn close_tabs(s: &mut Session, main: u64, id: Option<&str>) {
     let active = s.docs.get(s.active).map(|d| d.uid);
-    s.docs.retain(|d| !d.branch_of.as_ref().is_some_and(|(m, b)| *m == main && id.is_none_or(|i| i == b)));
+    s.remove_tabs(|d| d.branch_of.as_ref().is_some_and(|(m, b)| *m == main && id.is_none_or(|i| i == b)));
     s.active = active.and_then(|a| s.docs.iter().position(|d| d.uid == a)).unwrap_or(s.active).min(s.docs.len().saturating_sub(1));
 }
 
@@ -219,11 +227,42 @@ fn disabled(cmd: &str, why: impl Into<String>) -> EngineError {
     EngineError::Disabled(cmd.into(), why.into())
 }
 
-/// shortcut: branches of a file in a live session are refused (its participants' client ids
-/// aren't known here, so a branch's id space could clash); allow them once the server hands out
-/// branch id spaces.
-fn refuse_live(s: &Session, cmd: &str, uid: u64) -> Result<()> {
-    if s.live_doc(uid) { Err(disabled(cmd, "branches aren't available in a live session")) } else { Ok(()) }
+/// shortcut: in a live session a branch makes ids in your own client space starting this far
+/// above every id made there on the main file or its other branches, so neither side makes the
+/// other's ids before the merge unless one makes 16 million first; have the server hand out
+/// branch id spaces if that ever matters.
+const WINDOW: u64 = 1 << 24;
+
+/// Where a new branch of the file in tab `main` starts making ids in your live session's client
+/// space `client`: [`WINDOW`] above the main file's and every branch's next id there (`None`: the
+/// space is full).
+fn live_window(s: &Session, main: u64, client: u32) -> Option<NodeId> {
+    let m = s.docs.iter().find(|d| d.uid == main)?;
+    let tabs = s.docs.iter().filter(|d| d.branch_of.as_ref().is_some_and(|(t, _)| *t == main)).map(|d| d.doc.next_id());
+    let next = m.branches.iter().map(|b| b.head.next_id()).chain(tabs).chain([m.doc.next_id()]);
+    let top = next.filter(|n| space_of(n.0) == client).max()?;
+    let start = top.0.checked_add(WINDOW)?;
+    (space_of(start) == client).then_some(NodeId(start))
+}
+
+/// What merging into a live session's document would add that its server won't take from client
+/// `client`: a new layer outside your id space (unless it is a layer of a base taken in this
+/// session, `in_session`, that main deleted since: the server takes those back), or a new style,
+/// variable, collection or comment in another client's space. `None`: everything goes through.
+fn foreign(plan: &Plan, base: &Document, main: &Document, merged: &Document, client: u32, in_session: bool) -> Option<String> {
+    let outside = |n: NodeId| space_of(n.0) != client && !(in_session && base.contains(n));
+    if let Some(n) = merged.nodes().find(|n| !main.contains(n.id) && outside(n.id)) {
+        return Some(format!("layer “{}”", n.name));
+    }
+    plan.changes(Side::Branch).iter().find_map(|c| match c {
+        Change::Put { entry, .. }
+            if entry.id_space().is_some_and(|sp| sp != 0 && sp != client)
+                && plan.base().value(&Target::Entry(entry.clone())).ok().flatten().is_none() =>
+        {
+            Some(entry.describe())
+        }
+        _ => None,
+    })
 }
 
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
@@ -232,7 +271,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     if ds.branch_of.is_some() {
         return Err(disabled(CMD, "this tab is a branch: make branches from the main file"));
     }
-    refuse_live(s, CMD, ds.uid)?;
+    let live = s.live_client_id(CMD, ds.uid)?;
     if ds.branches.len() >= figcraft_format::MAX_BRANCHES {
         return Err(disabled(CMD, format!("the file has the most branches it can keep ({})", figcraft_format::MAX_BRANCHES)));
     }
@@ -240,12 +279,22 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         string(p, "name").map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).unwrap_or_else(|| format!("Branch {}", ds.branches.len() + 1));
     let name = figcraft_format::clip(&name, figcraft_format::MAX_VERSION_NAME);
     let base = ds.document_itself().clone();
-    // Its own id space, above every space the file, its live sessions and its branches used.
-    let client = ds.branches.iter().map(|b| b.client).chain([base.highest_id_space(), base.client_id()]).max().unwrap_or(0);
-    let client = client.checked_add(1).ok_or_else(|| disabled(CMD, "no id space left for a new branch"))?;
+    let no_space = || disabled(CMD, "no id space left for a new branch");
+    // In a live session: your own client space, far above the main file's ids there. Otherwise its
+    // own id space, above every space the file, its live sessions and its branches used.
+    let (client, start) = match live {
+        Some(c) => (c, Some(live_window(s, ds.uid, c).ok_or_else(no_space)?)),
+        None => {
+            let top = ds.branches.iter().map(|b| b.client).chain([base.highest_id_space(), base.client_id()]).max().unwrap_or(0);
+            (top.checked_add(1).ok_or_else(no_space)?, None)
+        }
+    };
     let mut head = (*base).clone();
     head.name = name.clone();
     head.set_client_id(client);
+    if let Some(start) = start {
+        head.reserve_ids(NodeId(start.0 - 1));
+    }
     let id = crate::cmd::file::unique_id(|id| ds.branches.iter().any(|b| b.id == id));
     let uid = ds.uid;
     let time = crate::cmd::comment::now_secs();
@@ -259,7 +308,13 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
         head: Arc::new(head),
         versions: Vec::new(),
     });
+    if live.is_some() {
+        s.live_branch_base(uid, &id);
+    }
     let index = open_tab(s, uid, &id)?;
+    if let Some(tab) = s.docs.get_mut(index) {
+        crate::cmd::file::add_version(tab, CREATED, "", false);
+    }
     Ok(json!({"id": id, "name": name, "index": index}))
 }
 
@@ -269,11 +324,22 @@ fn open_tab(s: &mut Session, main: u64, id: &str) -> Result<usize> {
         s.active = i;
         return Ok(i);
     }
-    let m = s.docs.iter_mut().find(|d| d.uid == main).ok_or(EngineError::NoDocument)?;
-    let b = m.branches.iter_mut().find(|b| b.id == id).ok_or_else(|| bad("branch.open", format!("no branch `{id}`")))?;
+    let live = s.live_client_id("branch.open", main)?;
+    let m = s.docs.iter().find(|d| d.uid == main).ok_or(EngineError::NoDocument)?;
+    let b = m.branches.iter().find(|b| b.id == id).ok_or_else(|| bad("branch.open", format!("no branch `{id}`")))?;
     let mut doc = (*b.head).clone();
     // A branch read from a file has no client id yet.
     doc.set_client_id(b.client);
+    // In your live session, a branch that would make ids right where the main file makes them (one
+    // read from a file that made none yet) moves up.
+    if live == Some(b.client)
+        && doc.next_id().0.abs_diff(m.doc.next_id().0) < WINDOW
+        && let Some(start) = live_window(s, main, b.client)
+    {
+        doc.reserve_ids(NodeId(start.0 - 1));
+    }
+    let m = s.docs.iter_mut().find(|d| d.uid == main).ok_or(EngineError::NoDocument)?;
+    let b = m.branches.iter_mut().find(|b| b.id == id).ok_or_else(|| bad("branch.open", format!("no branch `{id}`")))?;
     // The branch's own version history: the tab's versions while it is open ([`sync`]).
     let mut tab = DocState::new(doc, None).with_versions(b.versions.clone());
     tab.branch_of = Some((main, id.to_string()));
@@ -340,7 +406,13 @@ fn combine(s: &mut Session, p: &Value, from: Side) -> Result<Value> {
     }
     // The main file itself, not a version shown in its place.
     m.end_preview();
-    refuse_live(s, cmd, main_uid)?;
+    // Merging edits the session document, which a view link (or a file on its way) can't.
+    if from == Side::Branch
+        && let Some(why) = s.live_read_only(main_uid)
+    {
+        return Err(disabled(cmd, why));
+    }
+    let live = s.live_client_id(cmd, main_uid)?;
     let picks = resolutions(cmd, p)?;
     let (base, head, main) = documents(s, mi, bi).ok_or(EngineError::NoDocument)?;
     let plan = merge::plan(&base, &head, &main).map_err(|e| EngineError::Other(e.to_string()))?;
@@ -351,6 +423,14 @@ fn combine(s: &mut Session, p: &Value, from: Side) -> Result<Value> {
     }
     let into = if from == Side::Branch { &main } else { &head };
     let (mut doc, touched) = plan.merge(into, from, &pick).map_err(|e| EngineError::Other(format!("can't merge: {e}")))?;
+    if let Some(client) = live.filter(|_| from == Side::Branch)
+        && let Some(what) = foreign(&plan, &base, &main, &doc, client, s.live_branch_in_session(main_uid, &id))
+    {
+        let why = format!(
+            "the branch adds {what}, made outside this live session, which the session can't take: merge it once the file has left the session"
+        );
+        return Err(disabled(cmd, why));
+    }
     doc.mark_dirty(touched);
     normalize(&mut doc, into);
     let doc = Arc::new(doc);
@@ -383,9 +463,31 @@ fn combine(s: &mut Session, p: &Value, from: Side) -> Result<Value> {
             b.base = main;
             b.head = doc;
         }
+        if live.is_some() {
+            s.live_branch_base(main_uid, &id);
+        }
+        note(s, mi, bi, UPDATED);
         out["updated"] = json!(true);
     }
     Ok(out)
+}
+
+/// The branch's own history entries for its creation and its updates from main.
+const CREATED: &str = "Branch created";
+const UPDATED: &str = "Updated from main";
+
+/// Add version `name` to the history of branch `bi` of the file in tab `mi`: its tab's when it is
+/// open (it goes into the branch with [`sync`]), else the branch's.
+fn note(s: &mut Session, mi: usize, bi: usize, name: &str) {
+    let Some((uid, id)) = s.docs.get(mi).and_then(|m| Some((m.uid, m.branches.get(bi)?.id.clone()))) else { return };
+    if let Some(tab) = tab_of(s, uid, &id).and_then(|t| s.docs.get_mut(t)) {
+        crate::cmd::file::add_version(tab, name, "", false);
+        return;
+    }
+    let Some(b) = s.docs.get_mut(mi).and_then(|m| m.branches_mut().get_mut(bi)) else { return };
+    let mut tab = DocState::new((*b.head).clone(), None).with_versions(std::mem::take(&mut b.versions));
+    crate::cmd::file::add_version(&mut tab, name, "", false);
+    b.versions = tab.versions;
 }
 
 /// Show merged `doc` in tab `ds`.
@@ -458,7 +560,7 @@ fn entry_label(plan: &Plan, entry: &Entry, value: Option<&Value>) -> Option<(&'s
         Entry::Variable(_) => "variable",
         Entry::Collection(_) => "variable collection",
         Entry::Comment(_) => "comment",
-        Entry::DevSnapshot(_) | Entry::Image(_) => return None,
+        Entry::DevSnapshot(_) | Entry::Image(_) | Entry::Ballot(_) => return None,
     };
     let base = plan.base().value(&Target::Entry(entry.clone())).ok().flatten();
     let named = value.or(base.as_ref().map(|j| &j.0)).and_then(|v| v.get("name").or_else(|| v.get("text"))).and_then(Value::as_str);

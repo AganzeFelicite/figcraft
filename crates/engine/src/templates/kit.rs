@@ -216,7 +216,7 @@ impl Kit {
     pub fn variables(&mut self, collection: &str, modes: &[&str], vars: Vec<(&str, &str, Vec<Value>)>) -> Result<()> {
         self.run("variable.createCollection", json!({"name": collection, "modes": modes}))?;
         for (name, kind, values) in vars {
-            let values: Map<String, Value> = modes.iter().map(|m| m.to_string()).zip(values).collect();
+            let values: Map<String, Value> = modes.iter().map(ToString::to_string).zip(values).collect();
             self.run("variable.create", json!({"collection": collection, "name": name, "type": kind, "values": values}))?;
         }
         Ok(())

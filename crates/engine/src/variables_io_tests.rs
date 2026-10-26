@@ -214,9 +214,9 @@ fn variables_export_and_import_round_trip() {
     let css = ex(&mut s, "variable.export", json!({"format": "css", "collections": ["Theme"]}))["text"].as_str().unwrap().to_string();
     for want in [
         ":root {\n",
-        "  --radius: 4;\n",
+        "  --radius: 4px;\n",
         "[data-theme=\"Dark\"] {\n",
-        "  --radius: 6.5;\n",
+        "  --radius: 6.5px;\n",
         "  --accent: var(--color-primary);\n",
         "  --label: \"Say  hi \";\n",
     ] {
@@ -370,4 +370,66 @@ fn variant_properties_follow_string_variables() {
     ex(&mut s, "variable.set", json!({"variable": "state", "mode": "Busy", "value": "Pressed"}));
     assert_eq!(main(&s), variants[1]);
     healthy(&s);
+}
+
+#[test]
+fn paints_replaced_through_node_set_keep_unchanged_stop_bindings() {
+    let mut s = Session::new();
+    let r = gradient_rect(&mut s);
+    ex(&mut s, "variable.bind", json!({"ids": [r], "field": "fills/0/stops/2/color", "variable": "brand"}));
+    ex(&mut s, "variable.bind", json!({"ids": [r], "field": "fills/0/stops/1/color", "variable": "ink"}));
+    let cur = |s: &Session| s.doc().unwrap().node(r).unwrap().fills[0].clone();
+    // Removing the first stop moves both bindings down with their stops.
+    let mut p = cur(&s);
+    if let PaintKind::Gradient(g) = &mut p.kind {
+        g.stops.remove(0);
+    }
+    ex(&mut s, "node.set", json!({"ids": [r], "props": {"fills": [p]}}));
+    assert_eq!(bound_keys(&s, r), ["fills/0/stops/0/color", "fills/0/stops/1/color"]);
+    // Recolouring one bound stop detaches that stop only.
+    let mut p = cur(&s);
+    if let PaintKind::Gradient(g) = &mut p.kind {
+        g.stops[0].color = Color::WHITE;
+    }
+    ex(&mut s, "node.set", json!({"ids": [r], "props": {"fills": [p]}}));
+    assert_eq!(bound_keys(&s, r), ["fills/0/stops/1/color"]);
+    ex(&mut s, "variable.set", json!({"variable": "brand", "value": "#0000ff"}));
+    assert_eq!(stops(&s, r), ["FFFFFF", "0000FF"]);
+    healthy(&s);
+}
+
+#[test]
+fn css_export_gives_lengths_a_unit_and_keeps_opacity_bare() {
+    let mut s = Session::new();
+    ex(&mut s, "variable.createCollection", json!({"name": "Brand"}));
+    ex(&mut s, "variable.create", json!({"collection": "Brand", "name": "card", "type": "number", "value": 12}));
+    ex(&mut s, "variable.create", json!({"collection": "Brand", "name": "fade", "type": "number", "value": 0.5}));
+    ex(&mut s, "variable.create", json!({"collection": "Brand", "name": "half", "type": "number", "value": 0.5}));
+    ex(&mut s, "variable.create", json!({"collection": "Brand", "name": "dim", "type": "number", "value": 1}));
+    ex(&mut s, "variable.set", json!({"variable": "dim", "value": {"alias": "half"}}));
+    let f = idv(&ex(&mut s, "frame.create", json!({"x": 0, "y": 0, "width": 100, "height": 100})));
+    let g = idv(&ex(&mut s, "frame.create", json!({"x": 200, "y": 0, "width": 100, "height": 100})));
+    ex(&mut s, "node.set", json!({"id": f, "props": {"cornerRadius": 12, "opacity": 0.5}}));
+    ex(&mut s, "variable.bind", json!({"ids": [f], "field": "cornerRadius", "variable": "card"}));
+    ex(&mut s, "variable.bind", json!({"ids": [f], "field": "opacity", "variable": "fade"}));
+    ex(&mut s, "variable.bind", json!({"ids": [g], "field": "opacity", "variable": "dim"}));
+    let css = ex(&mut s, "variable.export", json!({"format": "css"}))["text"].as_str().unwrap_or_default().to_string();
+    // A radius is a length; opacity stays a number, also through an alias it reads.
+    assert!(css.contains("--card: 12px;") && css.contains("--fade: 0.5;") && css.contains("--half: 0.5;"), "{css}");
+}
+
+#[test]
+fn review_a_long_alias_chain_keeps_its_role_to_the_end() {
+    let mut s = Session::new();
+    ex(&mut s, "variable.createCollection", json!({"name": "Brand"}));
+    ex(&mut s, "variable.create", json!({"collection": "Brand", "name": "o0", "type": "number", "value": 0.5}));
+    // o12 -> o11 -> … -> o0: longer than any fixed number of rounds would reach.
+    for i in 1..=12 {
+        ex(&mut s, "variable.create", json!({"collection": "Brand", "name": format!("o{i}"), "type": "number", "value": 1}));
+        ex(&mut s, "variable.set", json!({"variable": format!("o{i}"), "value": {"alias": format!("o{}", i - 1)}}));
+    }
+    let f = idv(&ex(&mut s, "frame.create", json!({"x": 0, "y": 0, "width": 100, "height": 100})));
+    ex(&mut s, "variable.bind", json!({"ids": [f], "field": "opacity", "variable": "o12"}));
+    let css = ex(&mut s, "variable.export", json!({"format": "css"}))["text"].as_str().unwrap_or_default().to_string();
+    assert!(css.contains("--o0: 0.5;"), "{css}");
 }

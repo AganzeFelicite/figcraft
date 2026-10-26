@@ -53,7 +53,10 @@ fn initial_color_bindings_settle_in_constructor_and_loaders() {
 
     let native = figcraft_format::save_bytes(&stale, None).unwrap();
     let (loaded, _) = crate::cmd::file::load_bytes(&native, "bindings.figcraft").unwrap();
-    let loaded_id = assert_dark_bound_color(&loaded, name_transform);
+    // A native file settles when it opens as a document, not in the loader.
+    let opened = Session::with_document(loaded);
+    let loaded = opened.doc().unwrap();
+    let loaded_id = assert_dark_bound_color(loaded, name_transform);
     assert_eq!(loaded_id, id);
     assert_eq!(loaded.node(id).unwrap().source, stale.first_page());
     assert!(loaded.node(id).unwrap().overrides.contains("sentinel"));

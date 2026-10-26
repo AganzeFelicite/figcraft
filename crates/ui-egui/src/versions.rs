@@ -50,7 +50,7 @@ impl Form {
 /// Open the panel (File ▸ Show version history).
 pub fn open(app: &mut FigApp) {
     app.ui.versions.open = true;
-    app.ui.left_collapsed = false;
+    app.ui.open_left_panel();
     app.ui.left_tab = crate::LeftTab::File;
 }
 
@@ -403,6 +403,8 @@ fn current_row(ui: &mut Ui, more: bool, active: bool) -> bool {
     !active && resp.on_hover_text(tr("Back to the current version")).clicked()
 }
 
+/// Draw one version row with timeline, name, time, up to three description lines and a
+/// more/context menu; returns the chosen preview, restore, edit, duplicate or delete action.
 fn version_row(ui: &mut Ui, row: &Row, last: bool, previewing: bool) -> Option<Action> {
     let t = Tokens::get(ui.ctx());
     let w = ui.available_width();
@@ -433,7 +435,7 @@ fn version_row(ui: &mut Ui, row: &Row, last: bool, previewing: bool) -> Option<A
     let mut out = None;
     // More menu (on hover), also on right-click.
     let br = Rect::from_center_size(pos2(r.max.x - 22.0, name_y), vec2(24.0, 24.0));
-    let more = ui.interact(br, Id::new(("version_more", &row.id)), Sense::click());
+    let more = ui.interact(br, Id::unique(("version_more", &row.id)), Sense::click());
     let menu_open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&more));
     if hovered || menu_open {
         if more.hovered() || menu_open {
@@ -488,7 +490,7 @@ fn branch_row(ui: &mut Ui, b: &BranchRow) -> Option<Action> {
     p.text(pos2(clip.min.x, r.min.y + 31.0), Align2::LEFT_CENTER, sub, regular(11.0), t.text_secondary);
     let mut out = None;
     let br = Rect::from_center_size(pos2(r.max.x - 22.0, r.min.y + 15.0), vec2(24.0, 24.0));
-    let more = ui.interact(br, Id::new(("branch_more", &b.id)), Sense::click());
+    let more = ui.interact(br, Id::unique(("branch_more", &b.id)), Sense::click());
     let menu_open = egui::Popup::is_id_open(ui.ctx(), egui::Popup::default_response_id(&more));
     if hovered || menu_open {
         if more.hovered() || menu_open {
@@ -523,7 +525,7 @@ pub fn preview_banner(app: &mut FigApp, ctx: &egui::Context, canvas: Rect) {
         return;
     };
     let t = Tokens::get(ctx);
-    let action = widgets::canvas_banner(ctx, Id::new("version_preview_banner"), canvas, |ui| {
+    let action = widgets::canvas_banner(ctx, Id::unique("version_preview_banner"), canvas, |ui| {
         let mut action = None;
         icons::paint(ui.painter(), Rect::from_center_size(ui.cursor().min + vec2(7.0, 12.0), vec2(14.0, 14.0)), Icon::Clock, t.icon_secondary);
         ui.add_space(20.0);

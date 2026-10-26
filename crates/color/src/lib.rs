@@ -61,7 +61,7 @@ impl<'de> Deserialize<'de> for Color {
 }
 
 fn clamp01(v: f32) -> f32 {
-    if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 }
+    if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) }
 }
 
 impl Default for Color {
@@ -122,7 +122,8 @@ impl Color {
     /// Parse hex the way the colour field does: `#` optional, 1, 2, 3, 4, 6 or 8 digits
     /// (`F` → `FFFFFF`, `AB` → `ABABAB`, `ABC` → `AABBCC`).
     pub fn from_hex(s: &str) -> Option<Self> {
-        let s = s.trim().trim_start_matches('#');
+        let s = s.trim();
+        let s = s.strip_prefix('#').unwrap_or(s);
         if !s.chars().all(|c| c.is_ascii_hexdigit()) {
             return None;
         }
@@ -162,7 +163,13 @@ impl Color {
                     p.parse::<f32>().ok().map(|v| v / 255.0)
                 }
             };
-            let alpha = parts.get(3).and_then(|a| parse_alpha(a)).unwrap_or(1.0);
+            let alpha = match parts.get(3) {
+                Some(a) => parse_alpha(a)?,
+                None => 1.0,
+            };
+            if parts.len() > 4 {
+                return None;
+            }
             return Some(Self::new(num(0)?, num(1)?, num(2)?, alpha));
         }
         if let Some(inner) = t.strip_prefix("hsla(").or_else(|| t.strip_prefix("hsl(")).and_then(|r| r.strip_suffix(')')) {
@@ -170,7 +177,13 @@ impl Color {
             let h = parts.first()?.trim_end_matches("deg").parse::<f32>().ok()?;
             let s = parts.get(1)?.trim_end_matches('%').parse::<f32>().ok()? / 100.0;
             let l = parts.get(2)?.trim_end_matches('%').parse::<f32>().ok()? / 100.0;
-            let alpha = parts.get(3).and_then(|a| parse_alpha(a)).unwrap_or(1.0);
+            let alpha = match parts.get(3) {
+                Some(a) => parse_alpha(a)?,
+                None => 1.0,
+            };
+            if parts.len() > 4 {
+                return None;
+            }
             return Some(Hsl { h, s, l }.to_color().with_alpha(alpha));
         }
         if t == "transparent" {
@@ -182,7 +195,14 @@ impl Color {
     /// CSS `rgba(...)` / hex text for copy-as-CSS.
     pub fn to_css(self) -> String {
         let [r, g, b, _] = self.to_rgba8();
-        if self.a >= 0.999 { self.to_css_hex() } else { format!("rgba({r}, {g}, {b}, {:.2})", self.a) }
+        if self.a >= 0.999 {
+            return self.to_css_hex();
+        }
+        // Two decimals when they keep the 8-bit alpha, three otherwise (near-transparent colours).
+        let a8 = |a: f32| (a.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let short = format!("{:.2}", self.a);
+        let alpha = if short.parse::<f32>().is_ok_and(|v| a8(v) == a8(self.a)) { short } else { format!("{:.3}", self.a) };
+        format!("rgba({r}, {g}, {b}, {alpha})")
     }
 
     /// Linear interpolation in sRGB (as gradients render).
@@ -343,7 +363,7 @@ impl ImageFilters {
     }
 
     /// The built-in adjustment presets: `(id, label, adjustments)`. "Reset" is the identity.
-    pub const PRESETS: [(&'static str, &'static str, ImageFilters); 7] = [
+    pub const PRESETS: [(&str, &str, ImageFilters); 7] = [
         ("vivid", "Vivid", ImageFilters { contrast: 0.2, saturation: 0.45, highlights: -0.1, shadows: 0.1, ..ImageFilters::NONE }),
         ("muted", "Muted", ImageFilters { contrast: -0.15, saturation: -0.45, ..ImageFilters::NONE }),
         ("warm", "Warm", ImageFilters { temperature: 0.5, tint: 0.1, saturation: 0.1, ..ImageFilters::NONE }),
@@ -537,7 +557,7 @@ pub enum PaintKind {
 }
 
 /// One fill or stroke paint.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Paint {
     #[serde(flatten)]
     pub kind: PaintKind,
@@ -547,19 +567,41 @@ pub struct Paint {
     pub visible: bool,
     #[serde(default)]
     pub blend: BlendMode,
+    /// The part of the opacity that is the alpha of a typed solid colour (see [`Paint::solid`]),
+    /// the rest being an opacity set on its own: a colour variable bound to the paint replaces
+    /// this part only. 1: all of it is the paint's own.
+    #[serde(default = "one", rename = "colorAlpha", skip_serializing_if = "is_one")]
+    pub color_alpha: f32,
+}
+
+/// Paints compare by what they paint; where the opacity came from doesn't matter.
+impl PartialEq for Paint {
+    fn eq(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.opacity == other.opacity && self.visible == other.visible && self.blend == other.blend
+    }
 }
 
 fn yes() -> bool {
     true
 }
 
+fn is_one(x: &f32) -> bool {
+    *x == 1.0
+}
+
 impl Paint {
     pub fn solid(color: Color) -> Self {
-        Self { kind: PaintKind::Solid { color: color.with_alpha(1.0) }, opacity: color.a, visible: true, blend: BlendMode::Normal }
+        Self {
+            kind: PaintKind::Solid { color: color.with_alpha(1.0) },
+            opacity: color.a,
+            visible: true,
+            blend: BlendMode::Normal,
+            color_alpha: color.a,
+        }
     }
 
     pub fn gradient(g: Gradient) -> Self {
-        Self { kind: PaintKind::Gradient(g), opacity: 1.0, visible: true, blend: BlendMode::Normal }
+        Self { kind: PaintKind::Gradient(g), opacity: 1.0, visible: true, blend: BlendMode::Normal, color_alpha: 1.0 }
     }
 
     pub fn image(hash: impl Into<String>, mode: ImageScaleMode) -> Self {
@@ -575,12 +617,13 @@ impl Paint {
             opacity: 1.0,
             visible: true,
             blend: BlendMode::Normal,
+            color_alpha: 1.0,
         }
     }
 
     /// Layer `source` (a node id) tiled at its own size.
     pub fn pattern(source: u64) -> Self {
-        Self { kind: PaintKind::Pattern(PatternPaint::new(source)), opacity: 1.0, visible: true, blend: BlendMode::Normal }
+        Self { kind: PaintKind::Pattern(PatternPaint::new(source)), opacity: 1.0, visible: true, blend: BlendMode::Normal, color_alpha: 1.0 }
     }
 
     /// The solid colour (with the paint opacity folded into alpha), if solid.

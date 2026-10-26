@@ -148,7 +148,7 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
     let size = vec2(880.0_f32.min(screen.width() - 80.0).max(480.0), 480.0_f32.min(screen.height() - 120.0).max(240.0));
     let mut open = true;
     egui::Window::new(tr("Local variables"))
-        .id(Id::new("variables_window"))
+        .id(Id::unique("variables_window"))
         .title_bar(false)
         .collapsible(false)
         .resizable(false)
@@ -173,6 +173,8 @@ pub fn show(app: &mut FigApp, ctx: &Context) {
     app.ui.variables = open.then_some(st);
 }
 
+/// Draw the variables header: the title at the left, and the import/export/Close controls at the
+/// right.
 fn header(app: &mut FigApp, ui: &mut Ui, open: &mut bool) {
     let t = Tokens::get(ui.ctx());
     let (r, _) = ui.allocate_exact_size(vec2(ui.available_width(), 44.0), Sense::hover());
@@ -194,7 +196,7 @@ fn header(app: &mut FigApp, ui: &mut Ui, open: &mut bool) {
     ui.painter().text(pos2(r.min.x + 16.0, r.center().y), Align2::LEFT_CENTER, tr("Local variables"), semibold(13.0), t.text);
     if widgets::icon_button_at(
         ui,
-        Id::new("vars_close"),
+        Id::unique("vars_close"),
         Rect::from_center_size(pos2(r.max.x - 22.0, r.center().y), vec2(24.0, 24.0)),
         Icon::Close,
         tr("Close"),
@@ -253,8 +255,9 @@ fn extend(app: &mut FigApp, lib: &str, c: &str, st: &mut Editor) {
     }
 }
 
+/// Stable egui id for the rename field of a `Rename` target.
 fn rename_id(target: &Rename) -> Id {
-    Id::new(("var_rename", target))
+    Id::unique(("var_rename", target))
 }
 
 /// Start renaming `target`. The field isn't drawn yet (a new collection, mode or variable shows next
@@ -281,13 +284,15 @@ fn unique(base: &str, taken: impl Fn(&str) -> bool) -> String {
     (1..10_000).map(|k| if k == 1 { base.to_string() } else { format!("{base} {k}") }).find(|n| !taken(n)).unwrap_or_else(|| base.to_string())
 }
 
+/// Draw the collections sidebar with library headings, collection rows and a create-collection
+/// button.
 fn sidebar(app: &mut FigApp, ui: &mut Ui, views: &[View], local: &Variables, st: &mut Editor) {
     let t = Tokens::get(ui.ctx());
     let (hr, _) = ui.allocate_exact_size(vec2(SIDEBAR_W, 40.0), Sense::hover());
     ui.painter().text(pos2(hr.min.x + 16.0, hr.center().y), Align2::LEFT_CENTER, tr("Collections"), semibold(11.0), t.text_secondary);
     if widgets::icon_button_at(
         ui,
-        Id::new("vars_add_coll"),
+        Id::unique("vars_add_coll"),
         Rect::from_center_size(pos2(hr.max.x - 20.0, hr.center().y), vec2(24.0, 24.0)),
         Icon::Plus,
         tr("Create collection"),
@@ -505,6 +510,8 @@ fn group_of(name: &str) -> &str {
     name.rsplit_once('/').map(|(g, _)| g).unwrap_or("")
 }
 
+/// Draw the variables table for the selected collection: search, library/extended notes,
+/// grouped rows, mode columns and the create-variable row when editable.
 fn table(app: &mut FigApp, ui: &mut Ui, view: &View, st: &mut Editor) {
     let t = Tokens::get(ui.ctx());
     // A sidebar click this frame picked another source: shown next frame.
@@ -543,7 +550,7 @@ fn table(app: &mut FigApp, ui: &mut Ui, view: &View, st: &mut Editor) {
             .frame(egui::Frame::NONE)
             .hint_text(tr("Search"))
             .font(regular(11.0))
-            .vertical_align(egui::Align::Center),
+            .align(egui::Align2::LEFT_CENTER),
     );
     crate::widgets::select_all_on_focus(ui, &r, &st.query);
     let note = Rect::from_min_max(pos2(field.max.x + 16.0, sr.min.y + 8.0), pos2(sr.max.x - 16.0, sr.max.y - 8.0));
@@ -594,6 +601,8 @@ fn table(app: &mut FigApp, ui: &mut Ui, view: &View, st: &mut Editor) {
     });
 }
 
+/// Draw a collection's mode header row with rename, duplicate, reorder and delete actions
+/// and an add-mode button when the collection is editable and not extended.
 fn header_row(app: &mut FigApp, ui: &mut Ui, view: &View, coll: &Collection, st: &mut Editor, width: f32) {
     let t = Tokens::get(ui.ctx());
     // An extended collection has the modes of the one it extends.
@@ -615,7 +624,7 @@ fn header_row(app: &mut FigApp, ui: &mut Ui, view: &View, coll: &Collection, st:
             ui.painter().with_clip_rect(cell).text(name_pos, Align2::LEFT_CENTER, &m.name, regular(11.0), t.text_secondary);
             continue;
         }
-        let resp = ui.interact(cell, Id::new(("vars_mode", &m.id)), Sense::click());
+        let resp = ui.interact(cell, Id::unique(("vars_mode", &m.id)), Sense::click());
         if resp.hovered() {
             ui.painter().rect_filled(cell, CornerRadius::same(4), t.hover);
         }
@@ -658,7 +667,7 @@ fn header_row(app: &mut FigApp, ui: &mut Ui, view: &View, coll: &Collection, st:
     if editable
         && widgets::icon_button_at(
             ui,
-            Id::new("vars_add_mode"),
+            Id::unique("vars_add_mode"),
             Rect::from_center_size(pos2(x + 14.0, r.center().y), vec2(24.0, 24.0)),
             Icon::Plus,
             tr("Add mode"),
@@ -773,7 +782,7 @@ fn value_cell(app: &mut FigApp, ui: &mut Ui, view: &View, v: &Variable, coll: &C
     let t = Tokens::get(ui.ctx());
     let Some(val) = v.values.get(mode) else { return };
     let editable = view.editable();
-    let id = Id::new(("var_cell", &v.id, mode));
+    let id = Id::unique(("var_cell", &v.id, mode));
     // The value editor leaves room for the alias button (and in extended collections an
     // override's reset button, so the column stays even).
     let overridden = v.overrides.contains(mode);
@@ -937,7 +946,7 @@ fn details(app: &mut FigApp, ctx: &Context, vars: &Variables, st: &mut Editor) {
     let t = Tokens::get(ctx);
     let mut open = true;
     egui::Window::new(tr("Edit variable"))
-        .id(Id::new("variable_details"))
+        .id(Id::unique("variable_details"))
         .open(&mut open)
         .collapsible(false)
         .resizable(false)
@@ -946,12 +955,12 @@ fn details(app: &mut FigApp, ctx: &Context, vars: &Variables, st: &mut Editor) {
         .show(ctx, |ui| {
             ui.set_width(260.0);
             widgets::label(ui, tr("Name"), t.text_secondary);
-            if let Some(n) = widgets::text_field(ui, Id::new(("var_detail_name", &v.id)), &v.name, 260.0, "") {
+            if let Some(n) = widgets::text_field(ui, Id::unique(("var_detail_name", &v.id)), &v.name, 260.0, "") {
                 app.run("variable.update", json!({"variable": v.id, "name": n}));
             }
             ui.add_space(6.0);
             widgets::label(ui, tr("Description"), t.text_secondary);
-            if let Some(d) = widgets::text_field(ui, Id::new(("var_detail_desc", &v.id)), &v.description, 260.0, tr("What it's for")) {
+            if let Some(d) = widgets::text_field(ui, Id::unique(("var_detail_desc", &v.id)), &v.description, 260.0, tr("What it's for")) {
                 app.run("variable.update", json!({"variable": v.id, "description": d}));
             }
             ui.add_space(6.0);
@@ -966,7 +975,7 @@ fn details(app: &mut FigApp, ctx: &Context, vars: &Variables, st: &mut Editor) {
                     let (lr, _) = ui.allocate_exact_size(vec2(60.0, 24.0), Sense::hover());
                     ui.painter().text(lr.left_center(), Align2::LEFT_CENTER, tr(label), regular(11.0), t.text);
                     let cur = v.code_syntax.get(key).map_or("", String::as_str);
-                    if let Some(n) = widgets::text_field_named(ui, Id::new(("var_detail_code", key, &v.id)), cur, 192.0, tr(label)) {
+                    if let Some(n) = widgets::text_field_named(ui, Id::unique(("var_detail_code", key, &v.id)), cur, 192.0, tr(label)) {
                         app.run("variable.update", json!({"variable": v.id, "codeSyntax": {key: n}}));
                     }
                 });

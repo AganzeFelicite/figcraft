@@ -43,7 +43,7 @@ fn chars(text: &str) -> Kv<'static> {
 fn rest(nodes: Vec<Kv<'static>>) -> Value {
     let base = vec![node(1, "DOCUMENT", "Document", None, vec![]), node(2, "CANVAS", "Page", Some(1), vec![])];
     let message = object(vec![("nodeChanges", Kv::Array(base.into_iter().chain(nodes).collect()))]);
-    super::map::to_rest(&message, "Synthetic text").0
+    super::map::to_rest(&message, "Synthetic text", crate::rest::MAX_NODES).0
 }
 
 fn import(value: &Value) -> Document {

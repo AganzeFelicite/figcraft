@@ -19,7 +19,21 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!("align.bottom", "Align bottom", "{ids?}", true, |s, p| align(s, p, Al::Bottom)),
         spec!("distribute.horizontal", "Distribute horizontal spacing", "{ids?, spacing?}", true, |s, p| distribute(s, p, true)),
         spec!("distribute.vertical", "Distribute vertical spacing", "{ids?, spacing?}", true, |s, p| distribute(s, p, false)),
+        spec!(
+            "arrange.spacing",
+            "Spacing",
+            "{ids?, horizontal?, vertical?, fromGesture?} (page units; fromGesture uses the interaction snapshot)",
+            true,
+            spacing
+        ),
         spec!("arrange.tidy", "Tidy up", "{ids?, spacing?}", true, tidy),
+        spec!(
+            "arrange.reorder",
+            "Reorder selection",
+            "{ids?, source, target, swap?, fromGesture?} (insert at target's visual slot; no hierarchy changes)",
+            true,
+            reorder
+        ),
         spec!("arrange.packH", "Pack horizontal", "{ids?}", true, |s, p| pack(s, p, true)),
         spec!("arrange.packV", "Pack vertical", "{ids?}", true, |s, p| pack(s, p, false)),
         spec!("arrange.roundToPixels", "Round to pixels", "{ids?}", true, round_px),
@@ -192,8 +206,9 @@ fn distribute(s: &mut Session, p: &Value, horizontal: bool) -> Result<Value> {
     let mut items: Vec<(NodeId, Rect)> = ids.iter().filter_map(|i| doc.world_bounds(*i).map(|b| (*i, b))).collect();
     items.sort_by(|a, b| if horizontal { a.1.x0.total_cmp(&b.1.x0) } else { a.1.y0.total_cmp(&b.1.y0) });
     let total: f64 = items.iter().map(|(_, b)| if horizontal { b.width() } else { b.height() }).sum();
-    let (Some(first), Some(last)) = (items.first(), items.last()) else { return ok() };
-    let span = if horizontal { last.1.x1 - first.1.x0 } else { last.1.y1 - first.1.y0 };
+    let Some(first) = items.first() else { return ok() };
+    let end = items.iter().map(|(_, b)| if horizontal { b.x1 } else { b.y1 }).fold(f64::MIN, f64::max);
+    let span = if horizontal { end - first.1.x0 } else { end - first.1.y0 };
     let gap = num(p, "spacing").unwrap_or((span - total) / (items.len().saturating_sub(1).max(1)) as f64);
     let mut pos = if horizontal { first.1.x0 } else { first.1.y0 };
     for (i, b) in items.clone() {
@@ -480,9 +495,15 @@ pub fn scale_node(doc: &mut Document, id: NodeId, k: f64) -> Result<()> {
             t.paragraph_spacing *= k;
             t.paragraph_indent *= k;
             t.list_spacing *= k;
+            if let Some(tp) = &mut t.path {
+                tp.scale(k, k);
+            }
         }
         if let NodeKind::Vector { network } = &mut n.kind {
             network.scale(k, k);
+            for v in &mut network.vertices {
+                v.radius *= k;
+            }
         }
         n.width *= k;
         n.height *= k;
@@ -521,6 +542,7 @@ pub(crate) fn resize_cmd(s: &mut Session, p: &Value) -> Result<Value> {
     let (col, row) = string(p, "anchor").and_then(|a| crate::tools::anchor_of(&a)).unwrap_or((0, 0));
     let (ax, ay) = (f64::from(col) / 2.0, f64::from(row) / 2.0);
     let doc = s.doc_mut()?;
+    let before = super::styles::bound_before(doc, &ids);
     for i in ids {
         let n = doc.get(i)?;
         let (ow, oh) = (n.width, n.height);
@@ -540,9 +562,106 @@ pub(crate) fn resize_cmd(s: &mut Session, p: &Value) -> Result<Value> {
             n.child_layout.sizing_v = Sizing::Fixed;
         }
         if let NodeKind::Text(t) = &mut n.kind {
-            t.auto_resize = if num(p, "height").is_some() { TextAutoResize::None } else { TextAutoResize::Height };
+            if num(p, "height").is_some() {
+                t.fix_size(num(p, "width").is_some(), true);
+            } else if t.auto_resize != TextAutoResize::Truncate {
+                t.auto_resize = TextAutoResize::Height;
+            }
         }
         super::props::restore_worlds(doc, &kept)?;
+    }
+    super::styles::detach_edited(doc, &before);
+    ok()
+}
+
+/// Reorder visual slots without rebuilding or reparenting layers.
+fn reorder(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "arrange.reorder";
+    let ids = req_targets(cmd, s, p)?;
+    let source = req_id(cmd, p, "source")?;
+    let target = req_id(cmd, p, "target")?;
+    let ds = s.ds()?;
+    let base = ds.interaction.as_ref().filter(|_| boolean(p, "fromGesture") == Some(true)).map(|i| i.doc.clone()).unwrap_or_else(|| ds.doc.clone());
+    let layout =
+        crate::selection_reorder::ReorderLayout::new(&base, &ids).ok_or_else(|| bad(cmd, "select a regular row, column or complete aligned grid"))?;
+    let positions = layout
+        .positions(source, target, boolean(p, "swap") == Some(true))
+        .ok_or_else(|| bad(cmd, "source and target must belong to the selection"))?;
+    // Validate every delta before editing; absolute targets always come from the gesture's
+    // snapshot so crossing several slots and returning to the start does not accumulate edits.
+    let doc = s.doc()?;
+    let mut moves = Vec::new();
+    for (id, at) in positions {
+        let now = doc.world_bounds(id).ok_or_else(|| bad(cmd, "layer is no longer available"))?;
+        let (dx, dy) = (at.x - now.x0, at.y - now.y0);
+        if !dx.is_finite() || !dy.is_finite() {
+            return Err(bad(cmd, "non-finite reorder result"));
+        }
+        if dx.abs() > 1e-9 || dy.abs() > 1e-9 {
+            let node = doc.get(id)?;
+            let parent = node.parent.map(|p| doc.world_transform(p)).unwrap_or(Affine::IDENTITY);
+            let transform = parent.inverse() * Affine::translate((dx, dy)) * parent * node.transform;
+            if !transform.as_coeffs().iter().all(|v| v.is_finite()) {
+                return Err(bad(cmd, "non-finite local transform"));
+            }
+            moves.push((id, dx, dy));
+        }
+    }
+    if !moves.is_empty() {
+        let doc = s.doc_mut()?;
+        for (id, dx, dy) in moves {
+            move_world(doc, id, dx, dy)?;
+        }
+    }
+    ok()
+}
+
+/// Set the distances between smart-selection tracks without rebuilding/reparenting the layers.
+fn spacing(s: &mut Session, p: &Value) -> Result<Value> {
+    let ids = req_targets("arrange.spacing", s, p)?;
+    // A scrub is absolute from the interaction snapshot, even if tracks overlap or cross.
+    let ds = s.ds()?;
+    let base = ds.interaction.as_ref().filter(|_| boolean(p, "fromGesture") == Some(true)).map(|i| i.doc.clone()).unwrap_or_else(|| ds.doc.clone());
+    let layout = crate::selection_spacing::selection_spacing(&base, &ids);
+    let mut offsets = std::collections::BTreeMap::<NodeId, (Option<f64>, Option<f64>)>::new();
+    let mut any = false;
+    for (key, axis, vertical) in [("horizontal", &layout.horizontal, false), ("vertical", &layout.vertical, true)] {
+        if get(p, key).is_none() {
+            continue;
+        }
+        let value = req_num("arrange.spacing", p, key)?;
+        if value.abs() > 1_000_000.0 {
+            return Err(bad("arrange.spacing", "spacing out of range"));
+        }
+        let axis = axis.as_ref().ok_or_else(|| bad("arrange.spacing", "selection has no spacing on this axis"))?;
+        any = true;
+        for (id, delta) in axis.offsets(value) {
+            if !delta.is_finite() {
+                return Err(bad("arrange.spacing", "non-finite spacing result"));
+            }
+            let pair = offsets.entry(id).or_default();
+            if vertical {
+                pair.1 = Some(delta);
+            } else {
+                pair.0 = Some(delta);
+            }
+        }
+    }
+    if !any {
+        return Err(bad("arrange.spacing", "pass horizontal or vertical spacing"));
+    }
+    let doc = s.doc_mut()?;
+    let mut moves = Vec::new();
+    for (id, (dx, dy)) in offsets {
+        let (Some(before), Some(now)) = (base.world_bounds(id), doc.world_bounds(id)) else { continue };
+        let (dx, dy) = (dx.map_or(0.0, |d| before.x0 + d - now.x0), dy.map_or(0.0, |d| before.y0 + d - now.y0));
+        if !dx.is_finite() || !dy.is_finite() {
+            return Err(bad("arrange.spacing", "non-finite spacing result"));
+        }
+        moves.push((id, dx, dy));
+    }
+    for (id, dx, dy) in moves {
+        move_world(doc, id, dx, dy)?;
     }
     ok()
 }
