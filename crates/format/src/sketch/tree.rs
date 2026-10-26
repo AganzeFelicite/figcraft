@@ -259,13 +259,16 @@ pub(crate) fn layer(cx: &mut Cx, l: &Value, parent: Affine, depth: usize, root: 
         _ => {}
     }
     styles(cx, l, w, h, &mut node);
-    // A bitmap's own image lies under its style's fills.
+    // A bitmap's own image lies under its style's fills; its fills then aren't a shared style's.
     if let Some(paint) = bitmap {
         let mut fills = vec![paint];
         if let Some(Value::Array(f)) = node.remove("fills") {
             fills.extend(f);
         }
         node.insert("fills".into(), Value::Array(fills));
+        if let Some(styles) = node.get_mut("styles").and_then(Value::as_object_mut) {
+            styles.remove("fill");
+        }
     }
     extras(cx, l, h, &mut node);
     style_corners(l, &mut node);

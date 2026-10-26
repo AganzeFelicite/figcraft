@@ -430,21 +430,6 @@ fn apply(
                     f.insert("fillType".into(), json!(0));
                     f.insert("color".into(), c.clone());
                 }
-                // An image override on a shape: its top image fill's image.
-                if let Some(img) = get("image").filter(|v| v.get("_ref").is_some())
-                    && let Some(f) = l
-                        .get_mut("style")
-                        .and_then(|s| s.get_mut("fills"))
-                        .and_then(Value::as_array_mut)
-                        .and_then(|f| {
-                            f.iter_mut().rev().find(|p| {
-                                p.get("fillType").and_then(Value::as_i64) == Some(4) && p.get("isEnabled").and_then(Value::as_bool) != Some(false)
-                            })
-                        })
-                        .and_then(Value::as_object_mut)
-                {
-                    f.insert("image".into(), img.clone());
-                }
             }
         }
         for (prop, text) in [("layerStyle", false), ("textStyle", true)] {
@@ -467,6 +452,23 @@ fn apply(
             if let Some(m) = l.as_object_mut() {
                 m.insert("style".into(), style);
             }
+        }
+        // An image override on a shape: its top image fill's image (after a layer style override,
+        // which would replace the fills).
+        if str_field(l, "_class") != Some("bitmap")
+            && let Some(img) = get("image").filter(|v| v.get("_ref").is_some())
+            && let Some(f) = l
+                .get_mut("style")
+                .and_then(|s| s.get_mut("fills"))
+                .and_then(Value::as_array_mut)
+                .and_then(|f| {
+                    f.iter_mut()
+                        .rev()
+                        .find(|p| p.get("fillType").and_then(Value::as_i64) == Some(4) && p.get("isEnabled").and_then(Value::as_bool) != Some(false))
+                })
+                .and_then(Value::as_object_mut)
+        {
+            f.insert("image".into(), img.clone());
         }
         if let Some(kids) = l.get_mut("layers").and_then(Value::as_array_mut) {
             apply(kids, ov, nested, shared, symbols, depth + 1, budget);

@@ -367,12 +367,25 @@ fn linear_gradients_are_square_in_pixels() {
 
 // Rules below were read off Sketch's own renders (sketchtool) of files built for each case.
 
-/// Sketch's Gaussian blur radius is the blur's standard deviation; FigCraft's radius is twice it.
+/// Sketch's blur radius is the blur's standard deviation (Gaussian, background and motion blurs);
+/// FigCraft's radius is twice it. A zoom blur stays a plain blur of half its radius.
 #[test]
-fn layer_blur_radius_doubles() {
-    let (doc, _) = open(vec![styled(r("Blurred"), "blur", json!({"_class": "blur", "isEnabled": true, "radius": 6, "type": 0}))]);
-    let EffectKind::LayerBlur(b) = &node(&doc, "Blurred").effects[0].kind else { panic!("no layer blur") };
-    assert_eq!(b.radius, 12.0);
+fn blur_radii_are_deviations() {
+    let blur = |ty: i64| json!({"_class": "blur", "isEnabled": true, "radius": 6, "type": ty});
+    let (doc, _) = open(vec![
+        styled(r("Gaussian"), "blur", blur(0)),
+        styled(r("Motion"), "blur", blur(1)),
+        styled(r("Zoom"), "blur", blur(2)),
+        styled(r("Background"), "blur", blur(3)),
+    ]);
+    let radius = |name: &str| match &node(&doc, name).effects[0].kind {
+        EffectKind::LayerBlur(b) | EffectKind::BackgroundBlur(b) => b.radius,
+        other => panic!("{name}: {other:?}"),
+    };
+    assert_eq!(radius("Gaussian"), 12.0);
+    assert_eq!(radius("Motion"), 12.0);
+    assert_eq!(radius("Zoom"), 3.0);
+    assert_eq!(radius("Background"), 12.0);
 }
 
 /// Sketch's colour controls scale by the contrast about mid-grey, then add the brightness; the
@@ -384,7 +397,7 @@ fn bitmap_brightness_adds_after_contrast() {
         image::RgbaImage::new(2, 2).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
         out
     };
-    for (brightness, contrast) in [(-0.24, 1.0), (0.2, 1.0), (-0.2, 1.3), (0.1, 0.7)] {
+    for (brightness, contrast) in [(-0.24, 1.0), (0.2, 1.0), (-0.2, 1.3), (0.1, 0.7), (-0.75, 1.0), (0.45, 1.0)] {
         let mut bitmap = r("Photo");
         bitmap["_class"] = json!("bitmap");
         bitmap["image"] = json!({"_class": "MSJSONFileReference", "_ref": "images/a.png"});
@@ -393,6 +406,11 @@ fn bitmap_brightness_adds_after_contrast() {
         let (doc, _) = open_doc(document(&["P"]), vec![bitmap], &[("images/a.png", &png)]);
         let PaintKind::Image(img) = &node(&doc, "Photo").fills[0].kind else { panic!("no image") };
         let (e, c) = (2f64.powf(f64::from(img.filters.exposure) * 2.0), 1.0 + f64::from(img.filters.contrast));
+        // Past FigCraft's ranges the slope stays exact and only the offset gives.
+        assert!((e * c - contrast).abs() < 1e-4, "{brightness} {contrast}: slope {}", e * c);
+        if !(-0.5..=0.375).contains(&brightness) {
+            continue;
+        }
         for v in [0.1, 0.4, 0.6, 0.9] {
             let figcraft = (v * e - 0.5) * c + 0.5;
             let sketch = (v - 0.5) * contrast + 0.5 + brightness;

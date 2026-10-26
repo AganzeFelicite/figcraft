@@ -72,10 +72,11 @@ fn paint(cx: &mut Cx, f: &Value, w: f64, h: f64) -> Option<Value> {
     let mut p = match f.get("fillType").and_then(Value::as_i64).unwrap_or(0) {
         0 => json!({"type": "SOLID", "color": f.get("color").and_then(color).unwrap_or_else(|| json!({"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0}))}),
         1 => {
-            if matches!(f.get("gradient").and_then(|g| g.get("colorInterpolation")).and_then(Value::as_i64), Some(1 | 2)) {
+            let (g, resampled) = gradient(f.get("gradient")?, w, h)?;
+            if resampled {
                 cx.warn("gradients mixed in OKLab or OKLCH became sRGB gradients with stops along the same colours");
             }
-            gradient(f.get("gradient")?, w, h)?
+            g
         }
         4 => {
             let Some(r) = f.get("image").and_then(|i| i.get("_ref")).and_then(Value::as_str) else {
@@ -126,7 +127,8 @@ fn paint(cx: &mut Cx, f: &Value, w: f64, h: f64) -> Option<Value> {
 
 /// A gradient fill: `from` and `to` in 0–1 of the layer; a radial gradient's `elipseLength` is its
 /// width across the main axis as a share of the main axis, measured in pixels.
-fn gradient(g: &Value, w: f64, h: f64) -> Option<Value> {
+/// Also whether its stops were resampled from OKLab or OKLCH.
+fn gradient(g: &Value, w: f64, h: f64) -> Option<(Value, bool)> {
     let point = |k: &str| g.get(k).and_then(Value::as_str).and_then(parse_point);
     let (from, to) = (point("from").unwrap_or((0.5, 0.0)), point("to").unwrap_or((0.5, 1.0)));
     let stops: Vec<Value> = list(g, "stops")
@@ -135,9 +137,9 @@ fn gradient(g: &Value, w: f64, h: f64) -> Option<Value> {
         .collect();
     // `colorInterpolation` 1 mixes in OKLab, 2 in OKLCH (the shorter way round the hue); FigCraft
     // mixes in sRGB, so stops in between carry the curve.
-    let stops = match g.get("colorInterpolation").and_then(Value::as_i64) {
-        Some(mode @ (1 | 2)) => oklab::resample(&stops, mode == 2),
-        _ => stops,
+    let (stops, resampled) = match g.get("colorInterpolation").and_then(Value::as_i64) {
+        Some(mode @ (1 | 2)) => (oklab::resample(&stops, mode == 2), true),
+        _ => (stops, false),
     };
     let (ty, handles) = match g.get("gradientType").and_then(Value::as_i64).unwrap_or(0) {
         1 => {
@@ -155,7 +157,7 @@ fn gradient(g: &Value, w: f64, h: f64) -> Option<Value> {
             ("GRADIENT_LINEAR", json!([pt(from), pt(to), pt(across)]))
         }
     };
-    Some(json!({"type": ty, "gradientHandlePositions": handles, "gradientStops": stops}))
+    Some((json!({"type": ty, "gradientHandlePositions": handles, "gradientStops": stops}), resampled))
 }
 
 fn pt((x, y): (f64, f64)) -> Value {
@@ -271,10 +273,12 @@ pub(crate) fn effects(cx: &mut Cx, style: &Value) -> Vec<Value> {
     let many = style.get("blurs").and_then(Value::as_array).map(Vec::as_slice).unwrap_or_default().iter().take(MAX_LIST);
     for b in one.chain(many).filter(|b| b.get("isEnabled").and_then(Value::as_bool) == Some(true)) {
         let radius = num(b, "radius").unwrap_or(0.0).clamp(0.0, 1e6);
+        // Sketch's blur radius is the blur's standard deviation (Gaussian, background and motion
+        // blurs alike); FigCraft's is twice it.
+        let deviation = radius * 2.0;
         match b.get("type").and_then(Value::as_i64).unwrap_or(0) {
-            // Sketch's Gaussian radius is the blur's standard deviation; FigCraft's is twice it.
-            0 => out.push(json!({"type": "LAYER_BLUR", "visible": true, "radius": radius * 2.0})),
-            3 => out.push(background_blur(b, radius)),
+            0 => out.push(json!({"type": "LAYER_BLUR", "visible": true, "radius": deviation})),
+            3 => out.push(background_blur(b, deviation)),
             4 => out.push(json!({
                 "type": "GLASS",
                 "visible": true,
@@ -282,10 +286,11 @@ pub(crate) fn effects(cx: &mut Cx, style: &Value) -> Vec<Value> {
                 "refraction": num(b, "distortion").unwrap_or(0.5).clamp(0.0, 1.0),
                 "depth": num(b, "depth").unwrap_or(0.5).clamp(0.0, 1.0),
             })),
-            _ => {
-                // Motion and zoom blurs: a plain blur of half the radius softens about as much.
+            kind => {
+                // A motion blur softens an edge across it as much as a Gaussian one of the same
+                // radius; a zoom blur about as much as a plain blur of half its radius.
                 cx.warn("motion and zoom blurs were drawn as plain blurs");
-                out.push(json!({"type": "LAYER_BLUR", "visible": true, "radius": radius / 2.0}));
+                out.push(json!({"type": "LAYER_BLUR", "visible": true, "radius": if kind == 1 { deviation } else { radius / 2.0 }}));
             }
         }
     }
@@ -328,8 +333,8 @@ pub(crate) fn color_controls(cx: &mut Cx, style: Option<&Value>) -> Option<Value
     // The two agree for c = C - 2b and E = C / c within FigCraft's ranges (c in 0..=2, E in
     // 1/4..=4); past them the slope C stays exact and the offset gives.
     let (b, contrast) = (get("brightness", 0.0).clamp(-1.0, 1.0), get("contrast", 1.0).clamp(0.0, 2.0));
-    let wanted = contrast - 2.0 * b;
-    let e = if wanted > 1e-6 { (contrast / wanted).clamp(0.25, 4.0) } else { 4.0 };
+    let c = (contrast - 2.0 * b).clamp(1e-6, 2.0);
+    let e = (contrast / c).clamp(0.25, 4.0);
     let c = (contrast / e).clamp(0.0, 2.0);
     Some(json!({
         "saturation": (get("saturation", 1.0) - 1.0).clamp(-1.0, 1.0),

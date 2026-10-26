@@ -106,7 +106,7 @@ fn item(src: &Value, m: &mut JsonMap<String, Value>, row: bool, stretch: bool) {
     if main == "FILL" {
         m.insert("layoutGrow".into(), json!(1));
     }
-    if cross == "FILL" || stretch {
+    if cross == "FILL" {
         m.insert("layoutAlign".into(), json!("STRETCH"));
     }
 }

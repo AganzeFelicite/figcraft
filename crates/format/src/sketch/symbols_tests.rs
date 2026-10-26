@@ -355,6 +355,43 @@ fn image_overrides_on_shapes() {
     assert_ne!(shown[1], master_images[1], "the top fill takes the override");
 }
 
+/// An image override still shows when the same layer's style is overridden too (the style comes
+/// first, then the image).
+#[test]
+fn image_overrides_survive_layer_style_overrides() {
+    let pattern = |r: &str| {
+        json!({"_class": "fill", "isEnabled": true, "fillType": 4, "patternFillType": 1, "patternTileScale": 1,
+            "image": {"_class": "MSJSONFileReference", "_ref_class": "MSImageData", "_ref": r}})
+    };
+    let mut d = document(&["P", "S"]);
+    d["layerStyles"]["objects"] = json!([{"_class": "sharedStyle", "do_objectID": "LS", "name": "Round",
+        "value": {"_class": "style", "fills": [pattern("images/a.png")], "borders": []}}]);
+    let avatar = styled(rect("Avatar", 0.0, 0.0, 20.0, 20.0), "fills", json!([pattern("images/a.png")]));
+    let over = json!({"_class": "MSJSONFileReference", "_ref_class": "MSImageData", "_ref": "images/c.png"});
+    let png = |n: u8| -> Vec<u8> { vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, n] };
+    let (a, c) = (png(1), png(3));
+    let z = sketch_zip(
+        "2026.3.1",
+        196,
+        d,
+        &[
+            page("P", "Page", vec![instance("I", "S", 0.0, 0.0, 20.0, 20.0, &[("Avatar_layerStyle", json!("LS")), ("Avatar_image", over)])]),
+            page("S", "Symbols", vec![master("M", "S", "Contact", 20.0, 20.0, vec![avatar])]),
+        ],
+        &[("images/a.png", &a), ("images/c.png", &c)],
+    );
+    let (doc, _) = import(&z, "f").unwrap();
+    let (inst, main) = instance_of(&doc, "I");
+    let image = |n: &Node| {
+        n.fills.iter().find_map(|p| match &p.kind {
+            figcraft_doc::color::PaintKind::Image(i) => Some(i.image.clone()),
+            _ => None,
+        })
+    };
+    let (shown, original) = (image(inside(&doc, inst, "Avatar")), image(inside(&doc, main, "Avatar")));
+    assert!(shown.is_some() && shown != original, "{shown:?} {original:?}");
+}
+
 /// How Sketch lays out a resized instance's layers, measured on its renders: a master of 200×100
 /// with a 100×40 rectangle at (20, 30), shown at 320×60.
 #[test]

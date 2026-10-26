@@ -362,7 +362,8 @@ fn glass_and_progressive_blurs() {
     assert!(matches!(node(&doc, "Glass").effects[0].kind, figcraft_doc::EffectKind::Glass(_)), "{warnings:?}");
     let figcraft_doc::EffectKind::BackgroundBlur(b) = &node(&doc, "Prog").effects[0].kind else { panic!("not a background blur") };
     assert_eq!(b.blur_type, figcraft_doc::BlurType::Progressive);
-    assert_eq!((b.start_radius, b.radius), (24.0, 0.0));
+    // Sketch's radius is the blur's standard deviation; FigCraft's twice it.
+    assert_eq!((b.start_radius, b.radius), (48.0, 0.0));
 }
 
 /// Angled (2), inside-square (3) and inside-arc (4) corners make the rectangle a path of that outline.
