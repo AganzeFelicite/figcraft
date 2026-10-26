@@ -91,7 +91,15 @@ fn item(src: &Value, m: &mut JsonMap<String, Value>, row: bool, stretch: bool) {
         Some(2) => "FILL",
         _ => "FIXED",
     };
-    let (h, v) = (sizing("horizontalSizing"), sizing("verticalSizing"));
+    let (mut h, mut v) = (sizing("horizontalSizing"), sizing("verticalSizing"));
+    // A stretching stack fills its items across, fixed and hugging ones too.
+    if stretch {
+        if row {
+            v = "FILL";
+        } else {
+            h = "FILL";
+        }
+    }
     m.insert("layoutSizingHorizontal".into(), json!(h));
     m.insert("layoutSizingVertical".into(), json!(v));
     let (main, cross) = if row { (h, v) } else { (v, h) };

@@ -232,6 +232,21 @@ pub(crate) fn shape_group(cx: &mut Cx, l: &Value, parent: Affine, depth: usize, 
     out
 }
 
+/// `node` (REST JSON) and the layers in it without strokes.
+fn unstroked(node: &mut Value, depth: usize) {
+    if depth > 64 {
+        return;
+    }
+    if let Some(m) = node.as_object_mut() {
+        m.remove("strokes");
+        if let Some(kids) = m.get_mut("children").and_then(Value::as_array_mut) {
+            for k in kids {
+                unstroked(k, depth + 1);
+            }
+        }
+    }
+}
+
 /// A shape group of one shape: that shape in the group's place, with its name and style.
 fn single(cx: &mut Cx, l: &Value, only: &Value, parent: Affine, world: Affine, depth: usize, root: bool) -> Option<Value> {
     let mut node = layer(cx, only, world, depth + 1, false)?;
@@ -300,6 +315,12 @@ fn combined(cx: &mut Cx, l: &Value, kids: &[Value], parent: Affine, world: Affin
         };
         if operands.is_empty() {
             continue;
+        }
+        // Sketch draws a shape group in the group's style only. Its operands' own borders go: a
+        // FigCraft operand with only a stroke gives its stroke's band, not its area.
+        let mut operands = operands;
+        for o in &mut operands {
+            unstroked(o, 0);
         }
         let this = run.first().map_or("UNION", |c| boolean_op(c));
         if i > 0 && this != op && chain.len() > 1 {

@@ -71,7 +71,12 @@ pub(crate) fn clear(node: &mut JsonMap<String, Value>) {
 fn paint(cx: &mut Cx, f: &Value, w: f64, h: f64) -> Option<Value> {
     let mut p = match f.get("fillType").and_then(Value::as_i64).unwrap_or(0) {
         0 => json!({"type": "SOLID", "color": f.get("color").and_then(color).unwrap_or_else(|| json!({"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0}))}),
-        1 => gradient(f.get("gradient")?, w, h)?,
+        1 => {
+            if matches!(f.get("gradient").and_then(|g| g.get("colorInterpolation")).and_then(Value::as_i64), Some(1 | 2)) {
+                cx.warn("gradients mixed in OKLab or OKLCH became sRGB gradients with stops along the same colours");
+            }
+            gradient(f.get("gradient")?, w, h)?
+        }
         4 => {
             let Some(r) = f.get("image").and_then(|i| i.get("_ref")).and_then(Value::as_str) else {
                 cx.warn("image fills stored inside the JSON were skipped");
@@ -128,6 +133,12 @@ fn gradient(g: &Value, w: f64, h: f64) -> Option<Value> {
         .iter()
         .filter_map(|s| Some(json!({"position": num(s, "position")?.clamp(0.0, 1.0), "color": s.get("color").and_then(color)?})))
         .collect();
+    // `colorInterpolation` 1 mixes in OKLab, 2 in OKLCH (the shorter way round the hue); FigCraft
+    // mixes in sRGB, so stops in between carry the curve.
+    let stops = match g.get("colorInterpolation").and_then(Value::as_i64) {
+        Some(mode @ (1 | 2)) => oklab::resample(&stops, mode == 2),
+        _ => stops,
+    };
     let (ty, handles) = match g.get("gradientType").and_then(Value::as_i64).unwrap_or(0) {
         1 => {
             let e = num(g, "elipseLength").filter(|e| *e > 0.0).unwrap_or(1.0);
@@ -261,7 +272,8 @@ pub(crate) fn effects(cx: &mut Cx, style: &Value) -> Vec<Value> {
     for b in one.chain(many).filter(|b| b.get("isEnabled").and_then(Value::as_bool) == Some(true)) {
         let radius = num(b, "radius").unwrap_or(0.0).clamp(0.0, 1e6);
         match b.get("type").and_then(Value::as_i64).unwrap_or(0) {
-            0 => out.push(json!({"type": "LAYER_BLUR", "visible": true, "radius": radius})),
+            // Sketch's Gaussian radius is the blur's standard deviation; FigCraft's is twice it.
+            0 => out.push(json!({"type": "LAYER_BLUR", "visible": true, "radius": radius * 2.0})),
             3 => out.push(background_blur(b, radius)),
             4 => out.push(json!({
                 "type": "GLASS",
@@ -311,10 +323,18 @@ pub(crate) fn color_controls(cx: &mut Cx, style: Option<&Value>) -> Option<Value
     if get("hue", 0.0).abs() > 1e-6 {
         cx.warn("hue changes of bitmaps were skipped");
     }
+    // Sketch scales about mid-grey by the contrast and then adds the brightness,
+    // (v - 0.5)·C + 0.5 + b; FigCraft multiplies by the exposure E first, (v·E - 0.5)·c + 0.5.
+    // The two agree for c = C - 2b and E = C / c within FigCraft's ranges (c in 0..=2, E in
+    // 1/4..=4); past them the slope C stays exact and the offset gives.
+    let (b, contrast) = (get("brightness", 0.0).clamp(-1.0, 1.0), get("contrast", 1.0).clamp(0.0, 2.0));
+    let wanted = contrast - 2.0 * b;
+    let e = if wanted > 1e-6 { (contrast / wanted).clamp(0.25, 4.0) } else { 4.0 };
+    let c = (contrast / e).clamp(0.0, 2.0);
     Some(json!({
         "saturation": (get("saturation", 1.0) - 1.0).clamp(-1.0, 1.0),
-        "contrast": (get("contrast", 1.0) - 1.0).clamp(-1.0, 1.0),
-        "exposure": get("brightness", 0.0).clamp(-1.0, 1.0),
+        "contrast": (c - 1.0).clamp(-1.0, 1.0),
+        "exposure": (e.log2() / 2.0).clamp(-1.0, 1.0),
     }))
 }
 
@@ -431,4 +451,102 @@ fn list<'v>(v: &'v Value, key: &str) -> &'v [Value] {
 
 fn num(v: &Value, key: &str) -> Option<f64> {
     v.get(key).and_then(Value::as_f64).filter(|x| x.is_finite())
+}
+
+/// Gradient stops mixed in OKLab or OKLCH, as sRGB stops close enough to follow the curve.
+mod oklab {
+    use serde_json::{Value, json};
+
+    /// Stops added between each pair.
+    const STEPS: usize = 16;
+    /// Most stops given back.
+    const MAX_STOPS: usize = 1024;
+
+    type Lab = [f64; 3];
+
+    fn lin(v: f64) -> f64 {
+        if v <= 0.04045 { v / 12.92 } else { ((v + 0.055) / 1.055).powf(2.4) }
+    }
+
+    fn enc(v: f64) -> f64 {
+        let v = v.max(0.0);
+        if v <= 0.003_130_8 { 12.92 * v } else { 1.055 * v.powf(1.0 / 2.4) - 0.055 }
+    }
+
+    fn to_lab([r, g, b]: [f64; 3]) -> Lab {
+        let (r, g, b) = (lin(r), lin(g), lin(b));
+        let l = (0.412_221_470_8 * r + 0.536_332_536_3 * g + 0.051_445_992_9 * b).cbrt();
+        let m = (0.211_903_498_2 * r + 0.680_699_545_1 * g + 0.107_396_956_6 * b).cbrt();
+        let s = (0.088_302_461_9 * r + 0.281_718_837_6 * g + 0.629_978_700_5 * b).cbrt();
+        [
+            0.210_454_255_3 * l + 0.793_617_785_0 * m - 0.004_072_046_8 * s,
+            1.977_998_495_1 * l - 2.428_592_205_0 * m + 0.450_593_709_9 * s,
+            0.025_904_037_1 * l + 0.782_771_766_2 * m - 0.808_675_766_0 * s,
+        ]
+    }
+
+    fn from_lab([l, a, b]: Lab) -> [f64; 3] {
+        let l_ = (l + 0.396_337_777_4 * a + 0.215_803_757_3 * b).powi(3);
+        let m_ = (l - 0.105_561_345_8 * a - 0.063_854_172_8 * b).powi(3);
+        let s_ = (l - 0.089_484_177_5 * a - 1.291_485_548_0 * b).powi(3);
+        [
+            enc(4.076_741_662_1 * l_ - 3.307_711_591_3 * m_ + 0.230_969_929_2 * s_),
+            enc(-1.268_438_004_6 * l_ + 2.609_757_401_1 * m_ - 0.341_319_396_5 * s_),
+            enc(-0.004_196_086_3 * l_ - 0.703_418_614_7 * m_ + 1.707_614_701_0 * s_),
+        ]
+        .map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 })
+    }
+
+    /// The colour `t` of the way from `a` to `b`; in OKLCH the hue turns the shorter way (a grey
+    /// end takes the other's hue).
+    fn mix(a: Lab, b: Lab, t: f64, lch: bool) -> Lab {
+        let lerp = |x: f64, y: f64| x + (y - x) * t;
+        if !lch {
+            return [lerp(a[0], b[0]), lerp(a[1], b[1]), lerp(a[2], b[2])];
+        }
+        let (ca, cb) = (a[1].hypot(a[2]), b[1].hypot(b[2]));
+        let (mut ha, mut hb) = (a[2].atan2(a[1]), b[2].atan2(b[1]));
+        if ca < 1e-4 {
+            ha = hb;
+        }
+        if cb < 1e-4 {
+            hb = ha;
+        }
+        let mut dh = hb - ha;
+        if dh > std::f64::consts::PI {
+            dh -= std::f64::consts::TAU;
+        } else if dh < -std::f64::consts::PI {
+            dh += std::f64::consts::TAU;
+        }
+        let (c, h) = (lerp(ca, cb), ha + dh * t);
+        [lerp(a[0], b[0]), c * h.cos(), c * h.sin()]
+    }
+
+    fn rgba(stop: &Value) -> Option<(f64, [f64; 3], f64)> {
+        let c = stop.get("color")?;
+        let n = |k: &str| c.get(k).and_then(Value::as_f64).filter(|v| v.is_finite());
+        Some((stop.get("position").and_then(Value::as_f64)?, [n("r")?, n("g")?, n("b")?], n("a").unwrap_or(1.0)))
+    }
+
+    pub(super) fn resample(stops: &[Value], lch: bool) -> Vec<Value> {
+        let mut parsed: Vec<(f64, [f64; 3], f64)> = stops.iter().filter_map(rgba).collect();
+        if parsed.len() != stops.len() || parsed.len() < 2 || parsed.len() * STEPS > MAX_STOPS {
+            return stops.to_vec();
+        }
+        parsed.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let stop = |pos: f64, [r, g, b]: [f64; 3], a: f64| json!({"position": pos, "color": {"r": r, "g": g, "b": b, "a": a}});
+        let mut out = Vec::new();
+        for pair in parsed.windows(2) {
+            let [(p0, c0, a0), (p1, c1, a1)] = pair else { continue };
+            let (l0, l1) = (to_lab(*c0), to_lab(*c1));
+            for k in 0..STEPS {
+                let t = k as f64 / STEPS as f64;
+                out.push(stop(p0 + (p1 - p0) * t, from_lab(mix(l0, l1, t, lch)), a0 + (a1 - a0) * t));
+            }
+        }
+        if let Some((p, c, a)) = parsed.last() {
+            out.push(stop(*p, *c, *a));
+        }
+        out
+    }
 }
