@@ -67,6 +67,15 @@ const MAX_JSON_TOTAL: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_JSON_TOTAL: u64 = 512 * 1024 * 1024;
 /// Largest image member read.
 const MAX_IMAGE: u64 = 256 * 1024 * 1024;
+/// Most bytes an image member may unpack to, per compressed byte (images are already compressed,
+/// a zero-filled one packs a thousand times), with a floor for small members.
+const MAX_IMAGE_RATIO: u64 = 100;
+const MIN_IMAGE_ALLOWANCE: u64 = 16 * 1024 * 1024;
+/// Most image bytes read from one file in all.
+#[cfg(not(target_pointer_width = "32"))]
+const MAX_IMAGE_TOTAL: u64 = 1024 * 1024 * 1024;
+#[cfg(target_pointer_width = "32")]
+const MAX_IMAGE_TOTAL: u64 = 256 * 1024 * 1024;
 /// Most pages read from one file.
 const MAX_PAGES: usize = 1000;
 
@@ -182,6 +191,8 @@ pub(crate) struct Archive<'b> {
     /// Problems met while reading (pages skipped).
     pub warnings: Vec<String>,
     zip: zip::ZipArchive<std::io::Cursor<&'b [u8]>>,
+    /// Image bytes read so far.
+    image_total: std::cell::Cell<u64>,
 }
 
 impl<'b> Archive<'b> {
@@ -234,7 +245,7 @@ impl<'b> Archive<'b> {
             warnings.push(format!("the file has more than {MAX_PAGES} pages; the rest were skipped"));
         }
         let version = meta.get("version").and_then(Value::as_u64).unwrap_or(0);
-        Ok(Archive { document, version, pages, warnings, zip: z })
+        Ok(Archive { document, version, pages, warnings, zip: z, image_total: std::cell::Cell::new(0) })
     }
 
     /// The bytes of the image a layer references (`images/<name>`).
@@ -245,7 +256,20 @@ impl<'b> Archive<'b> {
         }
         // A clone shares the parsed directory and the bytes; the resolver only has shared access.
         let mut z = self.zip.clone();
-        crate::read_member(&mut z, &format!("images/{name}"), MAX_IMAGE).ok()
+        let member = format!("images/{name}");
+        let (size, packed) = {
+            let f = z.by_name(&member).ok()?;
+            (f.size(), f.compressed_size())
+        };
+        let allowed = MAX_IMAGE
+            .min(packed.saturating_mul(MAX_IMAGE_RATIO).max(MIN_IMAGE_ALLOWANCE))
+            .min(MAX_IMAGE_TOTAL.saturating_sub(self.image_total.get()));
+        if size > allowed {
+            return None;
+        }
+        let data = crate::read_member(&mut z, &member, allowed).ok()?;
+        self.image_total.set(self.image_total.get() + data.len() as u64);
+        Some(data)
     }
 }
 
