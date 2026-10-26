@@ -1212,3 +1212,6 @@ fn dump_samples() {
         std::fs::write(format!("{out}/{stem}.rest.json"), serde_json::to_string_pretty(&rest).unwrap()).unwrap();
     }
 }
+
+#[path = "board_import_tests.rs"]
+mod board;

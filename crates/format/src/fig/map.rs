@@ -1024,13 +1024,78 @@ impl<'a> Mapper<'a> {
             }
         }
         if stand.is_some_and(|s| s.0 == "FRAME") {
-            kids.splice(0..0, self.shape_with_text(&mut o, &view, own, &rest_id));
-            kids.extend(self.inner_text(&o, &view, &rest_id, own == "STICKY"));
+            if let Some(snapshot) = self.board_snapshot(&mut o, &view, own, &rest_id, depth) {
+                kids.splice(0..0, snapshot);
+            } else {
+                kids.splice(0..0, self.shape_with_text(&mut o, &view, own, &rest_id));
+                kids.extend(self.inner_text(&o, &view, &rest_id, own == "STICKY"));
+            }
         }
         if !kids.is_empty() {
             o.insert("children".into(), Value::Array(kids));
         }
         Some(Value::Object(o))
+    }
+
+    /// FigJam notes and shapes keep their paints and text on generated template children,
+    /// not on the outer node. Keep the saved layout as ordinary editable layers (including a
+    /// note's author), without applying the background's opacity or transform to the wrapper.
+    fn board_snapshot(&mut self, o: &mut Obj, v: &View<'a>, own: &str, rest_id: &str, depth: usize) -> Option<Vec<Value>> {
+        if !matches!(own, "STICKY" | "SHAPE_WITH_TEXT") || v.get("nodeGenerationData").is_none() {
+            return None;
+        }
+        if v.get("derivedImmutableFrameData").and_then(|d| num(d, "version")) != Some(1.0) {
+            self.warn("note or shape generated layout is missing or unsupported; using its outer frame");
+            return None;
+        }
+        let mut children = Vec::new();
+        for local_id in 0..if own == "STICKY" { 3 } else { 2 } {
+            let style = generated_record(v, "nodeGenerationData", local_id);
+            let bounds = generated_record(v, "derivedImmutableFrameData", local_id);
+            let (Some(style), Some(bounds)) = (style, bounds) else {
+                if style.is_some() || bounds.is_some() {
+                    self.warn("note or shape generated child is missing its style or bounds; child skipped");
+                }
+                continue;
+            };
+            let child = View::of(style).with([bounds]);
+            let chars = own_text(&child);
+            if local_id != 0 && chars.is_none() {
+                continue;
+            }
+            if valid_size(child.get("size")).is_none() || child.transform().is_none() {
+                self.warn("note or shape generated child has invalid bounds; child skipped");
+                continue;
+            }
+            if self.count >= self.budget() || depth >= MAX_DEPTH {
+                self.warn("note or shape generated children exceed the layer or nesting limit; remaining children skipped");
+                break;
+            }
+            let mut layer = Obj::new();
+            let ty = if local_id == 0 { "RECTANGLE" } else { "TEXT" };
+            layer.insert("id".into(), json!(format!("{rest_id};generated{local_id}")));
+            layer.insert("type".into(), json!(ty));
+            layer.insert("name".into(), json!(chars.map_or_else(|| "Background".into(), |c| c.chars().take(40).collect::<String>())));
+            self.common(&mut layer, &child, ty, Affine::IDENTITY, None);
+            if local_id == 0 {
+                self.geometry(&mut layer, &child);
+                if layer.contains_key("fillGeometry") || layer.contains_key("strokeGeometry") || layer.contains_key("vectorNetworkRef") {
+                    layer.insert("type".into(), json!("VECTOR"));
+                } else if own == "SHAPE_WITH_TEXT" && !matches!(v.str("shapeWithTextType"), None | Some("SQUARE" | "ROUNDED_RECTANGLE")) {
+                    self.warn("shape generated outline is missing or damaged; using its rectangle");
+                }
+                o.insert("fills".into(), json!([]));
+                o.insert("strokes".into(), json!([]));
+            } else {
+                self.text(&mut layer, &child);
+                if let Some(Value::Object(style)) = layer.get_mut("style") {
+                    style.insert("textAutoResize".into(), json!("NONE"));
+                }
+            }
+            self.count += 1;
+            children.push(Value::Object(layer));
+        }
+        Some(children)
     }
 
     /// A non-rectangular shape-with-text's shape, as a vector under its frame (which gives up its
@@ -1149,7 +1214,7 @@ impl<'a> Mapper<'a> {
         {
             return false;
         }
-        let Some(line) = connector_record(v, "derivedImmutableFrameData", 0) else { return false };
+        let Some(line) = generated_record(v, "derivedImmutableFrameData", 0) else { return false };
         if line.get("transform").and_then(matrix).is_none() || valid_size(line.get("size")).is_none() {
             return false;
         }
@@ -1167,7 +1232,7 @@ impl<'a> Mapper<'a> {
             .and_then(|index| self.blobs.get(index as usize))
             .and_then(|blob| network::decode(blob))
             .is_some_and(|network| !network.segments.is_empty());
-        (geometry || network) && connector_record(v, "nodeGenerationData", 0).is_some()
+        (geometry || network) && generated_record(v, "nodeGenerationData", 0).is_some()
     }
 
     fn connector_snapshot_flatten(&mut self, out: &mut Obj, v: &View<'a>, rest_id: &str, space: Affine) {
@@ -1212,7 +1277,7 @@ impl<'a> Mapper<'a> {
 
     /// Build the saved vector child or flattened terminal connector from the same child-only view.
     fn connector_snapshot_vector(&mut self, v: &View<'a>, rest_id: &str, space: Affine, nested: bool) -> Option<Obj> {
-        let (Some(line), Some(line_style)) = (connector_record(v, "derivedImmutableFrameData", 0), connector_record(v, "nodeGenerationData", 0))
+        let (Some(line), Some(line_style)) = (generated_record(v, "derivedImmutableFrameData", 0), generated_record(v, "nodeGenerationData", 0))
         else {
             return None;
         };
@@ -1247,19 +1312,19 @@ impl<'a> Mapper<'a> {
         children.push(Value::Object(vector));
         self.count += 1;
 
-        let Some(text_frame) = connector_record(v, "derivedImmutableFrameData", 1) else {
+        let Some(text_frame) = generated_record(v, "derivedImmutableFrameData", 1) else {
             if connector_has_saved_label(v) {
                 self.warn("connector label was skipped: derived text bounds are missing");
             }
             return children;
         };
-        let Some(background) = connector_record(v, "derivedImmutableFrameData", 2) else {
+        let Some(background) = generated_record(v, "derivedImmutableFrameData", 2) else {
             if connector_has_saved_label(v) || valid_size(text_frame.get("size")).is_some_and(|(w, h)| w > 0.0 && h > 0.0) {
                 self.warn("connector label was skipped: derived background bounds are missing");
             }
             return children;
         };
-        let Some(text_style) = connector_record(v, "nodeGenerationData", 1) else {
+        let Some(text_style) = generated_record(v, "nodeGenerationData", 1) else {
             if valid_size(text_frame.get("size")).is_some_and(|(w, h)| w > 0.0 && h > 0.0) {
                 self.warn("connector label was skipped: text style data is missing");
             }
@@ -1291,7 +1356,7 @@ impl<'a> Mapper<'a> {
             return children;
         }
 
-        let Some(background_style) = connector_record(v, "nodeGenerationData", 2) else {
+        let Some(background_style) = generated_record(v, "nodeGenerationData", 2) else {
             self.warn("connector label background was skipped: style data is missing");
             self.add_connector_text(&mut children, rest_id, characters, text_size, composed_text_transform, &text_view);
             return children;
@@ -2539,8 +2604,8 @@ fn own_text<'a>(v: &View<'a>) -> Option<&'a str> {
     v.get("textData").and_then(|t| t.get("characters")).and_then(Kv::str).filter(|c| !c.trim().is_empty())
 }
 
-/// A generated connector child is identified by one exact template GUID, not its array position.
-fn connector_record<'a>(v: &View<'a>, field: &str, local_id: u32) -> Option<&'a Kv<'a>> {
+/// A generated child is identified by one exact template GUID, not its array position.
+fn generated_record<'a>(v: &View<'a>, field: &str, local_id: u32) -> Option<&'a Kv<'a>> {
     v.get(field)?.get("overrides")?.list().iter().find(|row| {
         row.get("guidPath").and_then(|path| path.get("guids")).map(Kv::list).is_some_and(|guids| {
             guids.len() == 1 && num(&guids[0], "sessionID") == Some(40_000_000.0) && num(&guids[0], "localID") == Some(f64::from(local_id))
@@ -2550,7 +2615,7 @@ fn connector_record<'a>(v: &View<'a>, field: &str, local_id: u32) -> Option<&'a 
 
 fn connector_has_saved_label(v: &View<'_>) -> bool {
     own_text(v).is_some()
-        || connector_record(v, "nodeGenerationData", 1)
+        || generated_record(v, "nodeGenerationData", 1)
             .and_then(|r| r.get("textData"))
             .and_then(|d| d.get("characters"))
             .and_then(Kv::str)
