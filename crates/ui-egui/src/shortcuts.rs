@@ -73,11 +73,6 @@ pub fn tip(label: &'static str, id: &str) -> &'static str {
     cached_tip(label, shortcut(id))
 }
 
-/// A tooltip naming a key ("Resources  ⇧I").
-pub fn key_tip(label: &'static str, key: &'static str) -> &'static str {
-    cached_tip(label, Some(key))
-}
-
 /// Panels ask for their tooltips every frame: each (label, key, platform) is built once.
 fn cached_tip(label: &'static str, key: Option<&'static str>) -> &'static str {
     type Entry = (Platform, &'static str, &'static str, &'static str);
