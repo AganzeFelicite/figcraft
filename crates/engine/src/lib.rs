@@ -482,6 +482,8 @@ mod tiff_tests;
 #[cfg(test)]
 mod transform_behaviour_tests;
 #[cfg(test)]
+mod variable_props_tests;
+#[cfg(test)]
 mod variable_tests;
 #[cfg(test)]
 mod variables_behaviour_tests;
