@@ -8,26 +8,22 @@ pub use crate::field_math::{Rel, Typed, eval, parse, stepped};
 use crate::i18n::tr;
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, regular, semibold};
+pub(crate) mod board_picker;
+pub mod colorpicker;
+pub mod field_math;
+pub mod font_preview;
+pub mod style_picker;
 
 pub const ROW_H: f32 = 32.0;
 pub const FIELD_H: f32 = 24.0;
 pub const PAD: f32 = 16.0;
 /// A section's right margin: 8. The panel's grid is `16 | 88 | 8 | 88 | 8 | 24 | 8`: a 240 pt
 /// panel, its content 16 in from the left and 8 from the right, two 88 pt columns, an 8 pt gutter
-/// between them and 8 + 24 + 8 for the buttons at a row's end. FigCraft's own, from the panel as it
-/// is drawn: the columns are equal, the buttons sit on the same 24 pt rhythm as the icon buttons
-/// the panel already has.
+/// between them and 8 + 24 + 8 for the buttons at a row's end. FigCraft's own: the columns are
+/// equal, and the buttons sit on the same 24 pt rhythm as the icon buttons the panel already has.
 pub const PAD_RIGHT: f32 = 8.0;
 /// Between the panel's grid columns.
 pub const GUTTER: f32 = 8.0;
-/// A field's inset before its label, and the room its value keeps at the field's end.
-const LEAD_PAD: f32 = 8.0;
-const VALUE_W: f32 = 32.0;
-/// The panel's type, in points: a caption under a field row, the labels and values in the rows, and
-/// the type of the selection above them. Two points apart, so 12 sits halfway between 10 and 14.
-pub const CAPTION_PT: f32 = 10.0;
-pub const TEXT_PT: f32 = 12.0;
-pub const TITLE_PT: f32 = 14.0;
 
 /// What a numeric field's label shows: text ("X") or an icon with the field's name (for screen
 /// readers: an icon doesn't say which property it is).
@@ -103,7 +99,7 @@ impl Edit {
 /// The nudge amounts the arrow keys step pixel fields by (plain, with Shift): the preferences'
 /// small and big nudge. Set once a frame.
 pub fn set_nudge(ctx: &egui::Context, small: f64, big: f64) {
-    ctx.data_mut(|d| d.insert_temp(Id::new("field_nudge"), (small, big)));
+    ctx.data_mut(|d| d.insert_temp(Id::unique("field_nudge"), (small, big)));
 }
 
 /// What an arrow key (with Shift: `.1`) and a pixel of scrubbing step a field by: a field in
@@ -111,7 +107,7 @@ pub fn set_nudge(ctx: &egui::Context, small: f64, big: f64) {
 /// its own step and ten of them (1% and 10% of opacity, 1° and 10° of rotation).
 fn key_steps(ctx: &egui::Context, suffix: &str, step: f64) -> (f64, f64) {
     let nudge =
-        ctx.data(|d| d.get_temp::<(f64, f64)>(Id::new("field_nudge"))).filter(|(s, b)| s.is_finite() && b.is_finite() && *s > 0.0 && *b > 0.0);
+        ctx.data(|d| d.get_temp::<(f64, f64)>(Id::unique("field_nudge"))).filter(|(s, b)| s.is_finite() && b.is_finite() && *s > 0.0 && *b > 0.0);
     match nudge {
         Some(n) if suffix.is_empty() && step == 1.0 => n,
         _ => (step, step * 10.0),
@@ -219,6 +215,29 @@ pub fn number_field_bindable(
     number_field_impl(ui, id, lead, value, suffix, width, step, binding, empty)
 }
 
+/// A save admitted for another document cannot make this reused field commit its cached draft.
+/// Drop only this editor's transient state, before a natural focus-loss branch can read it.
+fn cancel_retargeted_field_save(ui: &mut Ui, id: Id) {
+    let editor = id.with("te");
+    if !crate::shortcuts::take_field_save_cancellation(ui.ctx(), editor) {
+        return;
+    }
+    let select_all = select_all_id(editor);
+    ui.data_mut(|d| {
+        d.remove::<String>(id);
+        d.remove::<String>(id.with("editing"));
+        d.remove::<String>(id.with("kept"));
+        d.remove::<String>(id.with("buf"));
+        d.remove::<bool>(id.with("selectall"));
+        d.remove::<bool>(select_all);
+        d.remove::<egui::text_edit::TextEditState>(editor);
+    });
+    ui.memory_mut(|m| m.surrender_focus(editor));
+}
+
+/// Implement the shared number field: label/icon lead, scrubbing, keyboard stepping and
+/// typing, select-all when a click starts editing, bindable values and deferred-save
+/// cancellation; returns an edit and/or bind event.
 fn number_field_impl(
     ui: &mut Ui,
     id: Id,
@@ -230,6 +249,7 @@ fn number_field_impl(
     binding: Option<Option<&str>>,
     empty: Empty<'_>,
 ) -> (Option<Edit>, Option<BindEvent>) {
+    cancel_retargeted_field_save(ui, id);
     let t = Tokens::get(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(vec2(width, FIELD_H), Sense::hover());
     if let Some(Some(name)) = binding {
@@ -259,7 +279,7 @@ fn number_field_impl(
     }
     match lead {
         Lead::Text(s) => {
-            let galley = crate::bidi::name_galley(ui.painter(), s, regular(TEXT_PT), t.text_secondary, lead_w - LEAD_PAD);
+            let galley = crate::bidi::name_galley(ui.painter(), s, regular(11.0), t.text_secondary, lead_w - 12.0);
             // A label cut short shows whole on hover.
             if galley.elided {
                 lead_resp.clone().on_hover_text(s);
@@ -338,13 +358,14 @@ fn number_field_impl(
             let te = egui::TextEdit::singleline(&mut text)
                 .id(id.with("te"))
                 .frame(egui::Frame::NONE)
-                .font(regular(TEXT_PT))
+                .font(regular(11.0))
                 .desired_width(edit_rect.width() - 6.0)
-                .vertical_align(egui::Align::Center);
+                .align(egui::Align2::LEFT_CENTER);
             let mut child = ui.new_child(egui::UiBuilder::new().max_rect(edit_rect.shrink2(vec2(0.0, 4.0))));
             let r = child.add(te);
             a11y::own_focus(&r);
             keep_focus(&r, started);
+            crate::shortcuts::release_field_for_save(&r);
             if ui.data(|d| d.get_temp::<bool>(id.with("selectall"))).unwrap_or(false)
                 && let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id.with("te"))
             {
@@ -400,7 +421,7 @@ fn number_field_impl(
             };
             let col = if value.is_some() { t.text } else { t.text_secondary };
             // A value too long for its room ends in "…", so a cut number never reads as another.
-            crate::bidi::paint_name(ui.painter(), pos2(edit_rect.min.x, rect.center().y), &s, regular(TEXT_PT), col, edit_rect.width());
+            crate::bidi::paint_name(ui.painter(), pos2(edit_rect.min.x, rect.center().y), &s, regular(11.0), col, edit_rect.width());
         }
     }
     // The variable button shows while the pointer is over a bindable field.
@@ -425,8 +446,8 @@ fn number_field_impl(
 /// The width a text label takes at the start of a field `field_w` wide: the label as drawn plus
 /// its padding, leaving the value room for a few characters (a longer label ends in an ellipsis).
 pub(crate) fn text_lead_width(ui: &Ui, label: &str, field_w: f32) -> f32 {
-    let text = ui.painter().layout_no_wrap(label.to_string(), regular(TEXT_PT), Color32::PLACEHOLDER).size().x;
-    (LEAD_PAD + text).min(field_w - VALUE_W).max(24.0)
+    let text = ui.painter().layout_no_wrap(label.to_string(), regular(11.0), Color32::PLACEHOLDER).size().x;
+    (12.0 + text).min(field_w - 32.0).max(24.0)
 }
 
 /// A field bound to a variable: the lead, then the variable's name in a chip; the chip opens the
@@ -444,7 +465,7 @@ pub fn bound_field(ui: &mut Ui, id: Id, lead: Lead, rect: Rect, name: &str) -> O
         Lead::None | Lead::Named(_) => 4.0,
         Lead::Text(s) => {
             let w = text_lead_width(ui, s, rect.width());
-            crate::bidi::paint_name(ui.painter(), pos2(rect.min.x + 8.0, rect.center().y), s, regular(TEXT_PT), t.text_secondary, w - 12.0);
+            crate::bidi::paint_name(ui.painter(), pos2(rect.min.x + 8.0, rect.center().y), s, regular(11.0), t.text_secondary, w - 12.0);
             w
         }
         Lead::Icon(i, _) => {
@@ -458,7 +479,7 @@ pub fn bound_field(ui: &mut Ui, id: Id, lead: Lead, rect: Rect, name: &str) -> O
     ui.painter().rect_stroke(chip, CornerRadius::same(4), Stroke::new(1.0, t.border), StrokeKind::Inside);
     // Grouped names ("size/card") show their last part; the tooltip has the full name.
     let short = name.rsplit('/').next().unwrap_or(name);
-    let galley = ui.painter().layout_no_wrap(short.to_string(), regular(TEXT_PT), t.text);
+    let galley = ui.painter().layout_no_wrap(short.to_string(), regular(11.0), t.text);
     ui.painter().with_clip_rect(chip.shrink2(vec2(5.0, 0.0))).galley(pos2(chip.min.x + 5.0, chip.center().y - galley.size().y / 2.0), galley, t.text);
     let dresp = ui.interact(dr, id.with("detach"), Sense::click()).tip(tr("Detach variable"));
     if resp.hovered() || dresp.hovered() || dresp.has_focus() {
@@ -477,18 +498,26 @@ pub fn bound_field(ui: &mut Ui, id: Id, lead: Lead, rect: Rect, name: &str) -> O
 /// A text field that commits on Enter / focus loss. Returns the new text when committed.
 pub fn text_field(ui: &mut Ui, id: Id, value: &str, width: f32, placeholder: &str) -> Option<String> {
     let (rect, _) = ui.allocate_exact_size(vec2(width, FIELD_H), Sense::hover());
-    text_field_in(ui, id, value, rect, placeholder, placeholder)
+    text_field_in(ui, id, value, rect, placeholder, placeholder, false)
 }
 
 /// [`text_field`] without a placeholder, named `name` for screen readers (its label is beside it).
 pub fn text_field_named(ui: &mut Ui, id: Id, value: &str, width: f32, name: &str) -> Option<String> {
     let (rect, _) = ui.allocate_exact_size(vec2(width, FIELD_H), Sense::hover());
-    text_field_in(ui, id, value, rect, "", name)
+    text_field_in(ui, id, value, rect, "", name, false)
+}
+
+/// [`text_field_named`] for a secret (a server key): it shows dots, typing included, and screen
+/// readers hear dots too.
+pub fn secret_field_named(ui: &mut Ui, id: Id, value: &str, width: f32, name: &str) -> Option<String> {
+    let (rect, _) = ui.allocate_exact_size(vec2(width, FIELD_H), Sense::hover());
+    text_field_in(ui, id, value, rect, "", name, true)
 }
 
 /// A multi-line text field across the panel (descriptions, notes) that commits when it loses
 /// focus: returns the new text then, when it changed. The draft lives only while it has focus.
 pub fn multiline_field(ui: &mut Ui, id: Id, value: &str, hint: &str, rows: usize) -> Option<String> {
+    cancel_retargeted_field_save(ui, id);
     let t = Tokens::get(ui.ctx());
     let te = id.with("te");
     let focused = ui.memory(|m| m.has_focus(te));
@@ -502,12 +531,13 @@ pub fn multiline_field(ui: &mut Ui, id: Id, value: &str, hint: &str, rows: usize
                 egui::TextEdit::multiline(&mut text)
                     .id(te)
                     .frame(egui::Frame::NONE)
-                    .font(regular(TEXT_PT))
+                    .font(regular(11.0))
                     .hint_text(hint)
                     .desired_rows(rows)
                     .desired_width(w - 12.0),
             )
         });
+        crate::shortcuts::release_field_for_save(&r.inner);
         done = r.inner.lost_focus();
     });
     if done {
@@ -525,7 +555,7 @@ pub fn multiline_field(ui: &mut Ui, id: Id, value: &str, hint: &str, rows: usize
 pub fn combo_field(ui: &mut Ui, id: Id, value: &str, width: f32, options: &[String]) -> Option<String> {
     let t = Tokens::get(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(vec2(width, FIELD_H), Sense::hover());
-    let mut out = text_field_in(ui, id, value, rect, "", "");
+    let mut out = text_field_in(ui, id, value, rect, "", "", false);
     // The chevron sits on top of the field's right end.
     let chev = Rect::from_min_max(pos2(rect.max.x - 18.0, rect.min.y), rect.max);
     let resp = ui.interact(chev, id.with("menu"), Sense::click());
@@ -546,12 +576,14 @@ pub fn combo_field(ui: &mut Ui, id: Id, value: &str, width: f32, options: &[Stri
 }
 
 /// [`text_field`] drawn into `rect`; `name` names it for screen readers.
-fn text_field_in(ui: &mut Ui, id: Id, value: &str, rect: Rect, placeholder: &str, name: &str) -> Option<String> {
+fn text_field_in(ui: &mut Ui, id: Id, value: &str, rect: Rect, placeholder: &str, name: &str, secret: bool) -> Option<String> {
+    cancel_retargeted_field_save(ui, id);
     let t = Tokens::get(ui.ctx());
     let editing_id = id.with("editing");
     let mut editing: Option<String> = ui.data(|d| d.get_temp(editing_id));
     let resp = ui.interact(rect, id.with("click"), Sense::click());
-    a11y::text(&resp, name, value);
+    let shown = if secret { std::borrow::Cow::Owned("•".repeat(value.chars().count())) } else { std::borrow::Cow::Borrowed(value) };
+    a11y::text(&resp, name, &shown);
     ui.painter().rect_filled(rect, CornerRadius::same(5), t.field);
     if editing.is_some() {
         ui.painter().rect_stroke(rect, CornerRadius::same(5), Stroke::new(1.0, crate::theme::ACCENT), StrokeKind::Inside);
@@ -567,9 +599,10 @@ fn text_field_in(ui: &mut Ui, id: Id, value: &str, rect: Rect, placeholder: &str
     let mut out = None;
     match editing {
         Some(mut text) => {
-            let r = field_editor(ui, rect, id.with("te"), &mut text, "");
+            let r = field_editor(ui, rect, id.with("te"), &mut text, "", secret);
             a11y::own_focus(&r);
             keep_focus(&r, started);
+            crate::shortcuts::release_field_for_save(&r);
             let enter = !started && ui.input(|i| i.key_pressed(egui::Key::Enter));
             let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
             if esc {
@@ -582,26 +615,27 @@ fn text_field_in(ui: &mut Ui, id: Id, value: &str, rect: Rect, placeholder: &str
             }
         }
         None => {
-            let (s, col) = if value.is_empty() { (placeholder, t.text_tertiary) } else { (value, t.text) };
+            let (s, col) = if value.is_empty() { (placeholder, t.text_tertiary) } else { (&*shown, t.text) };
             // Long text stays inside the field.
             let painter = ui.painter().with_clip_rect(rect.shrink2(vec2(8.0, 0.0)));
-            painter.text(pos2(rect.min.x + 8.0, rect.center().y), Align2::LEFT_CENTER, s, regular(TEXT_PT), col);
+            painter.text(pos2(rect.min.x + 8.0, rect.center().y), Align2::LEFT_CENTER, s, regular(11.0), col);
         }
     }
     out
 }
 
 /// The editor inside a field's `rect`: one line of text in the field's font, without a frame of
-/// its own (the field draws it), showing `hint` while empty.
-fn field_editor(ui: &mut Ui, rect: Rect, id: Id, text: &mut String, hint: &str) -> Response {
+/// its own (the field draws it), showing `hint` while empty; `password` shows dots.
+fn field_editor(ui: &mut Ui, rect: Rect, id: Id, text: &mut String, hint: &str, password: bool) -> Response {
     let t = Tokens::get(ui.ctx());
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(vec2(8.0, 4.0))));
     let r = child.add(
         egui::TextEdit::singleline(text)
             .id(id)
             .frame(egui::Frame::NONE)
-            .font(regular(TEXT_PT))
-            .hint_text(egui::RichText::new(hint).font(regular(TEXT_PT)).color(t.text_tertiary))
+            .password(password)
+            .font(regular(11.0))
+            .hint_text(egui::RichText::new(hint).font(regular(11.0)).color(t.text_tertiary))
             .desired_width(rect.width() - 16.0),
     );
     select_all_on_focus(ui, &r, text);
@@ -615,7 +649,7 @@ pub fn text_input(ui: &mut Ui, id: Id, text: &mut String, width: f32, hint: &str
     let t = Tokens::get(ui.ctx());
     let (rect, _) = ui.allocate_exact_size(vec2(width, FIELD_H), Sense::hover());
     ui.painter().rect_filled(rect, CornerRadius::same(5), t.field);
-    let r = field_editor(ui, rect, id, text, hint);
+    let r = field_editor(ui, rect, id, text, hint, false);
     if r.has_focus() {
         ui.painter().rect_stroke(rect, CornerRadius::same(5), Stroke::new(1.0, crate::theme::ACCENT), StrokeKind::Inside);
     } else if ui.rect_contains_pointer(rect) {
@@ -725,7 +759,7 @@ pub fn dropdown_lead(ui: &mut Ui, label: &str, width: f32, lead: Option<DropLead
     // One line: a label longer than the field (a variable font style like "SemiBold SemiCondensed",
     // a long translation) ends with an ellipsis and shows in full on hover.
     let shown = elide(ui, label, rect.max.x - x - 20.0);
-    let galley = ui.painter().layout_no_wrap(shown.clone(), regular(TEXT_PT), t.text);
+    let galley = ui.painter().layout_no_wrap(shown.clone(), regular(11.0), t.text);
     ui.painter().galley(pos2(x, rect.center().y - galley.size().y / 2.0), galley, t.text);
     icons::paint(ui.painter(), Rect::from_center_size(pos2(rect.max.x - 10.0, rect.center().y), vec2(12.0, 12.0)), Icon::Chevron, t.icon_secondary);
     if shown != label { resp.on_hover_text(label) } else { resp }
@@ -733,7 +767,7 @@ pub fn dropdown_lead(ui: &mut Ui, label: &str, width: f32, lead: Option<DropLead
 
 /// `s` shortened with an ellipsis to fit `max_w` on one line at the UI's 11 px.
 pub fn elide(ui: &Ui, s: &str, max_w: f32) -> String {
-    elide_font(ui, s, max_w, regular(TEXT_PT))
+    elide_font(ui, s, max_w, regular(11.0))
 }
 
 /// [`elide`] in `font`.
@@ -781,7 +815,7 @@ pub fn segmented_text(ui: &mut Ui, labels: &[&str], active: usize) -> Option<usi
     let cell = (ui.available_width() / labels.len().max(1) as f32).floor();
     segments(ui, labels, Some(active), cell, false, |ui, r, i, on, t| {
         let label = labels.get(i).copied().unwrap_or_default();
-        let font = if on { semibold(TEXT_PT) } else { regular(TEXT_PT) };
+        let font = if on { semibold(11.0) } else { regular(11.0) };
         let shown = elide_font(ui, label, r.width() - 12.0, font.clone());
         ui.painter().text(r.center(), Align2::CENTER_CENTER, shown, font, if on { t.text } else { t.text_secondary });
     })
@@ -804,7 +838,7 @@ fn segments(
     let mut out = None;
     for (i, name) in names.iter().enumerate() {
         let r = Rect::from_min_size(pos2(rect.min.x + i as f32 * cell, rect.min.y), vec2(cell, FIELD_H));
-        let mut resp = ui.interact(r, ui.id().with(("seg", i, *name)), Sense::click());
+        let mut resp = ui.interact(r, ui.scope_id().with(("seg", i, *name)), Sense::click());
         if tips {
             resp = resp.on_hover_text(*name);
         }
@@ -827,7 +861,7 @@ fn segments(
 /// clicked.
 pub fn disclosure(ui: &mut Ui, label: &str, open: bool) -> bool {
     let t = Tokens::get(ui.ctx());
-    let galley = ui.painter().layout_no_wrap(label.to_string(), regular(TEXT_PT), t.text_secondary);
+    let galley = ui.painter().layout_no_wrap(label.to_string(), regular(11.0), t.text_secondary);
     let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 22.0, FIELD_H), Sense::click());
     a11y::disclosure(&resp, label, open);
     if resp.hovered() {
@@ -842,21 +876,31 @@ pub fn disclosure(ui: &mut Ui, label: &str, open: bool) -> bool {
 /// A section header ("Fill", "Stroke"…) with optional right-side icon buttons; returns which
 /// button was clicked. `dim` greys the title (empty sections).
 pub fn section_header(ui: &mut Ui, title: &str, buttons: &[(Icon, &str)], dim: bool) -> Option<usize> {
+    section_header_resp(ui, title, buttons, dim).0
+}
+
+/// [`section_header`], with the header's own response for a right-click menu.
+pub fn section_header_resp(ui: &mut Ui, title: &str, buttons: &[(Icon, &str)], dim: bool) -> (Option<usize>, egui::Response) {
     let t = Tokens::get(ui.ctx());
     let w = ui.available_width();
-    let (rect, _) = ui.allocate_exact_size(vec2(w, 40.0), Sense::hover());
+    let (rect, resp) = ui.allocate_exact_size(vec2(w, 40.0), Sense::click());
+    // Only an empty section's header acts as its `+` button; elsewhere it is a right-click target
+    // alone, so it keeps the normal cursor.
+    if resp.hovered() && !dim {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::Default);
+    }
     ui.painter().text(
         pos2(rect.min.x + PAD, rect.center().y),
         Align2::LEFT_CENTER,
         title,
-        regular(TEXT_PT),
+        regular(11.0),
         if dim { t.text_secondary } else { t.text },
     );
     let mut out = None;
     let mut x = rect.max.x - PAD_RIGHT;
     for (i, (icon, tip)) in buttons.iter().enumerate().rev() {
         let r = Rect::from_min_size(pos2(x - 24.0, rect.center().y - 12.0), vec2(24.0, 24.0));
-        let resp = ui.interact(r, ui.id().with(("hdr", title, i)), Sense::click()).tip(*tip);
+        let resp = ui.interact(r, ui.scope_id().with(("hdr", title, i)), Sense::click()).tip(*tip);
         if resp.hovered() {
             ui.painter().rect_filled(r, CornerRadius::same(5), t.hover);
         }
@@ -866,7 +910,11 @@ pub fn section_header(ui: &mut Ui, title: &str, buttons: &[(Icon, &str)], dim: b
         }
         x -= 28.0;
     }
-    out
+    // An empty section's whole header adds its item, not only its `+` button.
+    if out.is_none() && dim && resp.clicked() {
+        out = buttons.iter().position(|(icon, _)| *icon == Icon::Plus);
+    }
+    (out, resp)
 }
 
 /// Runs `add` as the group of buttons at a row's right end: two 24 pt buttons 4 pt apart, the last
@@ -897,7 +945,7 @@ pub fn icon_button_at(ui: &mut Ui, id: Id, rect: Rect, icon: Icon, tip: &str) ->
 /// A 24×24 icon button laid out in place; true when clicked.
 pub fn icon_button(ui: &mut Ui, icon: Icon, tip: &str) -> bool {
     let (rect, _) = ui.allocate_exact_size(vec2(24.0, 24.0), Sense::hover());
-    let id = ui.id().with(("icon_button", tip));
+    let id = ui.scope_id().with(("icon_button", tip));
     icon_button_at(ui, id, rect, icon, tip)
 }
 
@@ -938,7 +986,7 @@ pub fn insertion_line(painter: &egui::Painter, x0: f32, x1: f32, y: f32) {
 pub fn drag_ghost(ctx: &egui::Context, at: egui::Pos2, galley: std::sync::Arc<egui::Galley>) {
     let t = Tokens::get(ctx);
     ctx.set_cursor_icon(egui::CursorIcon::Grabbing);
-    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::new("drag_ghost")));
+    let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Tooltip, Id::unique("drag_ghost")));
     let r = Rect::from_min_size(at + vec2(14.0, 10.0), galley.size() + vec2(16.0, 8.0));
     painter.rect_filled(r, CornerRadius::same(5), t.panel);
     painter.rect_stroke(r, CornerRadius::same(5), Stroke::new(1.0, crate::theme::ACCENT), StrokeKind::Inside);
@@ -970,10 +1018,16 @@ pub fn checker(painter: &egui::Painter, rect: Rect, cell: f32) {
 
 /// A paint swatch (with checkerboard under transparent colours).
 pub fn swatch(ui: &mut Ui, paint: &figcraft_color::Paint, size: f32) -> Response {
+    swatch_named(ui, paint, size, tr("Color"))
+}
+
+/// [`swatch`] with the screen reader's name for the field it belongs to, so a panel's swatches
+/// are told apart from every other colour control (and from each other).
+pub fn swatch_named(ui: &mut Ui, paint: &figcraft_color::Paint, size: f32, label: &str) -> Response {
     let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
     // The value is only spelled out while a screen reader reads the tree.
     let value = if a11y::active(&resp.ctx) { paint_name(paint) } else { String::new() };
-    a11y::color(&resp, tr("Color"), &value);
+    a11y::color(&resp, label, &value);
     paint_swatch(ui.painter(), rect, paint);
     resp
 }
@@ -1039,7 +1093,7 @@ pub fn checkbox(ui: &mut Ui, on: bool, label: &str) -> bool {
     } else {
         ui.painter().rect_stroke(b, CornerRadius::same(3), Stroke::new(1.0, t.border_strong), StrokeKind::Inside);
     }
-    ui.painter().text(pos2(b.max.x + 8.0, rect.center().y), Align2::LEFT_CENTER, label, regular(TEXT_PT), t.text);
+    ui.painter().text(pos2(b.max.x + 8.0, rect.center().y), Align2::LEFT_CENTER, label, regular(11.0), t.text);
     resp.clicked()
 }
 
@@ -1055,7 +1109,7 @@ pub fn radio(ui: &mut Ui, on: bool, label: &str) -> bool {
     } else {
         ui.painter().circle_stroke(c, 6.5, Stroke::new(1.0, if resp.hovered() { crate::theme::ACCENT } else { t.border_strong }));
     }
-    ui.painter().text(pos2(rect.min.x + 22.0, rect.center().y), Align2::LEFT_CENTER, label, regular(TEXT_PT), t.text);
+    ui.painter().text(pos2(rect.min.x + 22.0, rect.center().y), Align2::LEFT_CENTER, label, regular(11.0), t.text);
     resp.clicked()
 }
 
@@ -1063,7 +1117,7 @@ pub fn radio(ui: &mut Ui, on: bool, label: &str) -> bool {
 /// button is grey with dim text (still readable) and never reports clicks.
 pub fn button(ui: &mut Ui, label: &str, primary: bool, enabled: bool) -> Response {
     let t = Tokens::get(ui.ctx());
-    let galley = ui.painter().layout_no_wrap(label.to_string(), regular(TEXT_PT), t.text);
+    let galley = ui.painter().layout_no_wrap(label.to_string(), regular(11.0), t.text);
     let sense = if enabled { Sense::click() } else { Sense::hover() };
     let (rect, resp) = ui.allocate_exact_size(vec2(galley.size().x + 24.0, FIELD_H), sense);
     a11y::button(&resp, label);
@@ -1079,18 +1133,19 @@ pub fn button(ui: &mut Ui, label: &str, primary: bool, enabled: bool) -> Respons
     if !primary {
         ui.painter().rect_stroke(rect, CornerRadius::same(5), Stroke::new(1.0, t.border_strong), StrokeKind::Inside);
     }
-    ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, regular(TEXT_PT), text);
+    ui.painter().text(rect.center(), Align2::CENTER_CENTER, label, regular(11.0), text);
     resp
 }
 
 /// Text in a row.
 pub fn label(ui: &mut Ui, text: &str, color: Color32) {
-    ui.label(egui::RichText::new(text).font(regular(TEXT_PT)).color(color));
+    ui.label(egui::RichText::new(text).font(regular(11.0)).color(color));
 }
 
 /// Text shown in `rect` that turns into an editor on click (or when its editor has focus, e.g.
 /// after a double-click rename). Returns the new text on Enter / focus loss.
 pub fn text_field_inline(ui: &mut Ui, id: Id, value: &str, rect: Rect, font: egui::FontId) -> Option<String> {
+    cancel_retargeted_field_save(ui, id);
     let t = Tokens::get(ui.ctx());
     let te_id = id.with("te");
     let buf_id = id.with("buf");
@@ -1112,6 +1167,7 @@ pub fn text_field_inline(ui: &mut Ui, id: Id, value: &str, rect: Rect, font: egu
             let r = crate::bidi::single_line(&mut child, te_id, &mut text, font, rect.width());
             a11y::own_focus(&r);
             keep_focus(&r, started);
+            crate::shortcuts::release_field_for_save(&r);
             // A rename or a hex edit starts with the whole text selected.
             select_all_on_focus(ui, &r, &text);
             // The Enter that started the edit (from the keyboard) doesn't end it.
@@ -1171,7 +1227,7 @@ pub fn take_tab(ui: &Ui) -> Option<bool> {
 /// A short secondary note (an empty list's hint) that wraps inside the panel's side padding.
 pub fn note(ui: &mut Ui, text: &str, color: Color32) {
     egui::Frame::NONE.inner_margin(egui::Margin::symmetric(PAD as i8, 6)).show(ui, |ui| {
-        ui.add(egui::Label::new(egui::RichText::new(text).font(regular(TEXT_PT)).color(color)).wrap());
+        ui.add(egui::Label::new(egui::RichText::new(text).font(regular(11.0)).color(color)).wrap());
     });
 }
 
@@ -1180,17 +1236,16 @@ pub fn note(ui: &mut Ui, text: &str, color: Color32) {
 pub fn sublabels(ui: &mut Ui, a: &str, b: Option<&str>) {
     let t = Tokens::get(ui.ctx());
     let w = ui.available_width();
-    // The grid's caption row, above a field row's 32 pt track: a 10 pt caption, 12 pt tall.
     let (r, _) = ui.allocate_exact_size(vec2(w, 12.0), Sense::hover());
     let col = col_width(w);
     // Each label fits its column on one line (long translations end with an ellipsis, in full on hover).
     let a_w = if b.is_some() { col } else { w - PAD - PAD_RIGHT };
     for (i, (text, x, max_w)) in [(a, PAD, a_w)].into_iter().chain(b.map(|b| (b, PAD + col + GUTTER, w - col - GUTTER - PAD - PAD_RIGHT))).enumerate()
     {
-        let shown = elide_font(ui, text, max_w, regular(CAPTION_PT));
-        let at = ui.painter().text(pos2(r.min.x + x, r.max.y), Align2::LEFT_BOTTOM, &shown, regular(CAPTION_PT), t.text_secondary);
+        let shown = elide_font(ui, text, max_w, regular(10.0));
+        let at = ui.painter().text(pos2(r.min.x + x, r.max.y), Align2::LEFT_BOTTOM, &shown, regular(10.0), t.text_secondary);
         if shown != text {
-            ui.interact(at, ui.id().with(("sublabel", i)), Sense::hover()).on_hover_text(text);
+            ui.interact(at, ui.scope_id().with(("sublabel", i)), Sense::hover()).on_hover_text(text);
         }
     }
 }

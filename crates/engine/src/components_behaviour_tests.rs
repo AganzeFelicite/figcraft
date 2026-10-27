@@ -657,6 +657,64 @@ fn switching_variants_keeps_overrides_where_the_variants_agreed() {
     healthy(&s);
 }
 
+/// A "Layout" set: Row (horizontal, hugging, a 40 wide "A") and Stacked (vertical, fixed 300 wide,
+/// "A" filling it). Returns (set, row, stacked).
+fn layout_set(s: &mut Session) -> (NodeId, NodeId, NodeId) {
+    let mut variants = Vec::new();
+    for (k, (name, props, child)) in [
+        ("Layout=Row", json!({"layout": "horizontal", "gap": 8, "sizingH": "hug", "sizingV": "hug", "fills": []}), json!({})),
+        (
+            "Layout=Stacked",
+            json!({"layout": "vertical", "gap": 8, "sizingH": "fixed", "width": 300, "sizingV": "hug", "fills": []}),
+            json!({"sizingH": "fill"}),
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let c = idv(&ex(s, "node.create", json!({"type": "component", "name": name, "x": k as f64 * 400.0, "props": props})));
+        ex(s, "node.create", json!({"type": "rectangle", "parent": c, "name": "A", "width": 40, "height": 20, "props": child}));
+        variants.push(c);
+    }
+    let set = idv(&ex(s, "component.combineVariants", json!({"ids": variants.clone()})));
+    (set, variants[0], variants[1])
+}
+
+#[test]
+fn switching_variants_takes_the_new_variants_resizing_unless_the_instance_set_its_own() {
+    let mut s = Session::new();
+    let (set, row, stacked) = layout_set(&mut s);
+    let i = idv(&ex(&mut s, "instance.create", json!({"component": set, "x": 0, "y": 200})));
+    assert_eq!(component_of(&s, i), row);
+    ex(&mut s, "instance.setProperties", json!({"ids": [i], "properties": {"Layout": "Stacked"}}));
+    assert_eq!(component_of(&s, i), stacked);
+    let direct = idv(&ex(&mut s, "instance.create", json!({"component": stacked, "x": 0, "y": 400})));
+    let (n, d) = (node(&s, i), node(&s, direct));
+    assert_eq!(n.child_layout.sizing_h, Sizing::Fixed, "Row's Hug was never the instance's own: it takes Stacked's Fixed");
+    assert_eq!((n.width, n.child_layout.sizing_h), (d.width, d.child_layout.sizing_h), "the same as an instance made from Stacked");
+    let a = layer(&s, i, "A").unwrap();
+    assert_eq!((node(&s, a).child_layout.sizing_h, node(&s, a).width), (Sizing::Fill, 300.0), "A fills the 300 wide instance");
+    // Filling an auto layout parent afterwards leaves A filling, with nothing turned into an override.
+    let col = idv(&ex(
+        &mut s,
+        "node.create",
+        json!({"type": "frame", "name": "Column", "x": 600, "y": 0, "width": 500, "props": {"layout": "vertical", "sizingH": "fixed", "sizingV": "hug", "fills": []}}),
+    ));
+    ex(&mut s, "node.reparent", json!({"ids": [i], "parent": col}));
+    ex(&mut s, "node.set", json!({"ids": [i], "props": {"sizingH": "fill"}}));
+    let a = layer(&s, i, "A").unwrap();
+    assert_eq!(node(&s, a).child_layout.sizing_h, Sizing::Fill, "A still fills");
+    assert!(!node(&s, a).overrides.contains("resizing"), "A's resizing is still the main's");
+    assert_eq!(node(&s, a).width, node(&s, i).width);
+    // Resizing the instance set itself stays across a switch.
+    let own = idv(&ex(&mut s, "instance.create", json!({"component": set, "x": 0, "y": 600})));
+    ex(&mut s, "node.set", json!({"ids": [own], "props": {"minWidth": 120}}));
+    ex(&mut s, "instance.setProperties", json!({"ids": [own], "properties": {"Layout": "Stacked"}}));
+    assert_eq!(node(&s, own).child_layout.min_w, Some(120.0), "its own min width stays");
+    assert_eq!(node(&s, own).child_layout.sizing_h, Sizing::Fixed, "its sizing, still Row's, follows Stacked");
+    healthy(&s);
+}
+
 #[test]
 fn variant_combinations_order_default_and_conflicts() {
     let mut s = Session::new();
@@ -877,5 +935,37 @@ fn auto_layout_instances_follow_their_main() {
     assert_eq!(node(&s, i).width, 80.0);
     ex(&mut s, "node.set", json!({"id": chip, "props": {"gap": 12}}));
     assert_eq!(node(&s, i).child_layout.min_w, Some(80.0));
+    healthy(&s);
+}
+
+#[test]
+fn a_new_component_set_is_named_after_its_first_variant() {
+    // "Button/State=Hover" groups under "Button": the set takes the path before the last '/'.
+    // A bare property name ("State=Default, Size=Small") names no set, and neither does an empty
+    // name: the set gets the next numbered default, like a new component. A plain name is kept.
+    let rows = [
+        ("Button/State=Hover", "Button", "slash-prefixed: the path before the last '/'"),
+        ("Icons/Arrow/Dir=Up", "Icons/Arrow", "nested path: everything before the last '/'"),
+        ("State=Default, Size=Small", "Component 1", "bare prop=value: not \"State\""),
+        ("", "Component 1", "empty name: the numbered default"),
+    ];
+    for (name, expected, why) in rows {
+        let mut s = Session::new();
+        let f = idv(&ex(&mut s, "frame.create", json!({"x": 0, "y": 0, "width": 40, "height": 20})));
+        ex(&mut s, "node.set", json!({"id": f, "props": {"name": name}}));
+        let c = idv(&ex(&mut s, "component.create", json!({"ids": [f]})));
+        assert_eq!(node(&s, c).name, name, "{why}: the variant keeps its name");
+        let set = idv(&ex(&mut s, "component.combineVariants", json!({"ids": [c]})));
+        assert_eq!(node(&s, set).name, expected, "{why}");
+        healthy(&s);
+    }
+
+    // Add variant on a lone component (a variant property on it) wraps it in a set named after it.
+    let mut s = Session::new();
+    let f = idv(&ex(&mut s, "frame.create", json!({"x": 0, "y": 0, "width": 40, "height": 20, "name": "Button"})));
+    let c = idv(&ex(&mut s, "component.create", json!({"ids": [f]})));
+    let set = idv(&ex(&mut s, "component.addProperty", json!({"id": c, "name": "State", "type": "variant"})));
+    assert_eq!(node(&s, set).name, "Button");
+    assert_eq!(node(&s, c).name, "State=Default");
     healthy(&s);
 }

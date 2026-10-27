@@ -24,6 +24,10 @@ display_name = "VanTan"
 real_name = "Tyler Jennings"
 display_name = "tylerjenningsw"
 
+[people.SiadeLucas]
+real_name = "Siade Lucas"
+sync_github_name = true
+
 [people.Silvertree2010]
 display_name = "Netter"
 sync_github_name = false
@@ -66,4 +70,22 @@ sync_github_name = true
 sync_github_name = true
 
 [people.AganzeFelicite]
+sync_github_name = true
+
+[people.mojtabajafarzadeh]
+real_name = "Mojtaba Jafarzadeh"
+
+[people.switch87]
+real_name = "Gert Pellin"
+display_name = "Gert Pellin"
+sync_github_name = false
+
+[people.dotCooCoo]
+real_name = "Robert Lee"
+sync_github_name = true
+
+[people.leandrodslv]
+sync_github_name = true
+
+[people.mateusvillain]
 sync_github_name = true
