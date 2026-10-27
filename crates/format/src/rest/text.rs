@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 
 use figcraft_doc::{
     DecorationLength, DecorationStyle, LetterSpacing, LineHeight, ListStyle, ParaList, StyleRun, TextAlignH, TextAlignV, TextAutoResize, TextCase,
-    TextData, TextDecoration, TextStyle,
+    TextData, TextDecoration, TextPath, TextStyle,
 };
 use serde_json::Value;
 
@@ -27,8 +27,25 @@ pub(super) fn text_data(cx: &mut Ctx, v: &Value) -> TextData {
     let mut td = TextData { characters, style: base, ..TextData::default() };
     paragraph(style_json, &mut td);
     td.runs = runs(cx, v, &td);
+    // Skip ink only shows on an underline. A file can carry it on any text, so elsewhere it stays out
+    // of the look (runs have inherited the base value by now).
+    for st in std::iter::once(&mut td.style).chain(td.runs.iter_mut().map(|r| &mut r.style)) {
+        if st.decoration != TextDecoration::Underline && st.look().skip_ink {
+            st.set_look(|l| l.skip_ink = false);
+        }
+    }
     td.normalize();
     lists(v, &mut td);
+    if cx.fig_sources.is_some()
+        && let Some(path) = v.get("_figTextPath")
+    {
+        match (path.get("d").and_then(Value::as_str), path.get("start").and_then(Value::as_f64), path.get("flip").and_then(Value::as_bool)) {
+            (Some(d), Some(start), Some(flip)) if !d.is_empty() && start.is_finite() && (0.0..=1.0).contains(&start) => {
+                td.path = Some(Box::new(TextPath { d: d.to_owned(), start, flip }));
+            }
+            _ => cx.warn("invalid internal .fig text path data was ignored"),
+        }
+    }
     td
 }
 
@@ -52,10 +69,13 @@ fn paragraph(s: &Value, td: &mut TextData) {
         // Missing means a fixed box.
         _ => TextAutoResize::None,
     };
-    if text(s, "textTruncation") == Some("ENDING") {
+    // A line limit applies only while truncation is on; a leftover `maxLines` is ignored.
+    let ending = text(s, "textTruncation") == Some("ENDING");
+    td.max_lines = num(s, "maxLines").filter(|n| ending && *n >= 1.0).map_or(0, |n| n.min(10_000.0) as u32);
+    // Auto height with a line limit keeps hugging its lines up to the limit.
+    if ending && !td.truncates() {
         td.auto_resize = TextAutoResize::Truncate;
     }
-    td.max_lines = num(s, "maxLines").filter(|n| *n >= 1.0).map_or(0, |n| n.min(10_000.0) as u32);
     td.paragraph_spacing = len(s, "paragraphSpacing").unwrap_or(0.0);
     td.paragraph_indent = len(s, "paragraphIndent").unwrap_or(0.0);
     td.list_spacing = len(s, "listSpacing").unwrap_or(0.0).min(10_000.0);
@@ -85,6 +105,15 @@ fn type_style(cx: &mut Ctx, s: &Value, base: &TextStyle) -> TextStyle {
         let weight = num(s, "fontWeight").map_or_else(|| t.weight(), |w| w.clamp(1.0, 1000.0) as u16);
         t.font_style = style_name(weight, flag(s, "italic").unwrap_or_else(|| t.italic()));
     }
+    // Variable font axes, `{tag: value}` (FigCraft's own key; the Sketch importer writes it).
+    if let Some(axes) = s.get("fontVariations").and_then(Value::as_object) {
+        t.variations = axes
+            .iter()
+            .take(64)
+            .filter(|(k, _)| k.len() == 4 && k.is_ascii())
+            .filter_map(|(k, v)| Some((k.clone(), v.as_f64().filter(|x| x.is_finite())?.clamp(-1e5, 1e5))))
+            .collect();
+    }
     if let Some(size) = num(s, "fontSize").filter(|x| *x > 0.0) {
         t.font_size = size.clamp(0.5, 10_000.0);
     }
@@ -105,6 +134,12 @@ fn type_style(cx: &mut Ctx, s: &Value, base: &TextStyle) -> TextStyle {
     // Letter spacing is in pixels.
     if let Some(ls) = num(s, "letterSpacing") {
         t.letter_spacing = if ls == 0.0 { LetterSpacing::default() } else { LetterSpacing::Pixels(ls.clamp(-1e4, 1e4)) };
+    }
+    // Private, from the .fig mapper: the spacing was a share of the font size.
+    if cx.fig_sources.is_some()
+        && let Some(p) = num(s, "_letterSpacingPercent")
+    {
+        t.letter_spacing = LetterSpacing::Percent(p.clamp(-1e4, 1e4));
     }
     match text(s, "textCase") {
         Some("ORIGINAL") => t.case = TextCase::Original,
@@ -210,10 +245,12 @@ fn runs(cx: &mut Ctx, v: &Value, td: &TextData) -> Vec<StyleRun> {
     out
 }
 
-/// Each paragraph's list type and nesting level from `lineTypes` and `lineIndentations`.
+/// Each paragraph's list type, nesting level and start number from `lineTypes`,
+/// `lineIndentations` and (from `.fig` files) `listStartOffsets`.
 fn lists(v: &Value, td: &mut TextData) {
     let types = list(v, "lineTypes");
     let indents = list(v, "lineIndentations");
+    let starts = list(v, "listStartOffsets");
     td.paragraphs = types
         .iter()
         .enumerate()
@@ -224,6 +261,7 @@ fn lists(v: &Value, td: &mut TextData) {
                 _ => ListStyle::None,
             },
             indent: indents.get(i).and_then(Value::as_f64).filter(|d| d.is_finite()).map_or(0, |d| d.clamp(0.0, 255.0) as u8),
+            start_offset: starts.get(i).and_then(Value::as_f64).filter(|n| n.is_finite()).map_or(0, |n| n.clamp(0.0, f64::from(u32::MAX)) as u32),
         })
         .collect();
     // Clamp the levels and fold one style for all back into the layer's list style.

@@ -94,7 +94,8 @@ fn entering_and_leaving_vector_edit_mode() {
         ("Enter", false, "Enter leaves edit mode"),
         ("Escape", false, "Escape leaves edit mode"),
         ("Escape with an open pen path", true, "Escape first ends the pen's path and stays in edit mode"),
-        ("click outside", false, "silent: a click away from the shape leaves edit mode (pinned)"),
+        ("click outside", true, "silent: a click away from the shape only clears the points (pinned)"),
+        ("double-click outside", false, "a double-click away from the shape leaves edit mode"),
     ];
     for (how, after, why) in rows {
         let mut s = Session::new();
@@ -113,6 +114,7 @@ fn entering_and_leaving_vector_edit_mode() {
                 key(&mut s, "Escape", false);
                 assert!(editing(&s).is_some_and(|e| e.anchor.is_none()), "{why}: the path ended");
             }
+            "double-click outside" => s.pointer(&ev(PointerKind::DoubleClick, (600.0, 600.0), NONE)).unwrap(),
             _ => click(&mut s, (600.0, 600.0), NONE),
         }
         assert_eq!(editing(&s).is_some(), after, "{why}");
@@ -131,6 +133,50 @@ fn entering_and_leaving_vector_edit_mode() {
     assert!((path.area().abs() - outline.area().abs()).abs() < 0.5, "the outline is kept, rounded corners included");
     s.undo().unwrap();
     assert!(matches!(s.doc().unwrap().node(id).unwrap().kind, NodeKind::Rectangle), "converting is one undo step");
+}
+
+#[test]
+fn thin_strokes_are_easy_to_enter_and_bend() {
+    use crate::tools::ToolId;
+    // A diagonal line from (100, 100) to (200, 50); `off` steps away from its middle, square to it.
+    let at = |off: f64| (150.0 + off * 50.0 / 125f64.sqrt() / 10.0, 75.0 + off * 100.0 / 125f64.sqrt() / 10.0);
+    // (layer, screen px off the stroke, in edit mode after a double-click, derivation)
+    let rows: Vec<(&str, f64, bool, &str)> = vec![
+        ("line", 0.0, true, "double-clicking a selected line edits it as a vector"),
+        ("line", 4.0, true, "a 1 px line reaches a few pixels, so a double-click near it still lands (#646)"),
+        ("line", 8.0, false, "a double-click well away from it does not"),
+        ("path", 4.0, true, "a stroke-only path reaches as far as a line does"),
+        ("path", 8.0, false, "and no further"),
+    ];
+    for (layer, off, after, why) in rows {
+        let mut s = Session::new();
+        let id = if layer == "line" {
+            s.set_tool(ToolId::Line);
+            drag(&mut s, (100.0, 100.0), (200.0, 50.0), NONE);
+            *s.selection().first().unwrap()
+        } else {
+            let id = id_of(&ex(&mut s, "vector.create", json!({"points": [[100, 100], [200, 50]], "closed": false}))["id"]).unwrap();
+            // Styled like a pen stroke: 1 px, no fill.
+            ex(&mut s, "node.set", json!({"ids": [id], "props": {"fills": [], "strokes": ["#000000"], "strokeWeight": 1}}));
+            s.set_selection(vec![id]);
+            id
+        };
+        assert!(!s.doc().unwrap().node(id).unwrap().fills.iter().any(|f| f.visible), "{why}: the {layer} only has a stroke");
+        let p = at(off);
+        click(&mut s, p, NONE);
+        s.pointer(&ev(PointerKind::Down, p, NONE)).unwrap();
+        s.pointer(&ev(PointerKind::DoubleClick, p, NONE)).unwrap();
+        s.pointer(&ev(PointerKind::Up, p, NONE)).unwrap();
+        assert_eq!(editing(&s).is_some(), after, "{why}");
+        if after {
+            // Cmd/Ctrl then bends it through the pointer.
+            drag(&mut s, at(0.0), (170.0, 115.0), Mods { cmd: true, ..NONE });
+            let w = s.doc().unwrap().world_transform(id);
+            let n = net(&s, id);
+            assert!(!n.segments[0].is_straight(), "{why}: Cmd/Ctrl bends it");
+            assert!((w * n.cubic(0).unwrap().eval(0.5) - Point::new(170.0, 115.0)).hypot() < 1.0, "{why}: through the pointer");
+        }
+    }
 }
 
 #[test]
@@ -192,7 +238,7 @@ fn selecting_points_and_segments() {
         match what {
             "click tl" => click(&mut s, (0.0, 0.0), m),
             "click tr" => click(&mut s, (100.0, 0.0), m),
-            "click top" => click(&mut s, (50.0, 0.0), m),
+            "click top" => click(&mut s, (30.0, 0.0), m),
             "marquee top" => drag(&mut s, (-20.0, -20.0), (110.0, 10.0), m),
             _ => {
                 ex(&mut s, "vector.edit.tool", json!({"tool": "lasso"}));
@@ -266,7 +312,7 @@ fn deleting_points_vs_delete_and_heal() {
     // Deleting a selected segment keeps its points when others use them.
     let mut s = Session::new();
     let id = square(&mut s, true);
-    click(&mut s, (50.0, 0.0), NONE);
+    click(&mut s, (30.0, 0.0), NONE);
     key(&mut s, "Delete", false);
     let n = net(&s, id);
     assert_eq!((n.vertices.len(), n.segments.len()), (4, 3), "deleting a segment leaves its points");
@@ -394,4 +440,62 @@ fn bend_paint_bucket_cut_join_and_eraser_tools() {
     ex(&mut s, "vector.edit.erase", json!({"points": [[50, 0]], "radius": 10}));
     assert_eq!(net(&s, id).segments.len(), 2, "the eraser removes what it passes over");
     assert_eq!(s.doc().unwrap().node(page).unwrap().children, vec![id], "and the pieces stay one layer");
+}
+
+#[test]
+fn vector_paths_take_the_requested_size_and_refuse_empty_geometry() {
+    let mut s = Session::new();
+    let path = "M0 0 L24 0 L24 24 L0 24 Z";
+    let intrinsic = id_of(&ex(&mut s, "vector.create", json!({"path": path}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(intrinsic).unwrap();
+    assert_eq!((n.width, n.height), (24.0, 24.0), "a path without a size keeps its intrinsic box");
+    // Both sides: each scales independently, like resizing a vector.
+    let both = id_of(&ex(&mut s, "vector.create", json!({"path": path, "width": 16, "height": 8}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(both).unwrap();
+    assert_eq!((n.width, n.height), (16.0, 8.0));
+    let n = net(&s, both);
+    let max = n.vertices.iter().fold((0.0f64, 0.0f64), |(x, y), v| (x.max(v.x), y.max(v.y)));
+    assert!((max.0 - 16.0).abs() < 1e-9 && (max.1 - 8.0).abs() < 1e-9, "{max:?}: the geometry itself is scaled");
+    // One side: the other keeps its proportion.
+    let width = id_of(&ex(&mut s, "vector.create", json!({"path": path, "width": 16}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(width).unwrap();
+    assert_eq!((n.width, n.height), (16.0, 16.0));
+    // A path or point set that draws nothing is an error, not an invisible zero-size layer.
+    let e = s.execute("vector.create", &json!({"path": "M5 5"})).unwrap_err().to_string();
+    assert!(e.contains("draws nothing"), "{e}");
+    let e = s.execute("vector.create", &json!({"points": [[5, 5], [5, 5]]})).unwrap_err().to_string();
+    assert!(e.contains("draws nothing"), "{e}");
+    // A size on an axis the geometry has none of is refused, not silently ignored.
+    let e = s.execute("vector.create", &json!({"path": "M0 0 L0 24", "width": 16})).unwrap_err().to_string();
+    assert!(e.contains("horizontal extent"), "{e}");
+    let e = s.execute("vector.create", &json!({"path": "M0 0 L24 0", "height": 16})).unwrap_err().to_string();
+    assert!(e.contains("vertical extent"), "{e}");
+    // But 0 on an axis it has none of is what it already is: a horizontal line with height 0.
+    let line = id_of(&ex(&mut s, "vector.create", json!({"path": "M0 0 L24 0", "width": 16, "height": 0}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(line).unwrap();
+    assert_eq!((n.width, n.height), (16.0, 0.0));
+    // A size of 0 or less on an axis it has would flatten it, so it is refused, alone or with the other.
+    for p in [json!({"path": path, "width": 0}), json!({"path": path, "width": 16, "height": 0}), json!({"path": path, "width": -4, "height": 8})] {
+        let e = s.execute("vector.create", &p).unwrap_err().to_string();
+        assert!(e.contains("positive"), "{p}: {e}");
+    }
+}
+
+#[test]
+fn vector_points_take_the_requested_size() {
+    let mut s = Session::new();
+    let points = json!([[10, 20], [34, 20], [34, 32]]);
+    let corners = |s: &Session, id: NodeId| net(s, id).vertices.iter().map(|v| (v.x, v.y)).collect::<Vec<_>>();
+    // Both sides: each axis scales on its own; the vertices move with the box.
+    let both = id_of(&ex(&mut s, "vector.create", json!({"points": points, "x": 10, "y": 20, "width": 48, "height": 6}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(both).unwrap();
+    assert_eq!((n.width, n.height), (48.0, 6.0));
+    assert_eq!(corners(&s, both), vec![(0.0, 0.0), (48.0, 0.0), (48.0, 6.0)]);
+    // One side: the other keeps its proportion.
+    let one = id_of(&ex(&mut s, "vector.create", json!({"points": points, "height": 24}))["id"]).unwrap();
+    let n = s.doc().unwrap().node(one).unwrap();
+    assert_eq!((n.width, n.height), (48.0, 24.0));
+    assert_eq!(corners(&s, one), vec![(0.0, 0.0), (48.0, 0.0), (48.0, 24.0)]);
+    let e = s.execute("vector.create", &json!({"points": points, "width": 16, "height": -1})).unwrap_err().to_string();
+    assert!(e.contains("positive"), "{e}");
 }

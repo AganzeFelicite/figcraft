@@ -10,11 +10,13 @@ use super::{CommandSpec, ok};
 use crate::params::*;
 use crate::{EngineError, Result, Session, bad, spec};
 
+/// The layer structure commands: group, frame, mask, boolean operations, flatten, auto layout
+/// add/remove, move to page and vector path edits.
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-        spec!("object.group", "Group selection", "{ids?, name?}", true, |s, p| wrap(s, p, Wrap::Group)),
+        spec!("object.group", "Group selection", "{ids?, name?}", true, |s, p| wrap(s, p, "object.group", Wrap::Group)),
         spec!("object.ungroup", "Ungroup selection", "{ids?}", true, ungroup),
-        spec!("object.frameSelection", "Frame selection", "{ids?, name?}", true, |s, p| wrap(s, p, Wrap::Frame)),
+        spec!("object.frameSelection", "Frame selection", "{ids?, name?}", true, |s, p| wrap(s, p, "object.frameSelection", Wrap::Frame)),
         spec!("object.removeFrame", "Remove frame", "{ids?}", true, ungroup),
         spec!(
             "object.convertToGroup",
@@ -26,16 +28,23 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "object.convertToFrame",
             "Convert to frame",
-            "{ids?} (groups become frames of the same box in place, their layers staying where they are: no fill, not clipping. Frames are left alone; instances, main components and layers inside instances are refused)",
+            "{ids?} (groups become frames of the same box in place, their layers staying where they are: no fill, not clipping; sections become frames that keep their fill and don't clip. Frames are left alone; instances, main components, layers inside instances and sections holding sections are refused)",
             true,
             |s, p| convert(s, p, "object.convertToFrame", true)
+        ),
+        spec!(
+            "object.convertToSection",
+            "Convert to section",
+            "{ids?} (frames on the page or in a section become sections in place, keeping their fill and layers; what only a frame has goes: auto layout, clipping, layout grids, guides and scrolling. Sections are left alone; nested frames, instances and main components are refused)",
+            true,
+            convert_to_section
         ),
         spec!(
             "object.wrapInSection",
             "Wrap in new section",
             "{ids?, name?} (layers on the page or in a section; the section wraps them with some room)",
             true,
-            |s, p| wrap(s, p, Wrap::Section)
+            |s, p| wrap(s, p, "object.wrapInSection", Wrap::Section)
         ),
         spec!(
             "object.resizeToFit",
@@ -64,7 +73,9 @@ pub fn specs() -> Vec<CommandSpec> {
                 // Hugging needs auto layout and the children that filled have nothing to fill: both
                 // become fixed (the frame keeps filling its own auto layout parent).
                 let doc = s.doc_mut()?;
-                doc.get_mut(i)?.layout = None;
+                let n = doc.get_mut(i)?;
+                n.layout = None;
+                super::props::drop_layout_bindings(n);
                 figcraft_layout::coherent_sizing(doc, i);
             }
             ok()
@@ -96,6 +107,20 @@ pub fn specs() -> Vec<CommandSpec> {
             }
             ok()
         }),
+        spec!(
+            "vector.fillRule",
+            "Set fill rule",
+            "{ids? | id?, region? (a filled area of a vector; every area when left out), rule: nonZero|evenOdd}",
+            true,
+            fill_rule
+        ),
+        spec!(
+            "vector.reverseLoop",
+            "Reverse loop",
+            "{ids? | id?, region, loop} (a loop of a filled area; its direction flips, which changes how the area fills)",
+            true,
+            reverse_loop
+        ),
         spec!("vector.simplify", "Simplify vector", "{ids?, tolerance?}", true, simplify),
         spec!("vector.offset", "Offset path", "{ids?, offset}", true, offset_path),
         spec!("vector.join", "Join selection", "{ids?} (in vector edit mode: joins the selected points)", true, |s, p| {
@@ -121,26 +146,27 @@ const SECTION_PAD: f64 = 40.0;
 const BOOL_PARAMS: &str = "{ids?} — layers inside boolean groups: sets their own operation (how each combines with the operands below it); one boolean group: sets its operation (every operand follows it); otherwise wraps the layers in a new boolean group";
 
 /// Wrap the selection in a new boolean group doing `op`.
-pub(crate) fn wrap_boolean(s: &mut Session, p: &Value, op: BoolOp) -> Result<Value> {
-    wrap(s, p, Wrap::Bool(op))
+pub(crate) fn wrap_boolean(s: &mut Session, p: &Value, cmd: &str, op: BoolOp) -> Result<Value> {
+    wrap(s, p, cmd, Wrap::Bool(op))
 }
 
-/// Wrap the selection in a new container at the topmost selected layer's place.
-fn wrap(s: &mut Session, p: &Value, w: Wrap) -> Result<Value> {
-    let ids = req_targets("object.group", s, p)?;
+/// Wrap the selection in a new container at the topmost selected layer's place. Errors name `cmd`,
+/// the command that asked.
+fn wrap(s: &mut Session, p: &Value, cmd: &str, w: Wrap) -> Result<Value> {
+    let ids = req_targets(cmd, s, p)?;
     let doc = s.doc_mut()?;
     let ids = z_sorted(doc, &roots(doc, &ids));
-    let top = *ids.last().ok_or_else(|| bad("object.group", "nothing selected"))?;
-    let parent = doc.get(top)?.parent.ok_or_else(|| bad("object.group", "can't group a page"))?;
+    let top = *ids.last().ok_or_else(|| bad(cmd, "nothing selected"))?;
+    let parent = doc.get(top)?.parent.ok_or_else(|| bad(cmd, "can't group a page"))?;
     // Sections sit on the page or in sections, never in frames or groups.
     let board = |doc: &Document, i: NodeId| {
         doc.node(i).and_then(|n| n.parent).and_then(|p| doc.node(p)).is_some_and(|p| p.is_page() || matches!(p.kind, NodeKind::Section { .. }))
     };
     if matches!(w, Wrap::Section) && !ids.iter().all(|i| board(doc, *i)) {
-        return Err(bad("object.wrapInSection", "only layers on the page or in a section can be wrapped in a section"));
+        return Err(bad(cmd, "only layers on the page or in a section can be wrapped in a section"));
     }
     if !matches!(w, Wrap::Section) && ids.iter().any(|i| doc.node(*i).is_some_and(|n| matches!(n.kind, NodeKind::Section { .. }))) {
-        return Err(bad("object.group", "sections can't go in groups or frames"));
+        return Err(bad(cmd, "sections can't go in groups or frames"));
     }
     let index = doc.index_in_parent(top).map(|i| i + 1);
     let mut bounds = doc.bounds_of(&ids).unwrap_or_default();
@@ -199,6 +225,13 @@ fn convert(s: &mut Session, p: &Value, cmd: &'static str, to_frame: bool) -> Res
         let n = doc.get(i)?;
         let refuse = |why: &str| Err(bad(cmd, format!("\"{}\" {why}", n.name)));
         match (&n.kind, to_frame) {
+            // A frame can't hold sections.
+            (NodeKind::Section { .. }, true)
+                if n.children.iter().any(|c| doc.node(*c).is_some_and(|c| matches!(c.kind, NodeKind::Section { .. }))) =>
+            {
+                return refuse("holds sections, which can't go inside a frame: convert those first");
+            }
+            (NodeKind::Section { .. }, true) => todo.push(i),
             (NodeKind::Instance { .. }, _) => return refuse("is an instance: its layers come from its main component (detach it first)"),
             (NodeKind::Component { .. }, _) => return refuse("is a main component, which stays a frame"),
             (NodeKind::Frame | NodeKind::Group, _) if crate::components::owning_instance(doc, i).is_some() => {
@@ -212,12 +245,15 @@ fn convert(s: &mut Session, p: &Value, cmd: &'static str, to_frame: bool) -> Res
     }
     for i in &todo {
         if to_frame {
-            // The group's box as it is; nothing painted or clipped, so the look stays.
+            // The box as it is and nothing clipped, so the look stays: a group has nothing painted, a
+            // section keeps its fill.
             let n = doc.get_mut(*i)?;
+            if matches!(n.kind, NodeKind::Group) {
+                n.fills.clear();
+                n.strokes.clear();
+            }
             n.kind = NodeKind::Frame;
             n.clip = false;
-            n.fills.clear();
-            n.strokes.clear();
             continue;
         }
         let n = doc.get_mut(*i)?;
@@ -238,6 +274,43 @@ fn convert(s: &mut Session, p: &Value, cmd: &'static str, to_frame: bool) -> Res
         }
         figcraft_layout::coherent_sizing(doc, *i);
         doc.fit_to_children(*i)?;
+    }
+    Ok(json!({"ids": todo}))
+}
+
+/// Frames on the page or in a section become sections in place (sections only sit there).
+fn convert_to_section(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "object.convertToSection";
+    let ids = req_targets(cmd, s, p)?;
+    let doc = s.doc_mut()?;
+    let mut todo = Vec::new();
+    for i in ids {
+        let n = doc.get(i)?;
+        let refuse = |why: &str| Err(bad(cmd, format!("\"{}\" {why}", n.name)));
+        let on_board = n.parent.and_then(|p| doc.node(p)).is_some_and(|p| p.is_page() || matches!(p.kind, NodeKind::Section { .. }));
+        match &n.kind {
+            NodeKind::Section { .. } => {}
+            NodeKind::Instance { .. } => return refuse("is an instance: its layers come from its main component (detach it first)"),
+            NodeKind::Component { .. } | NodeKind::ComponentSet { .. } => return refuse("is a main component, which stays a frame"),
+            NodeKind::Frame if !on_board => return refuse("is inside a frame or group: only frames on the page or in a section become sections"),
+            NodeKind::Frame => todo.push(i),
+            _ => return refuse("is not a frame"),
+        }
+    }
+    for i in &todo {
+        let n = doc.get_mut(*i)?;
+        n.kind = NodeKind::Section { contents_hidden: false };
+        (n.layout, n.clip, n.overflow) = (None, false, proto::Overflow::None);
+        n.grids.clear();
+        n.guides.clear();
+        n.styles.grid = None;
+        super::props::drop_layout_bindings(n);
+        let kids = n.children.clone();
+        for k in kids {
+            // Out of the flow there is nothing to fill or to be absolute against.
+            doc.get_mut(k)?.child_layout.absolute = false;
+        }
+        figcraft_layout::coherent_sizing(doc, *i);
     }
     Ok(json!({"ids": todo}))
 }
@@ -284,7 +357,7 @@ fn mask(s: &mut Session, p: &Value) -> Result<Value> {
         return ok();
     }
     // Group, then the bottom-most child is the mask.
-    let r = wrap(s, &json!({"ids": ids, "name": "Mask group"}), Wrap::Group)?;
+    let r = wrap(s, &json!({"ids": ids, "name": "Mask group"}), "object.mask", Wrap::Group)?;
     let gid = id_of(&r["id"]).ok_or_else(|| EngineError::Other("group failed".into()))?;
     let doc = s.doc_mut()?;
     if let Some(first) = doc.get(gid)?.children.first().copied() {
@@ -309,33 +382,46 @@ fn flatten(s: &mut Session, p: &Value) -> Result<Value> {
     let parent = doc.get(top)?.parent.ok_or_else(|| bad("vector.flatten", "can't flatten a page"))?;
     let index = doc.index_in_parent(top).map(|i| i + 1);
     let pw = doc.world_transform(parent);
-    let mut path = BezPath::new();
-    let mut even = false;
+    let mut net = VectorNetwork::default();
     for i in &ids {
         let Some(n) = doc.node(*i) else { continue };
-        // Booleans flatten to their result; strokes don't get outlined.
-        let Some((mut op, rule)) = (match &n.kind {
-            NodeKind::Group | NodeKind::Frame | NodeKind::Component { .. } | NodeKind::Instance { .. } => figcraft_render::subtree_outline(doc, n, 0),
-            _ => figcraft_render::node_outline(doc, n),
-        }) else {
-            continue;
+        // Vectors keep their own network (open paths and unfilled loops have no fill outline);
+        // booleans flatten to their result; strokes don't get outlined.
+        let mut part = match &n.kind {
+            NodeKind::Vector { network } => network.clone(),
+            _ => {
+                let Some((op, rule)) = (match &n.kind {
+                    NodeKind::Group | NodeKind::Frame | NodeKind::Component { .. } | NodeKind::Instance { .. } => {
+                        figcraft_render::subtree_outline(doc, n, 0)
+                    }
+                    _ => figcraft_render::node_outline(doc, n),
+                }) else {
+                    continue;
+                };
+                let mut part = VectorNetwork::from_path(&op);
+                if rule == figcraft_render::FillRule::EvenOdd {
+                    for r in &mut part.regions {
+                        r.winding = WindingRule::EvenOdd;
+                    }
+                }
+                part
+            }
         };
-        even |= rule == figcraft_render::FillRule::EvenOdd;
         // Into the common parent's space.
-        let w = doc.world_transform(*i);
-        op.apply_affine(pw.inverse() * w);
-        path.extend(op.elements().iter().copied());
+        let all: Vec<usize> = (0..part.vertices.len()).collect();
+        crate::vectoredit::ops::transform_vertices(&mut part, &all, pw.inverse() * doc.world_transform(*i));
+        let (nv, ns) = (net.vertices.len(), net.segments.len());
+        net.vertices.extend(part.vertices);
+        net.segments.extend(part.segments.into_iter().map(|s| Segment { a: s.a + nv, b: s.b + nv, ..s }));
+        net.regions.extend(
+            part.regions.into_iter().map(|r| Region { loops: r.loops.into_iter().map(|l| l.into_iter().map(|s| s + ns).collect()).collect(), ..r }),
+        );
     }
-    if path.elements().is_empty() {
+    let Some(bb) = net.bounds() else {
         return Err(EngineError::Disabled("vector.flatten".into(), "nothing to flatten".into()));
-    }
+    };
     let first = ids.first().and_then(|i| doc.node(*i)).cloned();
-    let bb = path.bounding_box();
-    path.apply_affine(Affine::translate((-bb.x0, -bb.y0)));
-    let mut net = VectorNetwork::from_path(&path);
-    for r in &mut net.regions {
-        r.winding = if even { WindingRule::EvenOdd } else { WindingRule::NonZero };
-    }
+    net.translate(-bb.x0, -bb.y0);
     let vid = doc.alloc_id();
     let name = first.as_ref().map(|f| f.name.clone()).unwrap_or_else(|| "Vector".into());
     let mut v = Node::new(vid, NodeKind::Vector { network: net }, name, bb.width(), bb.height());
@@ -370,16 +456,19 @@ fn outline_stroke(s: &mut Session, p: &Value) -> Result<Value> {
             continue;
         }
         let closed = figcraft_doc::geometry::is_closed(&n);
-        let Some(geom) = (match &n.kind {
-            NodeKind::Text(_) | NodeKind::BooleanOp { .. } => figcraft_render::node_outline(doc, &n).map(|(p, _)| p),
-            _ => figcraft_doc::geometry::stroke_geometry(&n),
+        let Some((area, rule)) = (match &n.kind {
+            NodeKind::Text(_) => figcraft_render::node_outline(doc, &n)
+                .map(|(p, _)| (figcraft_render::draw::stroke_area(&n, &p, closed), figcraft_render::FillRule::Winding)),
+            _ => figcraft_render::stroke_fill(doc, &n),
         }) else {
             continue;
         };
-        let area = figcraft_render::draw::stroke_area(&n, &geom, closed);
         let mut path = (*area).clone();
-        // Union the pieces so the outline is one clean shape.
-        if let Ok(u) = figcraft_pathops::simplify(&path) {
+        // Simplify non-zero strokes into even-odd contours. Inside/outside rings already use
+        // even-odd: interpreting their same-direction contours as non-zero would fill the hole.
+        if rule == figcraft_render::FillRule::Winding
+            && let Ok(u) = figcraft_pathops::simplify(&path)
+        {
             path = u;
         }
         let bb = path.bounding_box();
@@ -405,7 +494,7 @@ fn outline_stroke(s: &mut Session, p: &Value) -> Result<Value> {
                 let f = doc.get_mut(fill_id)?;
                 f.strokes.clear();
             }
-            let r = wrap(s, &json!({"ids": [fill_id, vid], "name": n.name}), Wrap::Group)?;
+            let r = wrap(s, &json!({"ids": [fill_id, vid], "name": n.name}), "vector.outlineStroke", Wrap::Group)?;
             if let Some(g) = id_of(&r["id"]) {
                 out.push(g);
             }
@@ -452,7 +541,7 @@ fn layout_add(s: &mut Session, p: &Value) -> Result<Value> {
         ids
     } else {
         // Wrap non-frames in a new frame without a fill, then add auto layout to it.
-        let r = wrap(s, &json!({"ids": ids}), Wrap::Frame)?;
+        let r = wrap(s, &json!({"ids": ids}), "layout.add", Wrap::Frame)?;
         let fid = id_of(&r["id"]).ok_or_else(|| EngineError::Other("wrap failed".into()))?;
         let f = s.doc_mut()?.get_mut(fid)?;
         f.fills.clear();
@@ -477,11 +566,16 @@ fn layout_add(s: &mut Session, p: &Value) -> Result<Value> {
             let pb = doc.node(*b).map(|n| figcraft_geom::transform_rect_bbox(n.transform, n.local_rect())).unwrap_or_default();
             if vertical { pa.y0.total_cmp(&pb.y0) } else { pa.x0.total_cmp(&pb.x0) }
         });
+        let empty = doc.node(*f).is_some_and(|n| n.children.iter().filter_map(|c| doc.node(*c)).all(|c| !c.visible || c.child_layout.absolute));
         let n = doc.get_mut(*f)?;
         n.children = kids;
         n.layout = Some(al);
-        n.child_layout.sizing_h = Sizing::Hug;
-        n.child_layout.sizing_v = Sizing::Hug;
+        if !all_frames || !empty {
+            // A frame wrapped around the selection hugs it; an existing frame with no flow
+            // children keeps its size instead of collapsing to its padding.
+            n.child_layout.sizing_h = Sizing::Hug;
+            n.child_layout.sizing_v = Sizing::Hug;
+        }
     }
     s.set_selection(targets.clone());
     Ok(json!({"ids": targets}))
@@ -556,6 +650,10 @@ fn offset_path(s: &mut Session, p: &Value) -> Result<Value> {
     for i in req_targets("vector.offset", s, p)? {
         let doc = s.doc_mut()?;
         let n = doc.get(i)?.clone();
+        // A vector can't hold children: leave containers (frames, groups, instances) alone.
+        if !n.children.is_empty() {
+            continue;
+        }
         let Some((path, _)) = figcraft_render::node_outline(doc, &n) else { continue };
         let props = StrokeProps { weight: d.abs() * 2.0, join: StrokeJoin::Round, align: StrokeAlign::Center, ..Default::default() };
         let ring = figcraft_pathops::stroke_center(&path, d.abs() * 2.0, &props);
@@ -647,4 +745,147 @@ fn resize_to_fit(s: &mut Session, p: &Value) -> Result<Value> {
         fitted.push(id);
     }
     Ok(json!({"ids": fitted}))
+}
+
+/// The vector network of `id`, when it is a vector layer.
+fn network_mut(doc: &mut Document, id: NodeId) -> Option<&mut VectorNetwork> {
+    match &mut doc.get_mut(id).ok()?.kind {
+        NodeKind::Vector { network } => Some(network),
+        _ => None,
+    }
+}
+
+/// The id a fill rule is written as.
+fn rule_id(rule: WindingRule) -> &'static str {
+    match rule {
+        WindingRule::NonZero => "nonZero",
+        WindingRule::EvenOdd => "evenOdd",
+    }
+}
+
+/// `region` as an index: absent (or null) means every area.
+fn area_index(cmd: &str, p: &Value) -> Result<Option<usize>> {
+    match get(p, "region") {
+        None | Some(Value::Null) => Ok(None),
+        Some(v) => {
+            let k = f64_of(v).ok_or_else(|| bad(cmd, "`region` must be a number"))?;
+            if !(0.0..1e9).contains(&k) || k.fract() != 0.0 {
+                return Err(bad(cmd, "`region` out of range"));
+            }
+            Ok(Some(k as usize))
+        }
+    }
+}
+
+/// Segments another one- or two-segment loop lists: a short loop takes its direction from the ends
+/// its segments are stored with, so re-storing one of those would turn that loop round too. A loop
+/// of three or more segments is left out: its ring is walked in list order, which the stored ends
+/// don't decide.
+fn short_loop_segments(net: &VectorNetwork, skip: (usize, usize)) -> std::collections::HashSet<usize> {
+    let mut out = std::collections::HashSet::new();
+    for (r, region) in net.regions.iter().enumerate() {
+        for (l, lp) in region.loops.iter().enumerate() {
+            if (r, l) != skip && lp.len() <= 2 {
+                out.extend(lp.iter().copied());
+            }
+        }
+    }
+    out
+}
+
+fn fill_rule(s: &mut Session, p: &Value) -> Result<Value> {
+    let ids = req_targets("vector.fillRule", s, p)?;
+    let rule = match string(p, "rule").as_deref().map(str::trim) {
+        Some("evenOdd" | "evenodd" | "EVENODD") => WindingRule::EvenOdd,
+        Some("nonZero" | "nonzero" | "NONZERO") => WindingRule::NonZero,
+        _ => return Err(bad("vector.fillRule", "`rule` is nonZero or evenOdd")),
+    };
+    let only = area_index("vector.fillRule", p)?;
+    let doc = s.doc_mut()?;
+    let mut count = 0usize;
+    for id in ids {
+        let Some(net) = network_mut(doc, id) else { continue };
+        match only {
+            Some(r) => {
+                if let Some(region) = net.regions.get_mut(r) {
+                    region.winding = rule;
+                    count += 1;
+                }
+            }
+            None => {
+                for region in &mut net.regions {
+                    region.winding = rule;
+                    count += 1;
+                }
+            }
+        }
+    }
+    if count == 0 {
+        return Err(EngineError::Disabled("vector.fillRule".into(), "no filled area to set (select a vector)".into()));
+    }
+    Ok(json!({"regions": count, "rule": rule_id(rule)}))
+}
+
+/// One loop of a vector, worked out but not yet written back: its segments in the new order and,
+/// for a loop of one or two segments, the one to store the other way.
+struct LoopFlip {
+    id: NodeId,
+    turned: Vec<usize>,
+    store: Option<usize>,
+}
+
+/// Turn one loop of a filled area round: its segments are walked the other way, so the area it
+/// bounds counts the other way in the winding (which turns a hole into a filled part and back).
+///
+/// How a loop is walked depends on how many segments it has:
+/// - three or more: the order they are listed in, each segment turned to continue from the point
+///   reached. Reversing the list is therefore enough, and the stored ends are left alone (a shared
+///   segment's ends belong to its neighbour too);
+/// - two: the same ring either way round, so one of the two has to be stored the other way instead;
+/// - one: only its stored ends say which way it runs, so they are swapped.
+///
+/// A short loop can only turn round by re-storing a segment, which is refused when another short
+/// loop lists that segment too: it would turn that area round as well.
+fn reverse_loop(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "vector.reverseLoop";
+    let ids = req_targets(cmd, s, p)?;
+    let region = req_index(cmd, p, "region")?;
+    let index = req_index(cmd, p, "loop")?;
+    let doc = s.doc_mut()?;
+    // Work every loop out before touching the document: one that can't turn round refuses the call
+    // and the others stay as they were.
+    let mut flips: Vec<LoopFlip> = Vec::new();
+    for id in ids {
+        let Some(NodeKind::Vector { network }) = doc.node(id).map(|n| &n.kind) else { continue };
+        let Some(loop_) = network.regions.get(region).and_then(|r| r.loops.get(index)) else { continue };
+        if loop_.is_empty() {
+            continue;
+        }
+        let mut store = None;
+        if loop_.len() <= 2 {
+            let busy = short_loop_segments(network, (region, index));
+            let Some(pick) = loop_.iter().copied().filter(|s| !busy.contains(s)).min() else {
+                return Err(EngineError::Disabled(
+                    cmd.into(),
+                    "the loop shares its segments with another one- or two-segment loop, so turning it round would turn that one round too".into(),
+                ));
+            };
+            store = Some(pick);
+        }
+        flips.push(LoopFlip { id, turned: loop_.iter().rev().copied().collect(), store });
+    }
+    if flips.is_empty() {
+        return Err(EngineError::Disabled(cmd.into(), "no such loop (select a vector with filled areas)".into()));
+    }
+    for LoopFlip { id, turned, store } in flips {
+        let Some(net) = network_mut(doc, id) else { continue };
+        if let Some(seg) = store.and_then(|i| net.segments.get_mut(i)) {
+            std::mem::swap(&mut seg.a, &mut seg.b);
+            std::mem::swap(&mut seg.ta, &mut seg.tb);
+        }
+        if let Some(l) = net.regions.get_mut(region).and_then(|r| r.loops.get_mut(index)) {
+            *l = turned;
+        }
+    }
+    Ok(json!({"reversed": true}))
 }

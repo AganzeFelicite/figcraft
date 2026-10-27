@@ -18,11 +18,17 @@ pub(crate) struct Styled {
 impl Styled {
     /// `None` when no point has a style of its own, or the stroke is dashed, variable or a brush.
     /// shortcut: dashed, variable-width and brush strokes keep the layer's caps and joins at every point; stroke them run by run too if asked for.
+    /// Joins equal to the layer do not require styled runs; stored overrides remain unchanged.
     pub(crate) fn new(net: &VectorNetwork, props: &StrokeProps) -> Option<Styled> {
-        if !net.has_point_styles() || !props.dashes.is_empty() || props.profile().is_some() || props.brush.is_some() {
+        if !net.has_point_styles(props.join) || !props.dashes.is_empty() || props.profile().is_some() || props.brush.is_some() {
             return None;
         }
-        let net = net.rounded().unwrap_or_else(|| net.clone());
+        let mut net = net.rounded().unwrap_or_else(|| net.clone());
+        for vertex in &mut net.vertices {
+            if vertex.join == Some(props.join) {
+                vertex.join = None;
+            }
+        }
         let runs = net.stroke_runs();
         let mut degrees = vec![0usize; net.vertices.len()];
         for s in &net.segments {
@@ -80,8 +86,8 @@ impl Styled {
     /// and last end (as without point styles).
     pub(crate) fn arrowheads(&self, weight: f64, props: &StrokeProps) -> BezPath {
         let mut out = BezPath::new();
-        let last = self.runs.len().saturating_sub(1);
-        for (k, run) in self.runs.iter().enumerate().filter(|(_, r)| !r.closed) {
+        let last = self.runs.iter().filter(|r| !r.closed).count().saturating_sub(1);
+        for (k, run) in self.runs.iter().filter(|r| !r.closed).enumerate() {
             let start = self.cap_at(run.start, if k == 0 { props.cap_start } else { StrokeCap::None });
             let end = self.cap_at(run.end, if k == last { props.cap_end } else { StrokeCap::None });
             for (at_end, cap) in [(false, start), (true, end)] {

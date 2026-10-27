@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use figcraft_collab::Client;
 use figcraft_collab::message::{ClientMsg, Peer, Resume, ServerMsg};
-use figcraft_engine::live::{Event, Role, SessionInfo, Status};
+use figcraft_engine::live::{Event, Role, SessionInfo, Status, TOO_LARGE_TO_JOIN};
 
 use crate::inbox::Inbox;
 use crate::invite::Invite;
@@ -93,6 +93,12 @@ pub(crate) fn unresolved(cfg: &GuestConfig, outcome: Outcome) -> Outcome {
         Outcome::Retry(why) => format!("Couldn't reach the server ({why})"),
         Outcome::Left => return Outcome::Left,
     })
+}
+
+/// The host sent a message over this app's size limit (the file's welcome, usually): final, and
+/// not the host's doing.
+pub(crate) fn too_large(limits: &NetLimits) -> Outcome {
+    Outcome::Failed(TOO_LARGE_TO_JOIN.replace("{mb}", &(limits.max_server_message >> 20).to_string()))
 }
 
 /// The server's answer to the join code: the invite is whole now.
@@ -183,9 +189,9 @@ pub(crate) enum Taken {
 /// in answer must go out on this connection.
 pub(crate) fn take(m: ServerMsg, cfg: &GuestConfig, inbox: &Inbox, seen: &mut Seen, resume: &Resuming, welcomed: &dyn Fn()) -> Taken {
     match m {
-        ServerMsg::Welcome { session, client_id, seq, ref peers, access, .. } => {
+        ServerMsg::Welcome { session, client_id, seq, ref peers, access, secret, .. } => {
             if let Ok(mut r) = resume.lock() {
-                *r = Some(Resume { session, client_id, seq });
+                *r = Some(Resume { session, client_id, seq, secret });
             }
             // The sync client opens the document (and fills in its name and pages).
             let peers = peers.clone();
