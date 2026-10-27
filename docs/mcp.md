@@ -1931,6 +1931,26 @@ Align and distribute as one undo step:
   {"command":"distribute.horizontal","params":{"ids":[3,4,5]}}]}}}
 ```
 
+By default (`"onError": "abort"`) the first failure rolls back the whole batch, and success
+returns the raw results in order. With `"onError": "continue"` next to `commands`, a failed step's
+document edits are rolled back on their own, the later steps still run, and the result is instead
+one object per step:
+
+```json
+[
+  {"step": 0, "command": "text.set", "ok": true, "result": {"ok": true}},
+  {"step": 1, "command": "text.set", "ok": false, "error": "invalid parameters for `text.set`: step 1: node 2 is not text"},
+  {"step": 2, "command": "page.rename", "ok": true, "result": {"ok": true}}
+]
+```
+
+The tool call is not an error (`isError` is false) even when some steps fail. Successful document
+edits form one undo step; if every step fails, none is added. Unknown commands, bad params and bad
+references fail only their step, but a malformed `commands` list, an invalid `onError` or two steps
+with the same `as` still reject the whole batch before any step runs. A step that has to wait for
+background work makes the whole call wait, as without `onError`. A nested batch has its own
+`onError`.
+
 ### Step references
 
 A step in a `batch` can use what an earlier step returned. Give the step a name with `"as"` (next to
@@ -1968,7 +1988,10 @@ These fail the whole batch, which is rolled back, with an error naming the step:
 same `as` (before any step runs); a `$ref` to a name no step has (the error lists the names there
 are) or to the same or a later step; a `$step` to the same or a later step, or that is negative or
 not an integer; a `field` the result doesn't have (the error names the full path and, for a list,
-how many items it has); any key next to `$ref` or `$step` other than `field`. Only an object holding
+how many items it has); any key next to `$ref` or `$step` other than `field`. With `"onError":
+"continue"` all but the duplicate names fail only their step, and so does a reference to a step that
+failed (the error names both). Steps keep their positions, and references read the raw results. Only
+an object holding
 a `$ref` or `$step` key is a reference: text such as `"$ref card"` is left as written. Both keys are
 reserved in step params: an object holding either anywhere (in plugin data or a variable value too)
 is read as a reference. A step that is itself a `command.batch` is passed on as written, so the

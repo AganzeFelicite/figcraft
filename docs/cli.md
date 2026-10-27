@@ -151,6 +151,10 @@ created ([Step references](mcp.md#step-references) has the rules):
 The result lines are printed once the script is through, so none of them reports work a later step
 took back.
 
+To keep going past a failed command, make a step a `command.batch` with `"onError": "continue"`
+([MCP server](mcp.md) has the rules). The script itself stays all-or-nothing: if a
+later top-level step fails, that batch's edits are rolled back with everything else.
+
 A failing step prints one line with `"ok": false`, the error and `"rolledBack": true`, writes
 nothing (`--out` is not saved, and the session's documents go back to how the script found them),
 and exits with code 1:

@@ -5,7 +5,7 @@
 //! takes a `field`, a key of that result or a slash path into it (`ids/0`, `map/3`, `bounds/x`), the
 //! way `variable.bind` names `fills/0/color`. The CLI's script runner resolves its steps the same way.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde_json::{Map, Value};
 
@@ -45,6 +45,7 @@ pub fn step_name(step: usize, json: &Value) -> Result<Option<String>> {
 pub struct BatchScope {
     names: HashMap<String, usize>,
     results: Vec<Value>,
+    failed: HashSet<usize>,
 }
 
 impl BatchScope {
@@ -57,10 +58,10 @@ impl BatchScope {
                 return Err(bad("command.batch", format!("step {i}: `as` \"{name}\" is already step {first}'s name")));
             }
         }
-        Ok(Self { names, results: Vec::with_capacity(steps.len()) })
+        Ok(Self { names, results: Vec::with_capacity(steps.len()), failed: HashSet::new() })
     }
 
-    /// The results of the steps run so far, in order.
+    /// The results of the steps run so far, in order (failed slots hold null).
     pub fn results(&self) -> &[Value] {
         &self.results
     }
@@ -76,6 +77,12 @@ impl BatchScope {
 
     pub(crate) fn push(&mut self, result: Value) {
         self.results.push(result);
+    }
+
+    pub(crate) fn push_failed(&mut self) {
+        // Keep positions even after a failure; a successful null result is not a failed step.
+        self.failed.insert(self.next_step());
+        self.results.push(Value::Null);
     }
 
     /// `params` of the next step with every reference in it replaced.
@@ -125,6 +132,9 @@ impl BatchScope {
             }
             (n, format!("step {n} (\"{name}\")"))
         };
+        if self.failed.contains(&n) {
+            return Err(fail(format!("references {who}, which failed")));
+        }
         let path = match o.get("field") {
             None => "id",
             Some(Value::String(f)) => f.as_str(),

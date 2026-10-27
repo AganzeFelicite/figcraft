@@ -106,6 +106,10 @@ JSON or the gradient shorthand `{"type":"linearGradient","stops":["#hex","#hex"]
 {"id":3,"method":"engine.execute","params":{"command":"command.batch","params":{"label":"Tidy","commands":[{"command":"align.left","params":{"ids":[2,3]}},{"command":"distribute.vertical","params":{"ids":[2,3]}}]}}}
 ```
 
+With `"onError": "continue"` in its params, `command.batch` rolls back only the steps that fail,
+runs the rest and returns one `{step, command, ok, result}` or `{step, command, ok, error}` object
+per step; the request succeeds even when some steps fail (see [MCP server](mcp.md)).
+
 Inside `command.batch`, a step can name itself with `"as"` and later steps use its result:
 `{"$ref": "name"}` in a step's params stands for the `id` in that step's result, and `{"$step": n}`
 for the `id` in step `n`'s result (zero-based). Either takes `"field"` for another key or a slash
