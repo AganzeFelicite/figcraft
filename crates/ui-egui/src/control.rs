@@ -1461,9 +1461,7 @@ fn pointer(app: &mut FigApp, p: &Value) -> Result<Value, String> {
 }
 
 #[cfg(test)]
-#[path = "control_roots_tests.rs"]
 mod roots_tests;
 
 #[cfg(test)]
-#[path = "control_capture_tests.rs"]
 mod capture_tests;

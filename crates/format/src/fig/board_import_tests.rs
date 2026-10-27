@@ -333,3 +333,87 @@ fn outer_text_fallback_avoids_duplicates_and_respects_the_layer_budget() {
         assert_eq!(children + 1, cap);
     }
 }
+
+/// A damaged generated network still keeps usable fill or stroke outlines on the outer shape.
+#[test]
+fn outer_shape_outline_survives_a_damaged_generated_network() {
+    for field in ["fillGeometry", "strokeGeometry"] {
+        let mut layer = board_node("SHAPE_WITH_TEXT");
+        set(&mut layer, field, arr(vec![o(vec![("commandsBlob", u(0)), ("windingRule", e("NONZERO"))])]));
+        let paint = if field == "fillGeometry" { "fillPaints" } else { "strokePaints" };
+        set(&mut layer, "nodeGenerationData", o(vec![("overrides", arr(vec![record(0, vec![(paint, arr(vec![solid(1.0, 0.75, 0.25)]))])]))]));
+        set(
+            &mut layer,
+            "derivedImmutableFrameData",
+            o(vec![
+                ("version", u(1)),
+                (
+                    "overrides",
+                    arr(vec![record(
+                        0,
+                        vec![
+                            ("size", xy(240.0, 240.0)),
+                            ("transform", at(0.0, 0.0)),
+                            ("vectorData", o(vec![("vectorNetworkBlob", u(1)), ("normalizedSize", xy(240.0, 240.0))])),
+                        ],
+                    )]),
+                ),
+            ]),
+        );
+        let mut msg = message(layer);
+        set(&mut msg, "blobs", arr(vec![o(vec![("bytes", Kv::Bytes(triangle_blob()))]), o(vec![("bytes", Kv::Bytes(b"damaged".to_vec()))])]));
+        let (doc, warnings) = import(&canvas(&board_schema(), &msg), "Outer shape outline").unwrap();
+        let frame = named(&doc, "Board object");
+        let background = doc.node(frame.children[0]).unwrap();
+        let NodeKind::Vector { network } = &background.kind else { panic!("saved outer triangle must remain a vector") };
+        assert_eq!(network.vertices.len(), 3, "{field}");
+        assert_eq!(network.segments.len(), 3, "{field}");
+        assert_eq!(background.fills[0].solid_color().unwrap().to_rgba8(), [255, 191, 64, 255]);
+        assert!(frame.fills.is_empty());
+        assert!(!warnings.iter().any(|w| w.contains("using its rectangle")), "{warnings:?}");
+    }
+}
+
+/// A valid generated author cannot replace a missing, invalid or blank sticky body.
+#[test]
+fn outer_sticky_body_survives_alongside_the_generated_author() {
+    for broken in 0..3 {
+        let mut layer = board_node("STICKY");
+        set(&mut layer, "textData", o(vec![("characters", s("Outer saved body"))]));
+        set(&mut layer, "fontSize", f(30.0));
+        let mut styles = vec![record(0, vec![("fillPaints", arr(vec![solid(1.0, 0.75, 0.25)]))]), record(2, text("Test Author", 12.0))];
+        if broken != 0 {
+            styles.push(record(1, text(if broken == 2 { "  " } else { "Generated body" }, 24.0)));
+        }
+        set(&mut layer, "nodeGenerationData", o(vec![("overrides", arr(styles))]));
+        set(
+            &mut layer,
+            "derivedImmutableFrameData",
+            o(vec![
+                ("version", u(1)),
+                (
+                    "overrides",
+                    arr(vec![
+                        record(0, vec![("size", xy(240.0, 240.0)), ("transform", at(0.0, 0.0))]),
+                        record(1, vec![("size", xy(if broken == 1 { -1.0 } else { 200.0 }, 160.0)), ("transform", at(20.0, 20.0))]),
+                        record(2, vec![("size", xy(200.0, 16.0)), ("transform", at(20.0, 204.0))]),
+                    ]),
+                ),
+            ]),
+        );
+        let (doc, _) = imported(layer.clone());
+        let frame = named(&doc, "Board object");
+        assert_eq!(frame.children.len(), 3, "background, body and author survive (case {broken})");
+        let texts: Vec<_> = frame.children.iter().filter_map(|id| doc.node(*id).and_then(|n| n.kind.text())).collect();
+        assert_eq!(texts.len(), 2);
+        let body = texts.iter().find(|t| t.characters == "Outer saved body").unwrap();
+        assert_eq!(body.style.font_size, 30.0);
+        let author = texts.iter().find(|t| t.characters == "Test Author").unwrap();
+        assert_eq!(author.style.font_size, 12.0);
+        for cap in 1..5 {
+            let (json, _, _) = map::to_rest(&message(layer.clone()), "Author fallback budget", cap);
+            let children = json["document"]["children"][0]["children"][0]["children"].as_array().map_or(0, Vec::len);
+            assert_eq!(children + 1, cap);
+        }
+    }
+}
