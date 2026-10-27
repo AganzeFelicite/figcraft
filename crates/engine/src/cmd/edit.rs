@@ -46,10 +46,16 @@ const LAYER_TYPES: [&str; 16] = [
     "SLICE",
 ];
 
+/// Lowercase for `node.find`'s substring filters. Greek final sigma becomes σ on both sides, so a
+/// query lowercased on its own (`Σ` to `σ`) still matches a name ending in it (`ΟΣ` to `ος`).
+fn fold(s: &str) -> String {
+    s.to_lowercase().replace('ς', "σ")
+}
+
 fn node_find(s: &mut Session, p: &Value) -> Result<Value> {
     let cmd = "node.find";
     let filter = |key| -> Result<Option<String>> {
-        get(p, key).map(|v| v.as_str().map(str::to_lowercase).ok_or_else(|| bad(cmd, format!("`{key}` must be a string")))).transpose()
+        get(p, key).map(|v| v.as_str().map(fold).ok_or_else(|| bad(cmd, format!("`{key}` must be a string")))).transpose()
     };
     let name = filter("name")?;
     let text = filter("text")?;
@@ -77,12 +83,12 @@ fn node_find(s: &mut Session, p: &Value) -> Result<Value> {
         };
         let n = doc.get(id)?;
         stack.push(n.children.iter());
-        if name.as_ref().is_some_and(|q| !n.name.to_lowercase().contains(q))
+        if name.as_ref().is_some_and(|q| !fold(&n.name).contains(q))
             || kind.as_ref().is_some_and(|q| !n.kind.type_name().eq_ignore_ascii_case(q))
-            || text.as_ref().is_some_and(|q| !matches!(&n.kind, NodeKind::Text(t) if t.characters.to_lowercase().contains(q)))
-            || component.as_ref().is_some_and(|q| {
-                !matches!(&n.kind, NodeKind::Instance { component, .. } if doc.node(*component).is_some_and(|c| c.name.to_lowercase().contains(q)))
-            })
+            || text.as_ref().is_some_and(|q| !matches!(&n.kind, NodeKind::Text(t) if fold(&t.characters).contains(q)))
+            || component.as_ref().is_some_and(
+                |q| !matches!(&n.kind, NodeKind::Instance { component, .. } if doc.node(*component).is_some_and(|c| fold(&c.name).contains(q))),
+            )
         {
             continue;
         }

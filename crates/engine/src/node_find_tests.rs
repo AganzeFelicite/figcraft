@@ -36,6 +36,16 @@ fn node_find_filters_are_literal_case_insensitive_and_anded() {
 }
 
 #[test]
+fn node_find_matches_a_greek_final_sigma_both_ways() {
+    let mut s = Session::new();
+    let page = s.page().unwrap();
+    let os = add(&mut s, page, NodeKind::Text(TextData::new("ΛΟΓΟΣ")), "ΟΣ");
+    found(&mut s, json!({"name": "Σ"}), &[os]);
+    found(&mut s, json!({"name": "ς"}), &[os]);
+    found(&mut s, json!({"text": "λογοσ"}), &[os]);
+}
+
+#[test]
 fn node_find_scope_is_preorder_strict_descendants_in_stored_order() {
     let mut s = Session::new();
     let page = s.page().unwrap();
