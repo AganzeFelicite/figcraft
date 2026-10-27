@@ -1481,7 +1481,10 @@ impl<'a> Exporter<'a> {
                 out.insert("destination".into(), json!(destination(dest, self)?));
                 out.insert("preserveScroll".into(), json!(preserve_scroll));
             }
-            Action::OpenOverlay { dest, position, close_on_outside, background, offset } => {
+            Action::OpenOverlay { dest, position, close_on_outside, background, offset, anchor } => {
+                if *anchor != figcraft_doc::proto::OverlayAnchor::Screen {
+                    self.warn(format!("Overlay anchor on '{}' was approximated relative to the screen", node.name));
+                }
                 out.insert("actionType".into(), json!("open-overlay"));
                 out.insert("destination".into(), json!(destination(dest, self)?));
                 out.insert("overlayPosType".into(), json!(overlay(position)));

@@ -1009,8 +1009,8 @@ fn bound_field(n: &Node, field: &str) -> Option<String> {
     let cl = &n.child_layout;
     let pad = |i: usize| layout.and_then(|l| l.padding.get(i).copied());
     Some(match field {
-        "width" => format!("{}", n.width),
-        "height" => format!("{}", n.height),
+        "width" | "w" => format!("{}", n.width),
+        "height" | "h" => format!("{}", n.height),
         "minWidth" => format!("{:?}", cl.min_w),
         "maxWidth" => format!("{:?}", cl.max_w),
         "minHeight" => format!("{:?}", cl.min_h),

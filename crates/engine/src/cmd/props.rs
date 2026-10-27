@@ -461,11 +461,7 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
                 resize_node(doc, id, nw, nh)?;
                 // Explicit size makes text fixed in that dimension.
                 if let Some(t) = doc.get_mut(id)?.kind.text_mut() {
-                    t.auto_resize = if is_w {
-                        if t.auto_resize == TextAutoResize::WidthAndHeight { TextAutoResize::Height } else { t.auto_resize }
-                    } else {
-                        TextAutoResize::None
-                    };
+                    t.fix_size(is_w, !is_w);
                 }
                 fix_axis(doc, id, is_w)?;
             }
@@ -1220,6 +1216,7 @@ fn set_sizing(cmd: &str, doc: &mut Document, id: NodeId, s: Sizing, horizontal: 
         t.auto_resize = match (n.child_layout.sizing_h, n.child_layout.sizing_v) {
             (Sizing::Hug, _) => TextAutoResize::WidthAndHeight,
             (_, Sizing::Hug) => TextAutoResize::Height,
+            _ if t.truncates() => TextAutoResize::Truncate,
             _ => TextAutoResize::None,
         };
     }

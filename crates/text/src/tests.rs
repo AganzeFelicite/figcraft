@@ -171,6 +171,31 @@ fn title_case_across_runs() {
 }
 
 #[test]
+fn title_case_after_opening_apostrophe_on_canvas() {
+    let Some(face) = inter() else { return };
+    let glyph_chars = |s: &str, split: Option<usize>| {
+        let mut t = TextData::new(s);
+        t.style.case = figcraft_doc::TextCase::Title;
+        if let Some(n) = split {
+            t.restyle(0, n, |st| st.font_style = "Bold".into());
+        }
+        let l = layout(&t, None, None);
+        let chars: Vec<char> = s.chars().collect();
+        (0..chars.len()).map(|i| l.glyphs.iter().find(|g| g.char_start == i).map(|g| g.gid)).collect::<Vec<_>>()
+    };
+    let expect = |s: &str, want: &str| {
+        let got: Vec<Option<u32>> = want.chars().map(|c| Some(face.glyph_for(c))).collect();
+        for split in [None, Some(1), Some(2)] {
+            assert_eq!(glyph_chars(s, split), got, "{s:?} split {split:?}");
+        }
+    };
+    expect("'hello world'", "'Hello World'");
+    expect("say 'hi'", "Say 'Hi'");
+    expect("don't", "Don't");
+    expect("\u{2019}hello", "\u{2019}Hello");
+}
+
+#[test]
 fn lists_hang_and_number() {
     if !have_fonts() {
         return;
@@ -232,7 +257,9 @@ fn truncate_max_lines_with_ellipsis() {
     assert_eq!(l.lines.len(), 2);
     let last = l.glyphs.last().unwrap();
     assert_eq!(last.gid, face.glyph_for('…'));
-    // max_lines is ignored unless truncating.
+    // Auto height truncates at max_lines too; a fixed box shows every line.
+    t.auto_resize = figcraft_doc::TextAutoResize::Height;
+    assert_eq!(layout(&t, Some(300.0), None).lines.len(), 2);
     t.auto_resize = figcraft_doc::TextAutoResize::None;
     assert_eq!(layout(&t, Some(300.0), Some(1000.0)).lines.len(), 3);
 }

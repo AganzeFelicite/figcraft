@@ -106,7 +106,10 @@ fn a_local_code_with_the_wrong_secret_or_a_typo_doesnt_join() {
     assert!(host.live().peers.is_empty());
     // A typing mistake is caught before anything connects.
     let mut typo: Vec<char> = local.code().chars().collect();
-    typo[7] = if typo[7] == 'A' { 'B' } else { 'A' };
+    // The last symbol contains only checksum bits. Changing payload bits can collide with
+    // the eight-bit checksum, so it does not guarantee a malformed code.
+    let last = typo.last_mut().unwrap();
+    *last = if *last == 'A' { 'B' } else { 'A' };
     let e = guest.execute("collab.join", &json!({"code": typo.iter().collect::<String>()})).unwrap_err().to_string();
     assert!(e.contains("typing mistake"), "{e}");
     // A view-only code doesn't exist here, and says where it does.

@@ -163,6 +163,34 @@ fn the_presenter_keys_wait_while_the_notice_shows() {
 }
 
 #[test]
+fn the_prototype_takes_no_controller_buttons_while_the_notice_shows() {
+    let mut s = Session::new();
+    let a = id(&ex(&mut s, "frame.create", json!({"x": 0, "y": 0, "width": 300, "height": 400, "name": "A"})));
+    let b = id(&ex(&mut s, "frame.create", json!({"x": 400, "y": 0, "width": 300, "height": 400, "name": "B"})));
+    let layer = id(&ex(&mut s, "shape.rectangle", json!({"x": 10, "y": 10, "width": 30, "height": 30, "parent": a})));
+    let link = json!({"type": "openUrl", "url": "https://example.com/a"});
+    ex(&mut s, "proto.interaction.add", json!({"id": layer, "trigger": {"type": "afterDelay", "ms": 100}, "action": link}));
+    let to_b = json!({"type": "navigate", "dest": b});
+    ex(&mut s, "proto.interaction.add", json!({"id": a, "trigger": {"type": "keyPress", "key": "Gamepad A"}, "action": to_b}));
+    let mut u = Harness::new(s);
+    u.app.services = Box::new(Opened::default());
+    u.ctx.enable_accesskit();
+    u.run("proto.present", json!({"start": a}));
+    u.frames(40, Vec::new);
+    assert_eq!(notice(&u), "https://example.com/a");
+    let ctx = u.ctx.clone();
+    crate::control::handle(&mut u.app, &ctx, "ui.input", &json!({"events": [{"gamepad": "A"}]})).unwrap();
+    u.frames(2, Vec::new);
+    assert_eq!(u.app.inspect()["presenter"]["current"], json!(a), "the Gamepad A trigger did not run");
+    assert_eq!(notice(&u), "https://example.com/a");
+    click(&mut u, "Cancel");
+    assert!(notice(&u).is_null());
+    crate::control::handle(&mut u.app, &ctx, "ui.input", &json!({"events": [{"gamepad": "A"}]})).unwrap();
+    u.frames(2, Vec::new);
+    assert_eq!(u.app.inspect()["presenter"]["current"], json!(b), "the button plays once the notice closes");
+}
+
+#[test]
 fn dont_show_this_again_is_saved_with_the_preferences() {
     let (mut u, seen) = presented("https://example.com/a", false);
     click(&mut u, "Don't show this again");

@@ -83,6 +83,17 @@ fn components_take_their_properties_as_parameters() {
     for want in ["@Composable\nfun Card(", "    showDot: Boolean = true,", "    title: String = \"Hello\",", "if (showDot) {", "text = title,"] {
         assert!(kt.contains(want), "Compose has {want:?}:\n{kt}");
     }
+    let ark = code(&mut s, c, "arkui");
+    for want in [
+        "@Component\nexport struct Card {",
+        "    @Prop showDot: boolean = true",
+        "    @Prop title: string = \"Hello\"",
+        "    build() {",
+        "        if (this.showDot) {",
+        "Text(this.title)",
+    ] {
+        assert!(ark.contains(want), "ArkUI has {want:?}:\n{ark}");
+    }
     let leptos = code(&mut s, c, "leptos");
     for want in [
         "use leptos::prelude::*;\n\n#[component]\npub fn Card(\n",
@@ -129,13 +140,26 @@ fn instances_are_calls_passing_the_values_they_set() {
     assert!(react.contains("export function Card({"));
     assert_eq!(component_code(&mut s, i, "swiftui")["usage"], "Card(showDot: false, title: \"Buy\")\n");
     assert_eq!(component_code(&mut s, i, "compose")["usage"], "Card(showDot = false, title = \"Buy\")\n");
+    assert_eq!(component_code(&mut s, i, "arkui")["usage"], "Card({ showDot: false, title: \"Buy\" })\n");
     assert_eq!(component_code(&mut s, i, "leptos")["usage"], "<Card show_dot={false} title=\"Buy\" />\n");
     // Text that needs escaping is an expression in JSX and escaped per language.
     ex(&mut s, "instance.setProperties", json!({"ids": [i], "properties": {"Title": "Say \"hi\" $5\nnow"}}));
     assert_eq!(component_code(&mut s, i, "react")["usage"], "<Card showDot={false} title={\"Say \\\"hi\\\" $5\\nnow\"} />\n");
     assert_eq!(component_code(&mut s, i, "swiftui")["usage"], "Card(showDot: false, title: \"Say \\\"hi\\\" $5\\nnow\")\n");
     assert_eq!(component_code(&mut s, i, "compose")["usage"], "Card(showDot = false, title = \"Say \\\"hi\\\" \\$5\\nnow\")\n");
+    assert_eq!(component_code(&mut s, i, "arkui")["usage"], "Card({ showDot: false, title: \"Say \\\"hi\\\" $5\\nnow\" })\n");
     assert_eq!(component_code(&mut s, i, "leptos")["usage"], "<Card show_dot={false} title={\"Say \\\"hi\\\" $5\\nnow\"} />\n");
+    // A quoted title becomes a binding whose attribute value is escaped: the expression itself
+    // keeps its JS quotes, and the attribute's own quotes are entities.
+    assert_eq!(component_code(&mut s, i, "vue")["usage"], "<Card :showDot=\"false\" :title=\"&quot;Say \\&quot;hi\\&quot; $5\\nnow&quot;\" />\n");
+    let vue = code(&mut s, i, "vue");
+    assert!(vue.starts_with("<Card :showDot=\"false\" :title=\"&quot;Say \\&quot;hi\\&quot; $5\\nnow&quot;\" />\n"), "{vue}");
+    // A plain attribute keeps HTML entities intact: a literal ampersand is written as `&amp;`,
+    // and a literal `&amp;` as `&amp;amp;`.
+    ex(&mut s, "instance.setProperties", json!({"ids": [i], "properties": {"Title": "Fish & Chips"}}));
+    assert_eq!(component_code(&mut s, i, "vue")["usage"], "<Card :showDot=\"false\" title=\"Fish &amp; Chips\" />\n");
+    ex(&mut s, "instance.setProperties", json!({"ids": [i], "properties": {"Title": "Fish &amp; Chips"}}));
+    assert_eq!(component_code(&mut s, i, "vue")["usage"], "<Card :showDot=\"false\" title=\"Fish &amp;amp; Chips\" />\n");
 }
 
 #[test]
@@ -185,6 +209,9 @@ fn variant_sets_share_one_definition() {
     let kt = code(&mut s, set, "compose");
     assert!(kt.contains("enum class ButtonState { Default, Hover }"), "{kt}");
     assert!(kt.contains("    state: ButtonState = ButtonState.Default,"), "{kt}");
+    let ark = code(&mut s, set, "arkui");
+    assert!(ark.contains("export enum ButtonState { Default, Hover }"), "{ark}");
+    assert!(ark.contains("    @Prop state: ButtonState = ButtonState.Default"), "{ark}");
     let leptos = code(&mut s, set, "leptos");
     for want in [
         "#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]\npub enum ButtonState {\n    #[default]\n    Default,\n    Hover,\n}",
@@ -201,6 +228,7 @@ fn variant_sets_share_one_definition() {
     assert_eq!(component_code(&mut s, i, "react")["usage"], "<Button state=\"Hover\" />\n");
     assert_eq!(component_code(&mut s, i, "swiftui")["usage"], "Button(state: .hover)\n");
     assert_eq!(component_code(&mut s, i, "compose")["usage"], "Button(state = ButtonState.Hover)\n");
+    assert_eq!(component_code(&mut s, i, "arkui")["usage"], "Button({ state: ButtonState.Hover })\n");
     assert_eq!(component_code(&mut s, i, "leptos")["usage"], "<Button state=ButtonState::Hover />\n");
 }
 
@@ -224,15 +252,29 @@ fn instance_swap_properties_take_views() {
     assert!(swift.contains("    var icon: AnyView = AnyView(HeartIcon())"), "{swift}");
     let kt = code(&mut s, chip, "compose");
     assert!(kt.contains("    icon: @Composable () -> Unit = { HeartIcon() },") && kt.contains("icon()"), "{kt}");
+    let ark = code(&mut s, chip, "arkui");
+    for want in [
+        "    @BuilderParam icon: () => void = this.defaultIconBuilder",
+        "    @Builder\n    defaultIconBuilder() {\n        HeartIcon()\n    }",
+        "            this.icon()",
+    ] {
+        assert!(ark.contains(want), "ArkUI has {want:?}:\n{ark}");
+    }
     let leptos = code(&mut s, chip, "leptos");
     assert!(leptos.contains("    #[prop(into, default = (|| view! { <HeartIcon /> }).into())] icon: ViewFn,"), "{leptos}");
     assert!(leptos.contains("{icon.run()}"), "{leptos}");
+    let vue = code(&mut s, chip, "vue");
+    assert!(vue.contains("    icon?: unknown;"), "{vue}");
+    assert!(vue.contains("    icon: HeartIcon,"), "the swap defaults to its component: {vue}");
+    assert!(vue.contains("<component :is=\"icon\" />"), "a swap is a component, not an element: {vue}");
     let i = idv(&ex(&mut s, "instance.create", json!({"component": chip, "x": 0, "y": 100})));
     ex(&mut s, "instance.setProperties", json!({"ids": [i], "properties": {"Icon": star}}));
     assert_eq!(component_code(&mut s, i, "react")["usage"], "<Chip icon={<StarIcon />} />\n");
     assert_eq!(component_code(&mut s, i, "swiftui")["usage"], "Chip(icon: AnyView(StarIcon()))\n");
     assert_eq!(component_code(&mut s, i, "compose")["usage"], "Chip(icon = { StarIcon() })\n");
+    assert_eq!(component_code(&mut s, i, "arkui")["usage"], "Chip({ icon: () => { StarIcon() } })\n");
     assert_eq!(component_code(&mut s, i, "leptos")["usage"], "<Chip icon={|| view! { <StarIcon /> }} />\n");
+    assert_eq!(component_code(&mut s, i, "vue")["usage"], "<Chip :icon=\"StarIcon\" />\n");
 }
 
 #[test]
@@ -247,6 +289,14 @@ fn slots_take_optional_content() {
     assert!(react.contains("  content?: React.ReactNode;") && react.contains("{content ?? ("), "{react}");
     assert!(code(&mut s, panel, "swiftui").contains("var content: AnyView? = nil"));
     assert!(code(&mut s, panel, "compose").contains("content: (@Composable () -> Unit)? = null,"));
+    let ark = code(&mut s, panel, "arkui");
+    for want in [
+        "    @BuilderParam content: () => void = this.defaultContentBuilder",
+        "    @Builder\n    defaultContentBuilder() {\n",
+        "            this.content()",
+    ] {
+        assert!(ark.contains(want), "ArkUI has {want:?}:\n{ark}");
+    }
     let leptos = code(&mut s, panel, "leptos");
     assert!(leptos.contains("    #[prop(optional, into)] content: Option<ViewFn>,"), "{leptos}");
     assert!(leptos.contains("{match &content { Some(c) => c.run(), None => view! {\n") && leptos.contains("}.into_any() }}\n"), "{leptos}");
@@ -260,6 +310,8 @@ fn slots_take_optional_content() {
     assert!(usage.starts_with("<Panel content={(\n") && usage.contains("<Badge />"), "{usage}");
     let usage = component_code(&mut s, i, "leptos")["usage"].as_str().unwrap_or_default().to_string();
     assert!(usage.starts_with("<Panel content={|| view! {\n") && usage.contains("<Badge />") && usage.ends_with("}} />\n"), "{usage}");
+    let usage = component_code(&mut s, i, "arkui")["usage"].as_str().unwrap_or_default().to_string();
+    assert!(usage.starts_with("Panel({ content: () => {\n") && usage.contains("Badge()") && usage.ends_with("} })\n"), "{usage}");
 }
 
 #[test]

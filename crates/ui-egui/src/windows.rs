@@ -11,7 +11,7 @@
 use std::cell::RefCell;
 
 use egui::{Context, Pos2, Vec2, ViewportBuilder, ViewportCommand, ViewportId};
-use figcraft_engine::DocState;
+use figcraft_engine::{DocState, Session};
 use serde_json::{Value, json};
 
 use crate::canvas::CanvasState;
@@ -40,6 +40,8 @@ struct Pane {
     worker: Option<Worker>,
     field_focus: bool,
     control_input: Vec<egui::Event>,
+    /// The document the queued synthetic batch was injected for (dropped if it changed).
+    control_input_doc: Option<u64>,
 }
 
 /// The app's other windows.
@@ -55,6 +57,11 @@ pub struct Windows {
     /// Windows to close (their files close with them), at the main window's next frame.
     closing: Vec<u64>,
     last_id: u64,
+    /// The file each window last presented and the monotonic generation it defines. A switch to
+    /// another file (and back) is a new generation, so a screenshot admitted under the old file
+    /// can never accept pixels from the new one.
+    presented: std::collections::HashMap<u64, (u64, u64)>,
+    presentation_generation: u64,
 }
 
 impl Windows {
@@ -65,6 +72,34 @@ impl Windows {
 
     pub fn exists(&self, id: u64) -> bool {
         id == 0 || self.list.iter().any(|w| w.id == id)
+    }
+
+    /// The document window `id` shows now (`None`: no file): the window drawing now has the
+    /// session's active file, the main window between frames its own, every other window its own.
+    pub(crate) fn active_doc(&self, session: &Session, id: u64) -> Option<u64> {
+        if id == self.current {
+            session.docs.get(session.active).map(|d| d.uid)
+        } else if id == 0 {
+            self.main_active
+        } else {
+            self.list.iter().find(|w| w.id == id).and_then(|w| w.active)
+        }
+    }
+
+    /// The file window `id` shows now and a monotonic generation for that presentation.
+    ///
+    /// The generation changes whenever the observed file changes, including a switch back to the
+    /// file shown before (A→B→A): the final UID alone is not enough to identify a capture.
+    pub(crate) fn presentation(&mut self, session: &Session, id: u64) -> (u64, u64) {
+        let document = self.active_doc(session, id).unwrap_or(0);
+        if let Some(&(observed, generation)) = self.presented.get(&id)
+            && observed == document
+        {
+            return (document, generation);
+        }
+        self.presentation_generation = self.presentation_generation.wrapping_add(1);
+        self.presented.insert(id, (document, self.presentation_generation));
+        (document, self.presentation_generation)
     }
 }
 
@@ -103,13 +138,54 @@ pub fn guard(app: &mut FigApp, ctx: &Context, f: impl FnOnce(&mut FigApp)) {
     }
 }
 
-/// Control-channel input events (`ui.input`) for the window `viewport` draws next.
+/// Control-channel input events (`ui.input`) for the window `viewport` draws next. A batch queued
+/// for another document is dropped rather than replayed into the new one.
 pub fn take_input(app: &mut FigApp, viewport_id: ViewportId) -> Vec<egui::Event> {
-    match app.windows.list.iter_mut().find(|w| viewport(w.id) == viewport_id) {
-        Some(w) => std::mem::take(&mut w.pane.control_input),
-        None if viewport_id == ViewportId::ROOT => std::mem::take(&mut app.control_input),
-        None => Vec::new(),
+    let (events, tagged, current) = match app.windows.list.iter_mut().find(|w| viewport(w.id) == viewport_id) {
+        Some(w) => {
+            let events = std::mem::take(&mut w.pane.control_input);
+            (events, w.pane.control_input_doc.take(), w.active)
+        }
+        None if viewport_id == ViewportId::ROOT => {
+            let events = std::mem::take(&mut app.control_input);
+            let tagged = app.control_input_doc.take();
+            let current = app.session.docs.get(app.session.active).map(|d| d.uid);
+            (events, tagged, current)
+        }
+        None => return Vec::new(),
+    };
+    // A frame with no batch of its own says nothing about the document: never treat "nothing
+    // queued" as a dropped batch (that used to error another window's acknowledgement).
+    if !events.is_empty() && tagged != current {
+        // The file changed before the batch reached a frame: say so once instead of replaying it
+        // into the new document. Only this window's own acknowledgements belong to the batch.
+        fail_input_acks(app, viewport_id);
+        return Vec::new();
     }
+    if !events.is_empty() {
+        // The frame that applies these must not read or replace the user's system clipboard.
+        app.control_synthetic = true;
+        let acks = app.take_input_acks(viewport_id);
+        app.applied_acks.extend(acks);
+        app.applied_input = Some(events.clone());
+        app.applied_frame = Some(viewport_id);
+    }
+    events
+}
+
+/// Error, once, the `ui.input` acknowledgements waiting for `viewport`'s batch: its file changed
+/// before a frame could apply it. Other windows' acknowledgements are left alone.
+pub(crate) fn fail_input_acks(app: &mut FigApp, viewport: ViewportId) {
+    let mut kept = Vec::new();
+    for ack in app.input_acks.drain(..) {
+        if ack.viewport == viewport {
+            let _ =
+                ack.tx.send(crate::ControlReply { id: ack.reply.id, result: Err("the document changed before the input could be applied".into()) });
+        } else {
+            kept.push(ack);
+        }
+    }
+    app.input_acks = kept;
 }
 
 fn title_of(ds: Option<&DocState>) -> String {
@@ -158,19 +234,21 @@ fn show_own(app: &mut FigApp, want: Option<u64>) {
 fn exchange(app: &mut FigApp, p: &mut Pane) {
     std::mem::swap(&mut app.ui, &mut p.ui);
     std::mem::swap(&mut app.ui.last_copy, &mut p.ui.last_copy);
+    std::mem::swap(&mut app.ui.last_copy_generation, &mut p.ui.last_copy_generation);
     std::mem::swap(&mut app.ui.quit, &mut p.ui.quit);
     std::mem::swap(&mut app.ui.dark, &mut p.ui.dark);
     std::mem::swap(&mut app.canvas, &mut p.canvas);
     std::mem::swap(&mut app.worker, &mut p.worker);
     std::mem::swap(&mut app.field_focus, &mut p.field_focus);
     std::mem::swap(&mut app.control_input, &mut p.control_input);
+    std::mem::swap(&mut app.control_input_doc, &mut p.control_input_doc);
 }
 
 /// Open a window (`window.new`) with open file `index` moved into it, the file at `path`, or a new
 /// file, at screen point `at` (else beside this window). Returns its id. With one window (the
 /// browser) or a screen reader running, a file opens as a tab here instead (and the error says so).
 pub fn open(app: &mut FigApp, ctx: &Context, index: Option<usize>, path: Option<&str>, at: Option<Pos2>) -> Result<u64, String> {
-    // shortcut: eframe 0.36 gives only the main window an AccessKit adapter, so other windows have
+    // shortcut: eframe 0.37 gives only the main window an AccessKit adapter, so other windows have
     // no screen-reader tree; while a screen reader runs files stay tabs here. Upgrade when eframe
     // adapts every viewport.
     let one = if ctx.embed_viewports() {
@@ -452,6 +530,7 @@ pub(crate) fn begin(app: &mut FigApp, ctx: &Context) {
             }
         }
         if id != 0 {
+            app.ime.end_viewport(viewport(id));
             app.windows.list.retain(|w| w.id != id);
             continue;
         }
@@ -469,7 +548,15 @@ pub(crate) fn begin(app: &mut FigApp, ctx: &Context) {
     for w in &mut app.windows.list {
         w.docs.retain(|u| open.contains(u));
     }
+    let closed: Vec<u64> = app.windows.list.iter().map(|w| w.id).collect();
     app.windows.list.retain(|w| !w.docs.is_empty());
+    for id in closed {
+        if !app.windows.exists(id) {
+            // A window left without files is closed: forget its IME context so a later window
+            // reusing the viewport identity starts a fresh generation.
+            app.ime.end_viewport(viewport(id));
+        }
+    }
     if !app.windows.exists(app.windows.focused) {
         app.windows.focused = 0;
     }
@@ -477,6 +564,8 @@ pub(crate) fn begin(app: &mut FigApp, ctx: &Context) {
         app.windows.focused = 0;
     }
     show_own(app, None);
+    // What the main window actually presents this frame: a capture identity for the control channel.
+    app.observe_presentation();
 }
 
 /// After a window drew: when a command showed another window's file (Ctrl+Tab, opening a file
@@ -548,6 +637,7 @@ fn enter(app: &mut FigApp, id: u64) -> Option<Entered> {
     app.windows.current = id;
     app.windows.main_active = main_active;
     show_own(app, want);
+    app.observe_presentation();
     Some(Entered { id, pane, newest })
 }
 
@@ -573,6 +663,15 @@ fn leave(app: &mut FigApp, mut e: Entered, outer: Option<egui::Rect>, inner: Opt
     app.windows.current = 0;
     let main_active = app.windows.main_active.take();
     show_own(app, main_active);
+    app.observe_presentation();
+}
+
+impl Windows {
+    /// Windows whose pane holds synthetic input not yet taken by a frame (hidden windows still
+    /// need a forced paint for it).
+    pub(crate) fn pending_input_viewports(&self) -> Vec<ViewportId> {
+        self.list.iter().filter(|w| !w.pane.control_input.is_empty()).map(|w| viewport(w.id)).collect()
+    }
 }
 
 /// Run `f` as window `id` (0: the main window) outside its frame, with its state swapped in as
@@ -600,9 +699,16 @@ fn draw(app: &mut FigApp, id: u64, ui: &mut egui::Ui) {
         app.windows.focused = id;
     }
     on_close_request(app, &ctx);
-    app.logic(&ctx);
+    // The root window's `App::logic` owns app-global background work (control queues, autosave,
+    // live, background completions); a child must not repeat that once per visible window. But the
+    // UI setup a frame needs (theme and `ui.dark`, language, fonts, zoom plan, render worker) is
+    // per viewport: `App::ui` only runs for the root, so the child does it here.
     // Within the swap, so a panic leaves every window its own state.
-    guard(app, &ctx, |app| app.frame(ui));
+    guard(app, &ctx, |app| {
+        app.viewport_setup(&ctx);
+        app.frame(ui)
+    });
+    app.end_input_frame(&ctx);
     adopt(app, &e);
     settle(app, &ctx, files_before);
     if app.session.prefs != prefs {

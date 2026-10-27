@@ -1,10 +1,10 @@
 # Components, variants, styles and variables parity
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-24 · **Change:** minor (variables on a text style's fields from the style editor; instance-swap properties in the component playground; duplicating or Alt-dragging a main component makes an instance of it (#892); a bound colour variable's alpha applies once (#802); variables import reads `variables` outside `meta` and warns when it imports none (#790); variant properties reorder by drag; library files saved right after a read are read again; Hide when publishing note corrected; size and resizing overrides of layers inside instances (#731); variables export in the browser as a download; core editor leftovers: component playground, variables inside styles; layers and assets panels behaviour suite and fixes; extended collections tail; styles and variables behaviour suite and fixes; components behaviour suite and fixes; team libraries on the server, library usage and swapping a library; extended collections, variables import/export, gradient stops and variant properties bound to variables) · **Target:** Figma Design (desktop app 126.10.7)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-26 · **Change:** minor (an instance-swap property's default menu scrolls (#1338); variables on a text style's fields from the style editor; instance-swap properties in the component playground; duplicating or Alt-dragging a main component makes an instance of it (#892); a bound colour variable's alpha applies once (#802); variables import reads `variables` outside `meta` and warns when it imports none (#790); variant properties reorder by drag; library files saved right after a read are read again; Hide when publishing note corrected; size and resizing overrides of layers inside instances (#731); variables export in the browser as a download; core editor leftovers: component playground, variables inside styles; layers and assets panels behaviour suite and fixes; extended collections tail; styles and variables behaviour suite and fixes; components behaviour suite and fixes; team libraries on the server, library usage and swapping a library; extended collections, variables import/export, gradient stops and variant properties bound to variables) · **Target:** Figma Design (desktop app 126.10.7)
 
 Design systems are why teams adopt Figma. **Components: breadth ~96%, ready ~72%. Styles and
 variables: breadth ~95%, ready ~76% (estimated).** QA'd with a synthetic design system of ~300
-components used 2,000 times (`crates/engine/src/synthetic_ds.rs`, `components_scale_tests.rs`);
+components used 2,000 times (`crates/engine/src/content/synthetic_ds.rs`, `components_scale_tests.rs`);
 not with real libraries. Remaining: 4–10 h here, plus team libraries' tail (4–8 h, partly after
 accounts).
 
@@ -21,7 +21,7 @@ accounts).
 | Switching variants keeps overrides where names match and both variants had the same value; text layers keep theirs | done | |
 | Default variant: the top-left one (new instances, Assets thumbnail, generated code) | done | |
 | Variant property order (names rewritten), duplicate combinations reported | done | drag a property in the Properties section to reorder it, one undo step (#679), or `component.editProperty {index}` |
-| Properties: boolean, text, instance swap (preferred values), variant | done | |
+| Properties: boolean, text, instance swap (preferred values), variant | done | every component menu scrolls past 320 pt, the default of an instance-swap property's too (#1338); no search in them yet |
 | Slots (preferred components, fill menu, kept across updates) | done | Figma 2025 feature |
 | Exposed nested instances | done | hidden ones hide their properties |
 | Descriptions | done | |
@@ -70,13 +70,14 @@ updates with overrides kept: `library_tests.rs`, `components_scale_tests.rs`.
 | Explicit modes per frame, library collections' modes | done | |
 | Gradient stops and variant properties bound to variables | done | a stop's binding follows it when earlier stops are removed |
 | Extended collections | done | library collections, including a library's own extended collections (chains through libraries); overrides per mode with reset; follow library updates, variables new to the library collection being an update of their own; modes inherited. Checked with synthetic libraries only ([gaps](gaps.md) #14) |
-| Variables import/export (JSON) | done | the REST local variables shape (round-trips; merges by collection, mode and variable name; `variableCollections` and `variables` read under `meta` or at the top level, a warning when no variables are found or fewer than the collections list); CSS custom properties export; in the browser the export arrives as a download (import there still needs a file picker) |
+| Variables import/export (JSON) | done | the REST local variables shape (round-trips; merges by collection, mode and variable name; `variableCollections` and `variables` read under `meta` or at the top level, a warning when no variables are found or fewer than the collections list); CSS custom properties and Dart constants (Flutter) export; in the browser the export arrives as a download (import there still needs a file picker) |
 | Expressions in prototype set-variable actions | done | see [prototyping-parity](prototyping-parity.md) |
 
 ## Revision history
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-26 | minor | An instance-swap property's default menu scrolls (#1338): on the main component's Properties row the menu listed every component in the file at full height, so in a file with many (an icon library) the bottom ones ran off the screen and couldn't be picked. It now scrolls past 320 pt like the instance's swap menu, is at least 200 pt wide, ticks the current default and is named for assistive technology (`component_swap_default_tests`). Left: searching these menus. Numbers unchanged. |
 | 2026-10-24 | minor | Variables on a text style's fields from the style editor: the font and font style menus start with Apply variable (string variables), and the size, line height and letter spacing fields show a variable button on hover (number variables). A bound field shows its variable in place of the value; a click on it picks another variable and its detach button unbinds it (`style_picker_tests`). Left: the other effect and grid fields (commands only), library variables in the picker. Numbers unchanged. |
 | 2026-10-23 | minor | Instance-swap properties in the component playground: the Inspect tab's Playground shows a dropdown for each, with the same menu as the Design panel's (the property's preferred components first, then every component in the file). The component picked changes the preview and the code only, never the file. Left: slots in the playground. Numbers unchanged. |
 | 2026-10-20 | minor | A main component's copy within its file is an instance of it (#892): Duplicate (`edit.duplicate`) and Alt-drag on the canvas made a second main; they now place an instance where the copy went (same offset, the instance's default name, selected), as Copy then Paste already did. A variant duplicated in its set stays a new variant. |

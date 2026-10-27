@@ -415,6 +415,9 @@ fn every_command_survives_junk_params() {
         json!({"from": 2, "to": 1, "side": "auto"}),
         // Widgets: plugins, targets and fuel as junk.
         json!({"id": 1, "plugin": {"x": 1}, "target": [1], "fuel": -1e308, "x": 1e308}),
+        // Widget fields and menus: fields, items and values as junk.
+        json!({"id": 1, "field": {"x": 1}, "item": [1], "value": {"x": "\u{0}"}, "fuel": 1e308}),
+        json!({"id": [1], "field": "label\u{0}", "item": "", "value": "\u{7}".repeat(5000)}),
         // Plugin directories: ids, versions, servers and confirmations as junk.
         json!({"id": "../../x", "version": {"x": 1}, "server": "ws://\u{0}/?key=", "confirm": "yes", "path": [5], "plugin": [1], "query": 7, "sha256": 3}),
         json!({"id": "org.example.x", "version": "1.0.0", "server": "wss://[::1", "confirm": true, "plugin": "nope"}),
@@ -434,6 +437,9 @@ fn every_command_survives_junk_params() {
         // Online files: ids, servers, refreshes, actions and names as junk.
         json!({"file": [1], "server": 7, "refresh": "maybe", "action": "share", "name": {"x": 1}}),
         json!({"file": "../x", "server": "wss://\u{0}", "refresh": true, "action": "unshare", "name": 5}),
+        // Files as base64 data: a damaged `.sketch` (zip magic, then junk) and an old one (SQLite).
+        json!({"data": "UEsDBBQAAAAIAP////8=", "name": "x.sketch"}),
+        json!({"data": "U1FMaXRlIGZvcm1hdCAzAA==", "name": "x.sketch", "path": null}),
         // Selection color slots: malformed indexes, ranges and paints.
         json!({"targets": [{"id": 2, "fills": true, "index": -1, "range": [0, 1e308]}], "paint": {"type": "solid", "color": "invalid"}}),
         json!({"targets": [{"id": 2, "fills": "yes", "index": 0, "range": [4, 1]}], "style": 5}),
@@ -448,6 +454,11 @@ fn every_command_survives_junk_params() {
         // would write to it.)
         json!({"ids": [2, 3], "type": "vector", "path": [5], "width": -1e308, "props": {"path": "M0 0 L1e308 0 L-1e308 1e308", "height": "NaN", "x": 1e308}}),
         json!({"id": 2, "type": "vector", "path": {"d": 1}, "props": {"path": "M NaN 0 Z", "width": 1e-308}}),
+        // Batch step names and reference paths as junk.
+        json!({"commands": [{"command": "select.none", "as": "a"}, {"command": "select.none", "as": [1]}, {"command": "select.none", "as": "a"}]}),
+        json!({"commands": [{"command": "select.all", "as": "\u{0}"}, {"command": "node.set", "params": {"ids": [
+            {"$ref": "\u{0}", "field": "ids/18446744073709551616/x"}, {"$ref": {"x": 1}}, {"$step": 0, "field": "//"}, {"$ref": "\u{0}", "field": "/"}],
+            "props": {"name": {"$ref": "nope", "field": 5}}}}]}),
     ];
     for spec in all_commands() {
         if matches!(
@@ -652,4 +663,17 @@ fn find_replace_changing_only_the_case_replaces_every_occurrence() {
     s.execute("edit.findReplace", &json!({"find": "figcraft", "replace": "FigCraft", "layerNames": true})).unwrap();
     assert_eq!(s.doc().unwrap().node(t).unwrap().kind.text().unwrap().characters, "FigCraft and FigCraft, FigCraft");
     assert_eq!(s.doc().unwrap().node(f).unwrap().name, "FigCraft / FigCraft");
+}
+
+/// Damaged and too-old `.sketch` data sent to the file commands (which the junk sweep skips) fail
+/// with an ordinary error, not a caught panic.
+#[test]
+fn damaged_sketch_data_fails_without_panicking() {
+    for data in ["UEsDBBQAAAAIAP////8=", "U1FMaXRlIGZvcm1hdCAzAA=="] {
+        for cmd in ["file.open", "file.import"] {
+            let mut s = sess();
+            let r = s.execute(cmd, &json!({"data": data, "name": "x.sketch"}));
+            assert!(matches!(r, Err(ref e) if !matches!(e, EngineError::Internal { .. })), "{cmd}: {r:?}");
+        }
+    }
 }

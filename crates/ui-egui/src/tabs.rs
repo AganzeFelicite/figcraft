@@ -97,6 +97,8 @@ fn tab_drop_position(visible: &[(usize, Rect)], from: usize, pointer_x: f32) -> 
     }
 }
 
+/// Draw the top tab bar: Home, document and presenter tabs, new-tab and window controls,
+/// open/close/reorder animation and tab closing, pausing the presenter when going Home.
 pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     egui::Panel::top("tab_bar").exact_size(HEIGHT).frame(egui::Frame::NONE.fill(t.tab_bar)).show(ui, |ui| {
@@ -105,7 +107,7 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
         let mut x = rect.min.x + if app.ui.title_bar == TitleBar::Inset { 76.0 } else { 8.0 };
         // Home.
         let hr = Rect::from_min_size(pos2(x, rect.min.y), vec2(44.0, HEIGHT));
-        let hresp = ui.interact(hr, ui.id().with("home"), Sense::click()).tip(tr("Home"));
+        let hresp = ui.interact(hr, ui.scope_id().with("home"), Sense::click()).tip(tr("Home"));
         let home_active = (app.ui.home || !app.has_files()) && app.ui.present.is_none();
         crate::a11y::tab(&hresp, tr("Home"), home_active);
         if home_active {
@@ -122,7 +124,7 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
         ui.painter().line_segment([pos2(x, rect.min.y), pos2(x, rect.max.y)], Stroke::new(1.0, t.border));
         let document_tabs: Vec<usize> = app.session.docs.iter().enumerate().filter_map(|(i, d)| app.shows(d.uid).then_some(i)).collect();
         let now = ui.input(|input| input.time);
-        let motion_id = ui.id().with("tab_motion");
+        let motion_id = ui.scope_id().with("tab_motion");
         let current_uids = document_tabs.iter().filter_map(|&i| app.session.docs.get(i).map(|d| d.uid));
         let reduce_motion = app.reduce_motion();
         // Cloning `opening` is free while nothing animates (an empty Vec).
@@ -175,8 +177,8 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
             let r = tab_rects[slot];
             let body_r = Rect::from_min_max(r.min, pos2(r.max.x - 32.0, r.max.y));
             let close_r = Rect::from_min_max(body_r.right_top(), r.max);
-            let resp = ui.interact(body_r, ui.id().with(("tab", d.uid)), Sense::click_and_drag());
-            let cresp = ui.interact(close_r, ui.id().with(("tabclose", d.uid)), Sense::click()).tip(tr("Close tab"));
+            let resp = ui.interact(body_r, ui.scope_id().with(("tab", d.uid)), Sense::click_and_drag());
+            let cresp = ui.interact(close_r, ui.scope_id().with(("tabclose", d.uid)), Sense::click()).tip(tr("Close tab"));
             if (resp.dragged() || resp.drag_stopped())
                 && let Some(p) = ui.input(|inp| inp.pointer.latest_pos())
             {
@@ -266,7 +268,7 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
         let reorder = dropped.and_then(|(from, at)| tab_drop_position(&visible, from, at).map(|(to, _)| (from, to)));
         if layout.overflow {
             let r = Rect::from_min_size(pos2(x, rect.min.y), vec2(OVERFLOW_WIDTH, HEIGHT));
-            let resp = ui.interact(r, ui.id().with("tab_overflow"), Sense::click()).tip(tr("Open files"));
+            let resp = ui.interact(r, ui.scope_id().with("tab_overflow"), Sense::click()).tip(tr("Open files"));
             crate::a11y::menu_button(&resp, tr("Open files"), crate::a11y::menu_open(&resp));
             if resp.hovered() {
                 ui.painter().rect_filled(r, CornerRadius::ZERO, t.hover);
@@ -305,7 +307,7 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
         }
         if present_layout.overflow {
             let r = Rect::from_min_size(pos2(x, rect.min.y), vec2(OVERFLOW_WIDTH, HEIGHT));
-            let resp = ui.interact(r, ui.id().with("present_overflow"), Sense::click()).tip(tr("Open presentations"));
+            let resp = ui.interact(r, ui.scope_id().with("present_overflow"), Sense::click()).tip(tr("Open presentations"));
             crate::a11y::menu_button(&resp, tr("Open presentations"), crate::a11y::menu_open(&resp));
             if resp.hovered() {
                 ui.painter().rect_filled(r, CornerRadius::ZERO, t.hover);
@@ -328,7 +330,7 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
         }
         // New tab.
         let nr = Rect::from_center_size(pos2(x + 20.0, rect.center().y), vec2(28.0, 28.0));
-        let nresp = ui.interact(nr, ui.id().with("newtab"), Sense::click()).tip(crate::shortcuts::tip(tr("New design file"), "file.new"));
+        let nresp = ui.interact(nr, ui.scope_id().with("newtab"), Sense::click()).tip(crate::shortcuts::tip(tr("New design file"), "file.new"));
         if nresp.hovered() {
             ui.painter().rect_filled(nr, CornerRadius::same(5), t.hover);
         }
@@ -340,7 +342,7 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
         }
         // Right side: theme toggle (left of the window buttons).
         let theme_r = Rect::from_center_size(pos2(rect.max.x - buttons_w - 24.0, rect.center().y), vec2(28.0, 28.0));
-        let tresp = ui.interact(theme_r, ui.id().with("theme"), Sense::click()).tip(tr("Toggle light/dark theme"));
+        let tresp = ui.interact(theme_r, ui.scope_id().with("theme"), Sense::click()).tip(tr("Toggle light/dark theme"));
         if tresp.hovered() {
             ui.painter().rect_filled(theme_r, CornerRadius::same(5), t.hover);
         }
@@ -352,7 +354,7 @@ pub fn tab_bar(app: &mut FigApp, ui: &mut Ui) {
         // Only the free space drags the window. A full-bar drag target steals tab drags.
         if app.ui.title_bar != TitleBar::Native && x + 34.0 < theme_r.min.x {
             let free = Rect::from_min_max(pos2(x + 34.0, rect.min.y), pos2(theme_r.min.x, rect.max.y));
-            let drag = ui.interact(free, ui.id().with("titlebar_drag"), Sense::click_and_drag());
+            let drag = ui.interact(free, ui.scope_id().with("titlebar_drag"), Sense::click_and_drag());
             if drag.drag_started() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
@@ -411,8 +413,8 @@ fn present_tab(ui: &mut Ui, t: &Tokens, tab: &PresentTab, r: Rect, active: bool)
     let label = present_tab_name(tab);
     let body_r = Rect::from_min_max(r.min, pos2(r.max.x - 32.0, r.max.y));
     let close_r = Rect::from_min_max(body_r.right_top(), r.max);
-    let resp = ui.interact(body_r, ui.id().with(("presentation_tab", tab.id)), Sense::click()).tip(tr("Present"));
-    let cresp = ui.interact(close_r, ui.id().with(("presentation_close", tab.id)), Sense::click()).tip(tr("Close preview"));
+    let resp = ui.interact(body_r, ui.scope_id().with(("presentation_tab", tab.id)), Sense::click()).tip(tr("Present"));
+    let cresp = ui.interact(close_r, ui.scope_id().with(("presentation_close", tab.id)), Sense::click()).tip(tr("Close preview"));
     crate::a11y::tab(&resp, &label, active);
     let hovered = resp.hovered() || cresp.hovered();
     if active {
@@ -589,7 +591,7 @@ fn window_buttons(app: &mut FigApp, ui: &mut Ui, bar: Rect) -> f32 {
     ];
     for (k, (icon, tip, cmd)) in buttons.into_iter().enumerate() {
         let r = Rect::from_min_size(pos2(bar.max.x - W * (3 - k) as f32, bar.min.y), vec2(W, bar.height()));
-        let resp = ui.interact(r, ui.id().with(("window_button", k)), Sense::click()).tip(tip);
+        let resp = ui.interact(r, ui.scope_id().with(("window_button", k)), Sense::click()).tip(tip);
         let close = k == 2;
         let mut col = t.icon;
         if resp.hovered() {
@@ -631,9 +633,9 @@ pub fn resize_edges(ctx: &egui::Context) {
         (Rect::from_min_max(pos2(x0, y1 - E), pos2(x0 + E, y1)), D::SouthWest, CursorIcon::ResizeSouthWest),
         (Rect::from_min_max(pos2(x1 - E, y1 - E), pos2(x1, y1)), D::SouthEast, CursorIcon::ResizeSouthEast),
     ];
-    egui::Area::new(egui::Id::new("window_resize_edges")).order(egui::Order::Foreground).fixed_pos(s.min).interactable(true).show(ctx, |ui| {
+    egui::Area::new(egui::Id::unique("window_resize_edges")).order(egui::Order::Foreground).fixed_pos(s.min).interactable(true).show(ctx, |ui| {
         for (k, (r, dir, cursor)) in zones.into_iter().enumerate() {
-            let resp = ui.interact(r, egui::Id::new(("window_edge", k)), Sense::drag());
+            let resp = ui.interact(r, egui::Id::unique(("window_edge", k)), Sense::drag());
             if resp.hovered() || resp.dragged() {
                 ui.ctx().set_cursor_icon(cursor);
             }

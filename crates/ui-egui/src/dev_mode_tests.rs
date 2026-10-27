@@ -83,6 +83,42 @@ fn annotation_filter_and_categories_panel() {
     assert_eq!(CategoryFilter::parse(&doc, "nope"), None);
 }
 
+#[test]
+fn the_assets_list_shows_a_slice_with_a_preview_name_and_export_format() {
+    let mut s = Session::new();
+    let f = id(&s.execute("frame.create", &json!({"x": 0, "y": 0, "width": 200, "height": 200, "name": "Login"})).unwrap());
+    s.execute("shape.rectangle", &json!({"x": 20, "y": 20, "width": 80, "height": 40, "parent": f, "props": {"fill": "#FF0000"}})).unwrap();
+    // A slice with one export setting: its own format is what the row offers first.
+    let slice = id(&s.execute("node.create", &json!({"type": "slice", "x": 10, "y": 10, "width": 100, "height": 60, "name": "Avatar"})).unwrap());
+    s.execute("export.add", &json!({"ids": [slice], "setting": {"format": "webp", "size": "2x"}})).unwrap();
+    s.execute("select.set", &json!({"ids": [slice]})).unwrap();
+    let mut u = crate::layers_drag_tests::Ui::new(s);
+    u.app.ui.right_tab = crate::RightTab::Inspect;
+    u.ctx.enable_accesskit();
+    let out = u.frame_output(vec![]);
+    let nodes: Vec<egui::accesskit::Node> =
+        out.platform_output.accesskit_update.expect("an AccessKit update").nodes.into_iter().map(|(_, n)| n).collect();
+    let find = |role: egui::accesskit::Role, label: &str| {
+        nodes.iter().find(|n| n.role() == role && n.label() == Some(label)).unwrap_or_else(|| panic!("no {role:?} named {label:?}"))
+    };
+    // The row exports by a click, and the format under the name is a dropdown.
+    find(egui::accesskit::Role::Button, "Export Avatar");
+    let fmt = find(egui::accesskit::Role::ComboBox, "Format");
+    assert_eq!(fmt.value(), Some("WebP"));
+    assert_eq!(fmt.is_expanded(), Some(false));
+    // A format picked there stays after the document changes.
+    let at = centre(fmt);
+    click(&mut u, at);
+    let svg = tree(&mut u).into_iter().find(|n| n.label() == Some("SVG")).expect("SVG in the format menu");
+    click(&mut u, centre(&svg));
+    let revision = u.app.session.ds().unwrap().revision;
+    u.app.session.execute("node.set", &json!({"ids": [slice], "props": {"name": "Avatar"}})).unwrap();
+    u.app.session.execute("node.set", &json!({"ids": [f], "props": {"name": "Sign in"}})).unwrap();
+    assert_ne!(u.app.session.ds().unwrap().revision, revision);
+    let fmt = tree(&mut u).into_iter().find(|n| n.role() == Role::ComboBox && n.label() == Some("Format")).unwrap();
+    assert_eq!(fmt.value(), Some("SVG"));
+}
+
 /// A "Button" component whose nested "Heart" instance is its instance-swap property "Icon", a
 /// second icon "Star", and an instance of the button selected in the Inspect tab. Returns (ui,
 /// instance, heart, star).
@@ -126,8 +162,13 @@ fn playground_combo(u: &mut crate::layers_drag_tests::Ui, name: &str) -> Option<
         if centre(&combo).y < 860.0 {
             return Some(combo);
         }
-        let wheel =
-            Event::MouseWheel { unit: MouseWheelUnit::Point, delta: vec2(0.0, -100.0), phase: TouchPhase::Move, modifiers: Default::default() };
+        let wheel = Event::MouseWheel {
+            unit: MouseWheelUnit::Point,
+            source: egui::MouseWheelSource::Unknown,
+            delta: vec2(0.0, -100.0),
+            phase: TouchPhase::Move,
+            modifiers: Default::default(),
+        };
         u.frame(vec![Event::PointerMoved(pos2(1300.0, 500.0)), wheel]);
         for _ in 0..30 {
             u.frame(vec![]);

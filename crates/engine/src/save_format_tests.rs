@@ -252,7 +252,7 @@ fn fig_copy_from_branch_exports_active_document_without_saving_main() {
     let persisted = figcraft_format::load_bytes_with_versions(&std::fs::read(&native).unwrap()).unwrap();
     assert!(!persisted.doc.nodes().any(|n| n.name == "Branch rectangle"));
     assert!(persisted.branches[0].head.nodes().any(|n| n.name == "Branch rectangle"));
-    assert_eq!(persisted.branches[0].versions[0].name, "Branch version");
+    assert_eq!(persisted.branches[0].versions.last().unwrap().name, "Branch version");
     assert!(!s.ds().unwrap().is_dirty());
     assert!(!s.docs[0].is_dirty());
 }

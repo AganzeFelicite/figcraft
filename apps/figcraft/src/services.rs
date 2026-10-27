@@ -2,7 +2,7 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use figcraft_engine::{Prefs, Session};
@@ -11,11 +11,14 @@ use serde_json::{Value, json};
 
 pub struct Desktop {
     clipboard: Option<arboard::Clipboard>,
+    egui_ctx: Option<egui::Context>,
     /// Where the preferences live ([`config_dir`]).
     dir: Option<PathBuf>,
     pub prefs: Option<Prefs>,
     /// The system's reduce-motion setting (read in the background at startup).
     reduce_motion: Arc<AtomicBool>,
+    /// The system's colour scheme ([`watch_system_dark`]): 0 unknown, 1 dark, 2 light.
+    dark: Arc<AtomicU8>,
     /// The system's interface language (read at startup).
     language: Option<String>,
     /// Recovery copies of unsaved files (written at once after a panic).
@@ -56,15 +59,33 @@ impl Desktop {
         let reduce_motion = Arc::new(AtomicBool::new(false));
         let flag = reduce_motion.clone();
         std::thread::spawn(move || flag.store(system_reduce_motion(), Ordering::Relaxed));
+        let dark = Arc::new(AtomicU8::new(DARK_UNKNOWN));
         Self {
             clipboard: arboard::Clipboard::new().ok(),
+            egui_ctx: None,
             dir,
             prefs,
             reduce_motion,
+            dark,
             language: system_language(),
             recovery,
             last_folder: Arc::default(),
         }
+    }
+
+    /// winit reports no system theme on Linux and the BSDs: there the freedesktop colour scheme
+    /// answers instead, read once and then watched in the background, calling `wake` when it
+    /// changes (an idle window draws no frames). Elsewhere this does nothing.
+    pub fn follow_system_dark(&self, wake: impl Fn() + Send + 'static) {
+        #[cfg(all(unix, not(target_os = "macos")))]
+        if let Err(e) = std::thread::Builder::new().name("figcraft-theme".into()).spawn({
+            let dark = self.dark.clone();
+            move || watch_system_dark(&dark, &wake)
+        }) {
+            log::info!("colour scheme: can't start the watcher: {e}");
+        }
+        #[cfg(not(all(unix, not(target_os = "macos"))))]
+        let _ = wake;
     }
 }
 
@@ -144,6 +165,71 @@ fn command_says(program: &str, args: &[&str], want: &str) -> bool {
         .ok()
         .filter(|o| o.status.success())
         .is_some_and(|o| String::from_utf8_lossy(&o.stdout).trim() == want)
+}
+
+/// [`Desktop::dark`]: the colour scheme is unknown, dark, or light.
+const DARK_UNKNOWN: u8 = 0;
+const DARK_DARK: u8 = 1;
+const DARK_LIGHT: u8 = 2;
+
+/// The desktop's colour scheme through the freedesktop settings portal
+/// (`org.freedesktop.appearance` / `color-scheme`: 1 dark, 2 light, 0 no preference, which is
+/// light), read once and then watched for changes, each one calling `wake`. Without a session bus
+/// or a portal the scheme stays unknown and the UI keeps its light fallback.
+#[cfg(all(unix, not(target_os = "macos")))]
+fn watch_system_dark(dark: &AtomicU8, wake: &dyn Fn()) {
+    use zbus::zvariant::Value;
+    const PORTAL: &str = "org.freedesktop.portal.Desktop";
+    const SETTINGS: &str = "org.freedesktop.portal.Settings";
+    const APPEARANCE: &str = "org.freedesktop.appearance";
+    // `Read` (portals before 1.17, which lack `ReadOne`) wraps the value in one more variant.
+    let scheme = |v: &Value| match v {
+        Value::U32(x) => *x,
+        Value::Value(inner) => match **inner {
+            Value::U32(x) => x,
+            _ => 0,
+        },
+        _ => 0,
+    };
+    let store = |v: u32| {
+        let new = match v {
+            1 => DARK_DARK,
+            2 => DARK_LIGHT,
+            _ => DARK_UNKNOWN,
+        };
+        if dark.swap(new, Ordering::Relaxed) != new {
+            wake();
+        }
+    };
+    let Ok(conn) = zbus::blocking::connection::Builder::session().and_then(|b| b.build()) else {
+        log::info!("colour scheme: no session bus: the system theme isn't followed");
+        return;
+    };
+    let read = |method: &str| -> zbus::Result<u32> {
+        let reply = conn.call_method(Some(PORTAL), "/org/freedesktop/portal/desktop", Some(SETTINGS), method, &(APPEARANCE, "color-scheme"))?;
+        let body = reply.body();
+        Ok(scheme(&body.deserialize::<Value>()?))
+    };
+    match read("ReadOne").or_else(|_| read("Read")) {
+        Ok(v) => store(v),
+        Err(e) => log::info!("colour scheme: can't read the system setting: {e}"),
+    }
+    let watch = || -> zbus::Result<()> {
+        let rule =
+            zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).sender(PORTAL)?.interface(SETTINGS)?.member("SettingChanged")?.build();
+        for msg in zbus::blocking::MessageIterator::for_match_rule(rule, &conn, Some(8))? {
+            let msg = msg?;
+            let body = msg.body();
+            let Ok((namespace, key, value)) = body.deserialize::<(String, String, Value<'_>)>() else { continue };
+            if namespace == APPEARANCE && key == "color-scheme" {
+                store(scheme(&value));
+            }
+        }
+        Ok(())
+    };
+    if let Err(e) = watch() {
+        log::info!("colour scheme: can't watch the system setting: {e}");
+    }
 }
 
 /// Show `path` in the file manager: selected in Finder and Explorer, its folder elsewhere.
@@ -325,9 +411,12 @@ impl Services for Desktop {
         remembering(self.last_folder.clone(), pick, true)
     }
     fn clipboard_set_text(&mut self, s: &str) {
-        if let Some(c) = self.clipboard.as_mut() {
-            let _ = c.set_text(s.to_string());
+        if let Some(ctx) = &self.egui_ctx {
+            ctx.copy_text(s.to_string());
         }
+    }
+    fn set_egui_context(&mut self, ctx: &egui::Context) {
+        self.egui_ctx = Some(ctx.clone());
     }
     fn clipboard_get_text(&mut self) -> Option<String> {
         read_clipboard(self.clipboard.as_mut()?, |c| c.get_text().ok())
@@ -371,6 +460,13 @@ impl Services for Desktop {
     }
     fn reduce_motion(&self) -> bool {
         self.reduce_motion.load(Ordering::Relaxed)
+    }
+    fn system_dark(&self) -> Option<bool> {
+        match self.dark.load(Ordering::Relaxed) {
+            DARK_DARK => Some(true),
+            DARK_LIGHT => Some(false),
+            _ => None,
+        }
     }
     fn gamepad_held(&mut self) -> u32 {
         crate::gamepad::held()

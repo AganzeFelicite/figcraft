@@ -52,7 +52,7 @@ fn named_button(u: &mut Ui, label: &str) -> Pos2 {
 
 /// Corner field `k` (an index into the radii).
 fn field(u: &Ui, k: usize) -> Rect {
-    u.ctx.read_response(Id::new(("corner", k)).with("field")).expect("corner field shows").rect
+    u.ctx.read_response(Id::unique(("corner", k)).with("field")).expect("corner field shows").rect
 }
 
 /// The iOS button next to Corner smoothing sets 60% in one undo step, as the help page's "click
@@ -103,8 +103,8 @@ fn polygons_and_stars_take_corner_smoothing() {
         // With no corners of their own, the button is named for what it opens.
         let t = named_button(&mut u, "Corner smoothing");
         click(&mut u, t);
-        assert!((0..4).all(|k| u.ctx.read_response(Id::new(("corner", k)).with("field")).is_none()), "{cmd}: one radius, no corner fields");
-        let smoothing = u.ctx.read_response(Id::new("smoothing").with("field")).expect("the smoothing field shows").rect.center();
+        assert!((0..4).all(|k| u.ctx.read_response(Id::unique(("corner", k)).with("field")).is_none()), "{cmd}: one radius, no corner fields");
+        let smoothing = u.ctx.read_response(Id::unique("smoothing").with("field")).expect("the smoothing field shows").rect.center();
         let history = u.app.session.undo_depth().0;
         click(&mut u, smoothing);
         u.frame(vec![Event::Text("60".into())]);

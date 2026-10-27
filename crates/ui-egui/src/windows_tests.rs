@@ -27,7 +27,7 @@ fn frame(ctx: &egui::Context, app: &mut FigApp, close: bool) {
 /// A control request queued for the UI, and where its reply arrives.
 fn request(app: &mut FigApp, method: &str, params: Value) -> Receiver<ControlReply> {
     let (reply, rx) = channel();
-    app.control_queue.push(ControlRequest { id: json!(1), method: method.into(), params, reply, cancelled: Default::default() });
+    app.control_queue.push(ControlRequest { id: json!(1), method: method.into(), params, reply, state: Default::default() });
     rx
 }
 
@@ -38,13 +38,15 @@ fn logic(ctx: &egui::Context, app: &mut FigApp, hidden: &[ViewportId]) {
     for id in std::iter::once(ViewportId::ROOT).chain(app.windows.list.iter().map(|w| crate::windows::viewport(w.id))) {
         input.viewports.insert(id, ViewportInfo { minimized: Some(false), occluded: Some(hidden.contains(&id)), ..Default::default() });
     }
-    let _ = ctx.run_logic(&input, |ctx| crate::control::drain_hidden(app, ctx));
+    let _ = ctx.run_logic(&input, |ctx| crate::control::background(app, ctx));
 }
 
 fn names(app: &FigApp) -> Vec<String> {
     app.session.docs.iter().map(|d| d.doc.name.clone()).collect()
 }
 
+/// Asserts closing a window in the presenter shows the unsaved-changes dialog and does not
+/// dismiss the preview.
 #[test]
 fn closing_a_window_in_the_presenter_shows_the_unsaved_changes_dialog() {
     let mut session = Session::new();
@@ -59,7 +61,7 @@ fn closing_a_window_in_the_presenter_shows_the_unsaved_changes_dialog() {
 
     frame(&ctx, &mut app, true);
     assert!(app.ui.confirm_close);
-    assert!(ctx.memory(|memory| memory.area_rect(egui::Id::new(Some(crate::i18n::tr("Unsaved changes")))).is_some()), "dialog must be on screen");
+    assert!(ctx.memory(|memory| memory.area_rect(egui::Id::unique(Some(crate::i18n::tr("Unsaved changes")))).is_some()), "dialog must be on screen");
     frame(&ctx, &mut app, false);
     assert!(app.ui.present.is_some(), "asking to close does not dismiss the preview");
 }
@@ -104,6 +106,8 @@ fn windows_hold_tabs_and_close_with_their_files() {
     assert_eq!(app.session.ds().unwrap().doc.name, "A");
 }
 
+/// Asserts a hidden other window answers edits and inspection in its own file while the main
+/// window keeps its file, and a capture parks with a deadline and times out once.
 #[test]
 fn another_hidden_window_answers_requests_that_need_no_frame_in_its_own_file() {
     let mut s = Session::empty();
@@ -135,14 +139,23 @@ fn another_hidden_window_answers_requests_that_need_no_frame_in_its_own_file() {
     assert_eq!(inspect.try_recv().expect("answered").result.unwrap()["name"], json!("A"));
     assert_eq!(app.session.ds().unwrap().doc.name, "B");
 
-    // What needs a frame, and an unknown window, are errors at once: nothing waits for a window
-    // that may stay hidden.
+    // A capture that needs a frame is admitted and asks the hidden window to paint, rather than
+    // failing at once; only its deadline expires it (once).
+    // Model a request admitted long after startup, without waiting in real time.
+    app.clock.set_test_now(Some(120.0));
     let shot = request(&mut app, "ui.screenshot", json!({"window": w, "path": "unused.png"}));
     let unknown = request(&mut app, "window.list", json!({"window": 99}));
     logic(&ctx, &mut app, &[ViewportId::ROOT, other]);
-    assert!(shot.try_recv().expect("answered").result.unwrap_err().contains(&format!("window {w} is minimised or hidden")));
+    assert!(shot.try_recv().is_err(), "waits for a forced hidden paint");
+    assert_eq!(app.capture.shots.len(), 1, "one admitted capture");
     assert!(unknown.try_recv().expect("answered").result.unwrap_err().contains("no window 99"));
     assert!(app.control_queue.is_empty());
+    // The whole request lifetime is over: one timeout reply, and nothing retained.
+    app.clock.set_test_now(Some(app.clock.now() + crate::control::SHOT_TIMEOUT + 1.0));
+    logic(&ctx, &mut app, &[ViewportId::ROOT, other]);
+    assert!(shot.try_recv().expect("answered").result.unwrap_err().contains("didn't deliver a screenshot"));
+    assert!(app.capture.shots.is_empty(), "released after its deadline");
+    app.clock.set_test_now(None);
 }
 
 #[test]
@@ -169,6 +182,134 @@ fn a_request_for_a_window_on_screen_wakes_it_while_the_main_window_is_hidden() {
     logic(&ctx, &mut app, &[ViewportId::ROOT]);
     assert!(ui.try_recv().is_err(), "answered in the other window's frame");
     assert!(woken.lock().unwrap().contains(&other), "the other window is asked to draw: {:?}", woken.lock().unwrap());
+}
+
+/// Asserts every direct UI frame clears the logic-tick marker so background work runs each
+/// frame.
+#[test]
+fn every_direct_ui_frame_runs_background_work() {
+    // Direct `App::ui` harnesses never call `App::logic`: the tick marker the UI pass consumes
+    // must not leak into the next frame, or autosave/live/control work would run every other frame.
+    let ctx = egui::Context::default();
+    let mut app = FigApp::new(Session::empty(), Box::new(NoServices));
+    for _ in 0..3 {
+        frame(&ctx, &mut app, false);
+        assert!(!app.logic_ticked, "the next direct frame ticks for itself");
+    }
+}
+
+/// Asserts synthetic input for a child window reaches the pane that draws it, leaving the
+/// main window's pane untouched.
+#[test]
+fn synthetic_input_for_a_child_window_reaches_the_pane_that_draws_it() {
+    let mut s = Session::empty();
+    for n in ["A", "B"] {
+        s.execute("file.new", &json!({"name": n})).unwrap();
+    }
+    let ctx = egui::Context::default();
+    ctx.set_embed_viewports(false);
+    let mut app = FigApp::new(s, Box::new(NoServices));
+    frame(&ctx, &mut app, false);
+    let w = crate::control::handle(&mut app, &ctx, "window.new", &json!({"index": 0})).unwrap()["window"].as_u64().unwrap();
+    frame(&ctx, &mut app, false);
+    let other = crate::windows::viewport(w);
+    let events = vec![egui::Event::PointerMoved(egui::pos2(10.0, 10.0))];
+    // A request applied while the child draws must go to the live pane, not the swapped-out
+    // default `Pane` that `enter` took out (which `leave` would overwrite).
+    let pushed = crate::windows::as_window(&mut app, w, |app| app.push_control_input(events.clone()));
+    assert_eq!(pushed, Some(true));
+    assert!(app.control_input.is_empty(), "the main window's pane is untouched");
+    assert_eq!(crate::windows::take_input(&mut app, other), events, "the child's next frame takes its batch");
+}
+
+/// Asserts a child raw-input hook with no batch does not error or drain the root window's
+/// pending acknowledgement.
+#[test]
+fn a_frame_without_a_batch_does_not_error_another_windows_acknowledgement() {
+    let mut s = Session::empty();
+    for n in ["A", "B"] {
+        s.execute("file.new", &json!({"name": n})).unwrap();
+    }
+    let ctx = egui::Context::default();
+    ctx.set_embed_viewports(false);
+    let mut app = FigApp::new(s, Box::new(NoServices));
+    frame(&ctx, &mut app, false);
+    let w = crate::control::handle(&mut app, &ctx, "window.new", &json!({"index": 0})).unwrap()["window"].as_u64().unwrap();
+    frame(&ctx, &mut app, false);
+    // The root's batch awaits the pass that presents it.
+    let (tx, rx) = channel();
+    app.input_acks.push(crate::PendingAck { viewport: ViewportId::ROOT, tx, reply: ControlReply { id: json!(5), result: Ok(json!({})) } });
+    // The child's raw-input hook runs first in the same frame and has no batch of its own: that
+    // is not a document change, so the root's acknowledgement must neither be errored nor drained.
+    let events = crate::windows::take_input(&mut app, crate::windows::viewport(w));
+    assert!(events.is_empty());
+    assert!(rx.try_recv().is_err(), "no bogus document-change reply");
+    assert_eq!(app.input_acks.len(), 1, "the root's ack still waits for its own batch");
+    assert_eq!(app.input_acks[0].reply.id, json!(5));
+}
+
+/// Asserts a child window runs `viewport_setup` and its pane keeps the dark theme after the
+/// swap back.
+#[test]
+fn a_child_window_runs_the_ui_setup_the_main_window_does() {
+    // eframe calls `App::ui` only for the root window, so a child that draws while the root does
+    // not must still install the theme/language/fonts and its own `ui.dark`.
+    let mut s = Session::empty();
+    for n in ["A", "B"] {
+        s.execute("file.new", &json!({"name": n})).unwrap();
+    }
+    let ctx = egui::Context::default();
+    ctx.set_embed_viewports(false);
+    let mut app = FigApp::new(s, Box::new(NoServices));
+    frame(&ctx, &mut app, false);
+    let w = crate::control::handle(&mut app, &ctx, "window.new", &json!({"index": 0})).unwrap()["window"].as_u64().unwrap();
+    frame(&ctx, &mut app, false);
+    app.session.prefs.theme = "dark".into();
+    let dark = crate::windows::as_window(&mut app, w, |app| {
+        app.viewport_setup(&ctx);
+        app.inspect()["dark"].clone()
+    });
+    assert_eq!(dark, Some(json!(true)), "the child's pane knows the dark theme");
+    // It stays with the pane after the swap back, so its tabs and dialogs choose the right theme.
+    let again = crate::windows::as_window(&mut app, w, |app| app.inspect()["dark"].clone());
+    assert_eq!(again, Some(json!(true)));
+}
+
+/// Asserts a closed and later reused viewport does not inherit its old IME context
+/// generation.
+#[test]
+fn an_emptied_window_forgets_its_ime_context() {
+    // `windows::begin` ends the viewport when a window loses its last file; a later window that
+    // reuses the viewport identity must not inherit the old context generation.
+    use egui::ime_context::{CommittedText, ImeContextTracker, ImeObservation, ImeTarget};
+    use egui::{IMEPurpose, Id};
+
+    let mut s = Session::empty();
+    for n in ["A", "B"] {
+        s.execute("file.new", &json!({"name": n})).unwrap();
+    }
+    let ctx = egui::Context::default();
+    ctx.set_embed_viewports(false);
+    let mut app = FigApp::new(s, Box::new(NoServices));
+    frame(&ctx, &mut app, false);
+    let w = crate::control::handle(&mut app, &ctx, "window.new", &json!({"index": 0})).unwrap()["window"].as_u64().unwrap();
+    frame(&ctx, &mut app, false);
+    let vp = crate::windows::viewport(w);
+    let target = ImeTarget::new(Id::unique("figcraft.test.ime"), 3);
+    let observe = |tracker: &mut ImeContextTracker| {
+        let text = "a";
+        let observation = ImeObservation::new(1, 1, target).purpose(IMEPurpose::Normal).committed(Some(CommittedText::new(text, 1, 1)));
+        tracker.observe(vp, Some(observation))
+    };
+    let first = observe(&mut app.ime).expect("first focused observation");
+
+    if let Some(win) = app.windows.list.iter_mut().find(|x| x.id == w) {
+        win.docs.clear();
+    }
+    frame(&ctx, &mut app, false);
+    assert!(!app.windows.exists(w), "the empty window closed");
+    let again = observe(&mut app.ime).expect("a new context");
+    assert_ne!(again.context_generation, first.context_generation, "the closed viewport's context was forgotten");
 }
 
 /// Answers each Save as with the next of `paths` (none left: cancelled) and counts the dialogs
@@ -229,7 +370,9 @@ fn the_unsaved_changes_question_offers_save_dont_save_and_cancel() {
     let (ctx, mut app, _) = asking(None, vec![]);
     ctx.enable_accesskit();
     frame(&ctx, &mut app, false);
-    let out = ctx.run_ui(RawInput::default(), |ui| app.ui(ui));
+    let mut out = ctx.run_ui(RawInput::default(), |ui| app.ui(ui));
+    // A canvas picture that lands in this frame uploads a texture nobody applies here.
+    out.textures_delta.clear();
     let nodes = out.platform_output.accesskit_update.expect("an AccessKit update").nodes;
     let buttons: Vec<String> =
         nodes.iter().filter(|(_, n)| n.role() == egui::accesskit::Role::Button).filter_map(|(_, n)| n.label().map(str::to_string)).collect();

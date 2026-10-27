@@ -204,6 +204,18 @@ fn text_on_a_path_left_empty_puts_the_path_back_without_an_undo_step() {
 }
 
 #[test]
+fn scaling_text_scales_its_path() {
+    let mut s = Session::new();
+    let t = id(s.execute("text.create", &json!({"text": "Around", "x": 0, "y": 0})).unwrap());
+    let v = id(s.execute("vector.create", &json!({"path": "M0 0 C50 -50 150 -50 200 0", "x": 40, "y": 100})).unwrap());
+    s.execute("text.onPath", &json!({"ids": [t, v]})).unwrap();
+    let w0 = figcraft_geom::Shape::bounding_box(&text_path(&s, t).unwrap().path()).width();
+    s.execute("transform.scale", &json!({"ids": [t], "factor": 2.0})).unwrap();
+    let w1 = figcraft_geom::Shape::bounding_box(&text_path(&s, t).unwrap().path()).width();
+    assert!((w1 - w0 * 2.0).abs() < 1.0, "path width {w0} -> {w1}");
+}
+
+#[test]
 fn svg_text_paths_import_as_text_on_a_path() {
     // SVG text is parsed with Inter standing in for every family (CI has no fonts).
     if figcraft_text::find_face("Inter", "Regular").is_none() {

@@ -173,7 +173,7 @@ fn penpot_action(item: &Value, kind: &PenpotActionKind) -> Option<(Action, Optio
             let close_on_outside = item.get("closeClickOutside").and_then(Value::as_bool).unwrap_or(false);
             // Penpot draws a translucent black sheet behind an overlay that asks for one.
             let background = item.get("backgroundOverlay").and_then(Value::as_bool).unwrap_or(false).then(|| Color::new(0.0, 0.0, 0.0, 0.2));
-            Action::OpenOverlay { dest: NodeId(0), position, close_on_outside, background, offset }
+            Action::OpenOverlay { dest: NodeId(0), position, close_on_outside, background, offset, anchor: Default::default() }
         }
         PenpotActionKind::CloseOverlay => Action::CloseOverlay,
         // Penpot's "previous screen" is the player's back action.
@@ -314,8 +314,8 @@ fn replace_dest(action: Action, dest: NodeId) -> Action {
     match action {
         Action::Navigate { preserve_scroll, .. } => Action::Navigate { dest, preserve_scroll },
         Action::ScrollTo { offset, .. } => Action::ScrollTo { dest, offset },
-        Action::OpenOverlay { position, close_on_outside, background, offset, .. } => {
-            Action::OpenOverlay { dest, position, close_on_outside, background, offset }
+        Action::OpenOverlay { position, close_on_outside, background, offset, anchor, .. } => {
+            Action::OpenOverlay { dest, position, close_on_outside, background, offset, anchor }
         }
         Action::SwapOverlay { .. } => Action::SwapOverlay { dest },
         Action::ChangeTo { .. } => Action::ChangeTo { dest },

@@ -2,6 +2,7 @@
 //! report it, instead of the app quitting silently (#261).
 
 use figcraft_ui_egui::dialogs::window_failed as message;
+use figcraft_ui_egui::i18n::tr;
 
 const ERROR: &str = "WGPU error: Failed to create surface for any enabled backend: {}";
 const BACKEND_HINT: &str = "WGPU_BACKEND is set and names the graphics API to use; unsetting it lets FigCraft choose.";
@@ -10,13 +11,6 @@ const DRIVER_HINT: &str = if cfg!(windows) {
 } else {
     "Updating the graphics driver often helps. WGPU_BACKEND (vulkan, gl, metal) names another graphics API to try."
 };
-
-/// Other startup tests can change the process-wide language while this message is built.
-fn contains_hint(text: &str, key: &str) -> bool {
-    use figcraft_ui_egui::i18n::{Text, languages};
-    text.contains(key)
-        || languages().iter().flat_map(|lang| lang.ui).any(|(k, value)| *k == key && matches!(value, Text::Plain(hint) if text.contains(hint)))
-}
 
 #[test]
 fn the_message_carries_the_error_and_where_to_report_it() {
@@ -28,9 +22,9 @@ fn the_message_carries_the_error_and_where_to_report_it() {
 #[test]
 fn without_wgpu_backend_it_suggests_the_driver_and_another_graphics_api() {
     let text = message(ERROR, false);
-    assert!(contains_hint(&text, DRIVER_HINT), "{text}");
+    assert!(text.contains(tr(DRIVER_HINT)), "{text}");
     assert!(text.contains("WGPU_BACKEND"), "another graphics API to try: {text}");
-    assert!(!contains_hint(&text, BACKEND_HINT), "{text}");
+    assert!(!text.contains(tr(BACKEND_HINT)), "{text}");
 }
 
 #[cfg(windows)]
@@ -43,6 +37,6 @@ fn on_windows_it_shows_how_to_start_with_opengl() {
 #[test]
 fn with_wgpu_backend_set_it_suggests_unsetting_it() {
     let text = message(ERROR, true);
-    assert!(contains_hint(&text, BACKEND_HINT), "{text}");
-    assert!(!contains_hint(&text, DRIVER_HINT), "the chosen backend is the likelier cause: {text}");
+    assert!(text.contains(tr(BACKEND_HINT)), "{text}");
+    assert!(!text.contains(tr(DRIVER_HINT)), "the chosen backend is the likelier cause: {text}");
 }

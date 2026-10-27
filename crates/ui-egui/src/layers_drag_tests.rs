@@ -43,11 +43,38 @@ impl Ui {
     /// screen and clock.
     pub(crate) fn frame_raw(&mut self, raw: RawInput) -> egui::FullOutput {
         self.time += 1.0 / 60.0;
+        self.app.clock.set_test_now(Some(self.time));
         let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0))), time: Some(self.time), ..raw };
         let app = &mut self.app;
         let mut out = self.ctx.run_ui(input, |ui| app.ui(ui));
         out.textures_delta.clear();
         out
+    }
+
+    /// One frame that egui reruns as a discarded pass (the returned output is the presented pass).
+    ///
+    /// The rerun sees the same `RawInput`; the custom text editor must not apply its events twice,
+    /// and the IME descriptor of the presented pass must still describe the first pass's result.
+    pub(crate) fn frame_raw_with_discard(&mut self, raw: RawInput) -> egui::FullOutput {
+        self.time += 1.0 / 60.0;
+        self.app.clock.set_test_now(Some(self.time));
+        let input = RawInput { screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1440.0, 900.0))), time: Some(self.time), ..raw };
+        let Ui { ctx, app, .. } = self;
+        let mut out = ctx.run_ui(input, |ui| {
+            app.ui(ui);
+            if ui.ctx().current_pass_index() == 0 {
+                ui.ctx().request_discard("ime test: exercise a discarded pass");
+            }
+        });
+        out.textures_delta.clear();
+        out
+    }
+
+    /// Move the harness time (and the app's monotonic clock) forward, e.g. past a deadline; the
+    /// next frame continues from here.
+    pub(crate) fn advance_clock(&mut self, secs: f64) {
+        self.time = secs;
+        self.app.clock.set_test_now(Some(secs));
     }
 
     /// The middle of `id`'s row in the layers panel (found by hovering down the panel).

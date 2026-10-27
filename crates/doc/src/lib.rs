@@ -11,6 +11,7 @@
 pub mod board;
 pub mod colors;
 pub mod comments;
+pub mod facilitation;
 pub mod geometry;
 pub mod handoff;
 pub mod ids;
@@ -27,6 +28,7 @@ pub mod vector_regions;
 pub use board::*;
 pub use colors::*;
 pub use comments::*;
+pub use facilitation::*;
 pub use figcraft_color as color;
 pub use figcraft_geom as geom;
 pub use handoff::*;
@@ -43,6 +45,10 @@ use figcraft_geom::{Affine, Point, Rect};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
+
+/// Deepest descendant [`Document::world_render_bounds`] follows: as deep as the renderer draws
+/// (`figcraft_render::MAX_EXPORT_DEPTH`), so a crafted chain can't overflow the stack (#1062).
+const MAX_RENDER_DEPTH: usize = 256;
 
 /// Stable node identifier, unique within a document.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
@@ -204,6 +210,15 @@ pub struct Document {
     /// [`handoff`]).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub dev_snapshots: BTreeMap<NodeId, Arc<DevSnapshot>>,
+    /// A board's countdown (see [`facilitation`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timer: Option<BoardTimer>,
+    /// A board's vote, running or ended.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vote: Option<Vote>,
+    /// The vote's ballots, by voter.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub votes: Ballots,
 }
 
 impl Default for Document {
@@ -243,6 +258,9 @@ impl Document {
             image_presets: Vec::new(),
             annotation_categories: None,
             dev_snapshots: BTreeMap::new(),
+            timer: None,
+            vote: None,
+            votes: BTreeMap::new(),
         }
     }
 
@@ -703,12 +721,16 @@ impl Document {
     /// a clipping frame's own area, else that and what its visible children show (masked
     /// children only within their mask). A group is what its children show, grown by its effects.
     pub fn world_render_bounds(&self, id: NodeId) -> Option<Rect> {
+        self.render_bounds_at(id, 0)
+    }
+
+    fn render_bounds_at(&self, id: NodeId, depth: usize) -> Option<Rect> {
         let n = self.node(id)?;
         let own = n.own_paint_bounds(self.world_transform(id));
-        if n.clip && n.kind.is_frame_like() && !n.kind.bounds_follow_children() {
+        if (n.clip && n.kind.is_frame_like() && !n.kind.bounds_follow_children()) || depth >= MAX_RENDER_DEPTH {
             return Some(own);
         }
-        Some(match (self.children_render_bounds(n), &n.kind) {
+        Some(match (self.children_render_bounds(n, depth + 1), &n.kind) {
             (Some(kids), NodeKind::Group) => n.grow_by_effects(kids),
             (Some(kids), _) => own.union(kids),
             (None, _) => own,
@@ -716,15 +738,15 @@ impl Document {
     }
 
     /// What `n`'s visible children show, together: each mask's run within the mask's bounds.
-    fn children_render_bounds(&self, n: &Node) -> Option<Rect> {
+    fn children_render_bounds(&self, n: &Node, depth: usize) -> Option<Rect> {
         let shown = |i: &NodeId| self.node(*i).is_some_and(|c| c.visible && !c.is_mask);
         let mut out: Option<Rect> = None;
         for run in self.paint_runs(n) {
             let ids = n.children.get(run).unwrap_or(&[]);
             let mask = ids.first().copied().filter(|m| self.node(*m).is_some_and(|c| c.is_mask && c.visible));
-            let r = ids.iter().filter(|i| shown(i)).filter_map(|i| self.world_render_bounds(*i)).reduce(|a, b| a.union(b));
+            let r = ids.iter().filter(|i| shown(i)).filter_map(|i| self.render_bounds_at(*i, depth)).reduce(|a, b| a.union(b));
             let r = match mask {
-                Some(m) => r.zip(self.world_render_bounds(m)).map(|(a, b)| a.intersect(b)).filter(|x| x.width() > 0.0 && x.height() > 0.0),
+                Some(m) => r.zip(self.render_bounds_at(m, depth)).map(|(a, b)| a.intersect(b)).filter(|x| x.width() > 0.0 && x.height() > 0.0),
                 None => r,
             };
             out = match (out, r) {
@@ -1247,6 +1269,8 @@ mod proto_expr_mode_tests;
 mod proto_expr_parse_tests;
 #[cfg(test)]
 mod proto_expr_tests;
+#[cfg(test)]
+mod proto_overlay_anchor_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]

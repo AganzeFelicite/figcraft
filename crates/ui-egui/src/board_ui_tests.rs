@@ -38,17 +38,18 @@ fn pill(u: &Ui) -> Rect {
     crate::toolbar::pill_rect(u.app.canvas.rect, crate::toolbar::bar_width(&u.app))
 }
 
-/// The left edge of board toolbar group `i` (button 32 wide, a 10-wide caret after the groups with
-/// flyouts, 4 between): move, ink, sticky, shapes, connector, text, section, stamp, comment.
+/// The left edge of board toolbar group `i` (button 32 wide, a 16-wide caret 2 after it on the
+/// groups with flyouts, 4 between): move, ink, sticky, shapes, connector, text, section, stamp,
+/// comment.
 fn group_x(u: &Ui, i: usize) -> f32 {
-    const WIDTHS: [f32; 9] = [46.0, 46.0, 46.0, 46.0, 36.0, 36.0, 36.0, 46.0, 36.0];
+    const WIDTHS: [f32; 9] = [54.0, 54.0, 54.0, 54.0, 36.0, 36.0, 36.0, 54.0, 36.0];
     pill(u).min.x + 8.0 + WIDTHS.iter().take(i).sum::<f32>()
 }
 
 /// Open group `i`'s flyout from its caret and click option `n` in it (a row of 32-wide cells, 4
 /// apart, 8 in from the flyout's edge, the flyout's bottom 8 above the pill).
 fn pick_option(u: &mut Ui, i: usize, n: usize) {
-    let caret = pos2(group_x(u, i) + 37.0, pill(u).center().y);
+    let caret = pos2(group_x(u, i) + 42.0, pill(u).center().y);
     click(u, caret);
     let at = pos2(group_x(u, i) + 8.0 + n as f32 * 36.0 + 16.0, pill(u).min.y - 8.0 - 24.0);
     click(u, at);
@@ -56,12 +57,12 @@ fn pick_option(u: &mut Ui, i: usize, n: usize) {
 
 /// Whether the bar over the selection showed in the last frame.
 fn bar_shown(ctx: &egui::Context) -> bool {
-    ctx.memory(|m| m.areas().visible_last_frame(&egui::LayerId::new(egui::Order::Middle, egui::Id::new("board_bar"))))
+    ctx.memory(|m| m.areas().visible_last_frame(&egui::LayerId::new(egui::Order::Middle, egui::Id::unique("board_bar"))))
 }
 
 /// The bar over the selection, when it shows.
 fn bar(u: &Ui) -> Option<Rect> {
-    bar_shown(&u.ctx).then(|| u.ctx.memory(|m| m.area_rect(egui::Id::new("board_bar")))).flatten()
+    bar_shown(&u.ctx).then(|| u.ctx.memory(|m| m.area_rect(egui::Id::unique("board_bar")))).flatten()
 }
 
 #[test]
@@ -78,7 +79,7 @@ fn the_board_toolbar_picks_tools_with_their_colours_shapes_and_stamps() {
     let connector = pos2(group_x(&u, 4) + 16.0, pill(&u).center().y);
     click(&mut u, connector);
     assert_eq!(u.app.session.tool.tool, ToolId::Connector);
-    let ink_caret = pos2(group_x(&u, 1) + 37.0, pill(&u).center().y);
+    let ink_caret = pos2(group_x(&u, 1) + 42.0, pill(&u).center().y);
     click(&mut u, ink_caret);
     assert_eq!(u.app.ui.tool_flyout, Some("ink"));
 }
@@ -142,7 +143,7 @@ fn the_selection_bar_sets_a_connectors_style_and_offers_nothing_for_a_stamp() {
     u.frame(vec![]);
     let r = bar(&u).expect("the bar shows for a connector");
     let cy = r.center().y;
-    // After the colours (208): Straight, Elbow, the end's arrow, 30 apart.
+    // After the colours (208): Straight, Elbow, Curved, the end's arrow, 30 apart.
     click(&mut u, pos2(r.min.x + 208.0 + 14.0, cy));
     let routing = |u: &Ui| match &u.app.session.doc().unwrap().node(c).unwrap().board {
         Some(BoardItem::Connector(k)) => k.routing,
@@ -151,6 +152,9 @@ fn the_selection_bar_sets_a_connectors_style_and_offers_nothing_for_a_stamp() {
     assert_eq!(routing(&u), Routing::Straight);
     let r = bar(&u).unwrap();
     click(&mut u, pos2(r.min.x + 208.0 + 60.0 + 14.0, cy));
+    assert_eq!(routing(&u), Routing::Curved);
+    let r = bar(&u).unwrap();
+    click(&mut u, pos2(r.min.x + 208.0 + 90.0 + 14.0, cy));
     assert_eq!(u.app.session.doc().unwrap().node(c).unwrap().stroke.cap_end, StrokeCap::None);
     // Nothing is offered while a stamp alone is selected: it takes neither colour nor style.
     let st = id(&u.app.session.execute("board.stamp", &json!({"x": 900, "y": 0, "stamp": "star"})).unwrap());
@@ -209,4 +213,61 @@ fn the_next_sticky_from_the_keyboard_goes_on_typing() {
     let te = u.app.session.ds().unwrap().text_edit.clone().expect("typing in the new sticky");
     let owner = figcraft_engine::board::owner_of_text(doc, te.id).unwrap();
     assert_eq!(doc.node(owner).unwrap().transform.translation().x, 224.0);
+}
+
+#[test]
+fn a_board_page_has_a_dot_grid_under_its_layers_thinned_out_zoomed_out() {
+    let mut u = board();
+    let sticky = id(&u.app.session.execute("board.sticky", &json!({"x": 0, "y": 0})).unwrap());
+    u.app.session.execute("view.zoom100", &json!({})).unwrap();
+    u.frame(vec![]);
+    let t = crate::theme::Tokens::get(&u.ctx);
+    let page = figcraft_doc::BOARD_PAGE;
+    let bg = egui::Color32::from_rgb((page.r * 255.0).round() as u8, (page.g * 255.0).round() as u8, (page.b * 255.0).round() as u8);
+    let dots = crate::board_bar::dots(&u.app, bg, &t).expect("a board has dots");
+    assert!(dots.color.a > 0.0 && dots.color.r < 0.5, "dark dots on the light page: {:?}", dots.color);
+    // The canvas render draws them on the page, and the layers over them.
+    let ds = u.app.session.ds().unwrap();
+    let view = figcraft_render::View { origin: (-60.0, -60.0), scale: 1.0, width: 400, height: 400 };
+    let opts = figcraft_render::Options { dots: Some(dots), ..Default::default() };
+    let pix = figcraft_render::render_view(&ds.doc, ds.page, &view, &opts).unwrap();
+    let at = |x: f64, y: f64| {
+        let p = pix.pixel((x + 60.0) as u32, (y + 60.0) as u32).unwrap();
+        [p.red(), p.green(), p.blue()]
+    };
+    let plain = [bg.r(), bg.g(), bg.b()];
+    let step = dots.step;
+    assert_ne!(at(-2.0 * step, -2.0 * step), plain, "a dot on the page");
+    assert_eq!(at(-2.0 * step + step / 2.0, -2.0 * step), plain, "between the dots");
+    let fill = u.app.session.doc().unwrap().node(sticky).unwrap().fills[0].solid_color().unwrap().to_rgba8();
+    assert_eq!(at(2.0 * step, 2.0 * step), [fill[0], fill[1], fill[2]], "the sticky covers the dot under it");
+    // Zoomed out, the dots space out: every second, fourth… stays, the next to go fading.
+    use crate::board_bar::dot_spacing;
+    assert_eq!(dot_spacing(1.0), Some((24.0, ((24.0 - 14.0) / 14.0) as f32)));
+    assert_eq!(dot_spacing(0.25).map(|d| d.0), Some(96.0));
+    assert_eq!(dot_spacing(4.0), Some((24.0, 1.0)));
+    for z in [1e-300, 1e-9, 0.01, 0.37, 1.0, 64.0, 1e300] {
+        let (step, fade) = dot_spacing(z).unwrap();
+        assert!(step * z >= 14.0 && step * z < 28.0 || step == 24.0, "{z}: {step}");
+        assert!((0.0..=1.0).contains(&fade));
+    }
+    assert_eq!(dot_spacing(0.0), None);
+    assert_eq!(dot_spacing(f64::NAN), None);
+    // Design files have none.
+    let d = Ui::new(Session::new());
+    assert!(crate::board_bar::dots(&d.app, bg, &t).is_none());
+}
+
+#[test]
+fn a_selected_connector_shows_its_ends_as_handles() {
+    let mut u = board();
+    let a = u.app.session.execute("board.sticky", &json!({"x": 0, "y": 0})).unwrap()["id"].clone();
+    let b = u.app.session.execute("board.sticky", &json!({"x": 400, "y": 0})).unwrap()["id"].clone();
+    u.app.session.execute("board.connector", &json!({"from": a, "to": b, "style": "straight"})).unwrap();
+    let shapes = flat(&u.frame_output(vec![]).shapes);
+    let ends = [u.app.to_screen(200.0, 100.0), u.app.to_screen(400.0, 100.0)];
+    for end in ends {
+        let ring = shapes.iter().any(|s| matches!(s, egui::Shape::Circle(c) if (c.center - end).length() < 0.5 && c.radius == 5.0));
+        assert!(ring, "a handle at {end:?}");
+    }
 }

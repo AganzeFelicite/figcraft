@@ -56,6 +56,23 @@ fn the_context_menu_groups_the_copy_commands_under_copy_as() {
 }
 
 #[test]
+fn the_context_menu_offers_go_to_main_for_an_instance() {
+    // Right-clicking an instance reaches its main component: the menu offers "Go to main
+    // component" instead of "Create component" (which is for plain layers).
+    let mut s = Session::new();
+    let f = id(&s.execute("frame.create", &json!({"x": 0, "y": 0, "width": 100, "height": 60, "name": "Button"})).unwrap());
+    let comp = id(&s.execute("component.create", &json!({"ids": [f]})).unwrap());
+    let inst = id(&s.execute("instance.create", &json!({"component": comp, "x": 0, "y": 200})).unwrap());
+    let mut u = Ui::new(s);
+    u.frame(vec![]);
+    u.app.ui.context_menu = Some((Pos2::new(700.0, 300.0), vec![inst]));
+    u.frame(vec![]);
+    let shapes = flat(&u.frame_output(vec![]).shapes);
+    assert!(has_text(&shapes, "Go to main component"), "an instance's menu reaches its main");
+    assert!(!has_text(&shapes, "Create component"), "not offered for an instance");
+}
+
+#[test]
 fn copying_a_link_with_nothing_selected_copies_nothing() {
     let mut s = Session::new();
     s.execute("frame.create", &json!({"x": 0, "y": 0, "width": 300, "height": 200})).unwrap();

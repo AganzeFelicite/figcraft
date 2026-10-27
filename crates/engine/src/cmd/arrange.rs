@@ -495,9 +495,15 @@ pub fn scale_node(doc: &mut Document, id: NodeId, k: f64) -> Result<()> {
             t.paragraph_spacing *= k;
             t.paragraph_indent *= k;
             t.list_spacing *= k;
+            if let Some(tp) = &mut t.path {
+                tp.scale(k, k);
+            }
         }
         if let NodeKind::Vector { network } = &mut n.kind {
             network.scale(k, k);
+            for v in &mut network.vertices {
+                v.radius *= k;
+            }
         }
         n.width *= k;
         n.height *= k;
@@ -556,7 +562,11 @@ pub(crate) fn resize_cmd(s: &mut Session, p: &Value) -> Result<Value> {
             n.child_layout.sizing_v = Sizing::Fixed;
         }
         if let NodeKind::Text(t) = &mut n.kind {
-            t.auto_resize = if num(p, "height").is_some() { TextAutoResize::None } else { TextAutoResize::Height };
+            if num(p, "height").is_some() {
+                t.fix_size(num(p, "width").is_some(), true);
+            } else if t.auto_resize != TextAutoResize::Truncate {
+                t.auto_resize = TextAutoResize::Height;
+            }
         }
         super::props::restore_worlds(doc, &kept)?;
     }

@@ -599,6 +599,7 @@ fn prototype_interactions_and_flows_round_trip() {
         Interaction {
             trigger: Trigger::MouseEnter,
             actions: vec![Action::OpenOverlay {
+                anchor: Default::default(),
                 dest: menu,
                 position: OverlayPosition::Center,
                 close_on_outside: true,
@@ -641,6 +642,11 @@ fn prototype_interactions_and_flows_round_trip() {
     let NodeKind::Page { flows, .. } = &back.node(back.pages[0]).unwrap().kind else { panic!() };
     assert_eq!(flows.len(), 1);
     assert_eq!(flows[0].start, named(&back, "Home"));
+    if let Action::OpenOverlay { anchor, .. } = &mut doc.node_mut(button).unwrap().interactions[1].actions[0] {
+        *anchor = figcraft_doc::proto::OverlayAnchor::TriggerOutside;
+    }
+    let (_, warnings) = export(&doc).unwrap();
+    assert!(warnings.iter().any(|warning| warning.contains("Overlay anchor") && warning.contains("screen")), "{warnings:?}");
 }
 
 #[test]

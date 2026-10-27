@@ -133,3 +133,11 @@ fn malformed_alpha_or_extra_args_rejected() {
     assert_eq!(Color::parse_css("rgb(1,2,3)").unwrap().a, 1.0);
     assert_eq!(Color::parse_css("rgba(1,2,3,0.5)").unwrap().a, 0.5);
 }
+
+#[test]
+fn to_css_round_trips_every_alpha() {
+    for a in 0..=255u8 {
+        let c = Color::from_rgba8(10, 20, 30, a);
+        assert_eq!(Color::parse_css(&c.to_css()).unwrap().to_rgba8(), c.to_rgba8(), "alpha {a}: {}", c.to_css());
+    }
+}

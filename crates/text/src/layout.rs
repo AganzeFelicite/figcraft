@@ -532,7 +532,7 @@ pub fn layout(text: &TextData, box_width: Option<f64>, box_height: Option<f64>) 
     let mut out = TextLayout { styles: styles.clone(), ..Default::default() };
     let mut y = 0.0;
     let mut para_start_line = true;
-    let max_lines = if text.max_lines > 0 && matches!(text.auto_resize, TextAutoResize::Truncate) { text.max_lines as usize } else { usize::MAX };
+    let max_lines = if text.max_lines > 0 && text.truncates() { text.max_lines as usize } else { usize::MAX };
     // A style's vertical metrics (ascent, descent, line height, cap height) come from its own
     // font, never a fallback face, so lines mixing scripts keep the spacing of lines that don't.
     let metrics = |st_idx: usize| -> [f64; 4] {
@@ -545,6 +545,25 @@ pub fn layout(text: &TextData, box_width: Option<f64>, box_height: Option<f64>) 
             }
             None => [size * 0.8, size * 0.2, whole_px(st.line_height.resolve(size, 1.2)), size * 0.7],
         }
+    };
+    // An item's glyph with its pen position at `pen` on the line at `baseline` (none for a space
+    // the font has no glyph for).
+    let glyph_at = |it: &Item, pen: f64, baseline: f64| {
+        let size = styles.get(it.style).map(|st| sanitize_size(st.font_size)).unwrap_or(12.0) * it.scale;
+        (it.gid != 0 || !it.is_space()).then(|| Glyph {
+            face: it.face.clone(),
+            coords: it.coords.clone(),
+            gid: it.gid,
+            x: pen + it.dx,
+            y: baseline - it.dy,
+            size,
+            advance: it.adv,
+            char_start: it.char_start,
+            char_end: it.char_end,
+            style: it.style,
+            rtl: it.level % 2 == 1,
+            warp: Affine::IDENTITY,
+        })
     };
     let mut first_cap = 0.0;
     for (li, (s, e, para_end, para)) in lines.iter().enumerate() {
@@ -685,23 +704,7 @@ pub fn layout(text: &TextData, box_width: Option<f64>, box_height: Option<f64>) 
             if is_line_break(it.ch) {
                 continue;
             }
-            let size = styles.get(it.style).map(|st| sanitize_size(st.font_size)).unwrap_or(12.0) * it.scale;
-            if it.gid != 0 || !it.is_space() {
-                out.glyphs.push(Glyph {
-                    face: it.face.clone(),
-                    coords: it.coords.clone(),
-                    gid: it.gid,
-                    x: pen + it.dx,
-                    y: baseline - it.dy,
-                    size,
-                    advance: it.adv,
-                    char_start: it.char_start,
-                    char_end: it.char_end,
-                    style: it.style,
-                    rtl: it.level % 2 == 1,
-                    warp: Affine::IDENTITY,
-                });
-            }
+            out.glyphs.extend(glyph_at(it, pen, baseline));
             pen += it.adv;
             if it.stretches() {
                 pen += justify_extra;
@@ -757,7 +760,40 @@ pub fn layout(text: &TextData, box_width: Option<f64>, box_height: Option<f64>) 
         }
     }
     if out.truncated {
+        // The last line shown runs on into the line cut after it, so the ellipsis fills the line
+        // ("Lorem consec…") instead of following the last whole word ("Lorem…").
+        let last = out.lines.len().checked_sub(1);
+        let wrapped_on = last.and_then(|li| Some((out.lines.get(li)?, lines.get(li)?, lines.get(li + 1)?)));
+        if let (Some(maxw), Some((line, &(_, e, para_end, _), &(ns, ne, _, _)))) = (wrap, wrapped_on)
+            && !para_end
+            && !break_after(e)
+            && !line.rtl
+        {
+            let baseline = line.baseline;
+            let mut pen = out.glyphs.get(line.glyph_start..line.glyph_end).and_then(<[Glyph]>::last).map_or(line.width, |g| g.x + g.advance);
+            for it in items.get(ns..ne).unwrap_or(&[]) {
+                if pen > maxw {
+                    break;
+                }
+                if !is_line_break(it.ch) {
+                    out.glyphs.extend(glyph_at(it, pen, baseline));
+                    pen += it.adv;
+                }
+            }
+            let gend = out.glyphs.len();
+            if let Some(l) = out.lines.last_mut() {
+                l.glyph_end = gend;
+            }
+        }
         add_ellipsis(&mut out, wrap);
+        // Carets and selections reach every char the line shows, borrowed ones included.
+        if let Some(l) = out.lines.last() {
+            let shown =
+                out.glyphs.get(l.glyph_start..l.glyph_end).unwrap_or(&[]).iter().filter(|g| g.char_end > g.char_start).map(|g| g.char_end).max();
+            if let (Some(shown), Some(l)) = (shown, out.lines.last_mut()) {
+                l.char_end = l.char_end.max(shown);
+            }
+        }
     }
 
     // Horizontal alignment within the box.
@@ -1076,6 +1112,7 @@ fn shape_segment(chars: &[char], seg: &Segment, face: &Arc<Face>, features: &[Fe
     // a word split across styled runs is capitalised once) and remember synthesised small caps.
     let mut mapped: Vec<(char, usize, bool)> = Vec::with_capacity(end.saturating_sub(start));
     let mut prev = start.checked_sub(1).and_then(|i| chars.get(i)).copied();
+    let mut before = start.checked_sub(2).and_then(|i| chars.get(i)).copied();
     for (i, c) in chars.get(start..end).unwrap_or(&[]).iter().enumerate() {
         let src = start + i;
         if small_caps && !native_smcp && c.is_lowercase() {
@@ -1086,10 +1123,11 @@ fn shape_segment(chars: &[char], seg: &Segment, face: &Arc<Face>, features: &[Fe
             mapped.push((lower_sigma(chars, src), src, false));
         } else {
             let mut buf = [0u8; 4];
-            for u in style.case.apply_after(c.encode_utf8(&mut buf), prev).chars() {
+            for u in style.case.apply_between(c.encode_utf8(&mut buf), before, prev).chars() {
                 mapped.push((u, src, false));
             }
         }
+        before = prev;
         prev = Some(*c);
     }
     let mut small = vec![false; end.saturating_sub(start)];
