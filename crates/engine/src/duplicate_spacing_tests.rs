@@ -212,6 +212,13 @@ fn alt_pressed_during_a_drag_turns_the_move_into_a_copy() {
     s.undo().unwrap();
     drag_alt_when(&mut s, (50.0, 50.0), (250.0, 52.0), |k| k == 1 || k >= 4);
     assert_eq!((layers(&s), at(&s, a)), (2, (0.0, 0.0)));
+    // Alt changed only by the release (no move in between): the release decides.
+    s.undo().unwrap();
+    drag_alt_when(&mut s, (50.0, 50.0), (250.0, 52.0), |k| k == 5);
+    assert_eq!((layers(&s), at(&s, a), last_step(&s).as_str()), (2, (0.0, 0.0), "Duplicate"), "Alt down at the release: a copy");
+    s.undo().unwrap();
+    drag_alt_when(&mut s, (50.0, 50.0), (250.0, 52.0), |k| k < 5);
+    assert_eq!((layers(&s), at(&s, a), last_step(&s).as_str()), (1, (200.0, 2.0), "Move"), "Alt up at the release: a move");
 }
 
 /// The reported path (#567): Cmd+D, drag the copy with the mouse, Cmd+D again. The other tests
