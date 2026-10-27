@@ -524,7 +524,7 @@ pub fn layout(text: &TextData, box_width: Option<f64>, box_height: Option<f64>) 
                 let carry = (brk + 1..items.len().min(brk + 257))
                     .take_while(|&k| items.get(k).is_some_and(|it| it.ch != '\n' && it.ch != LINE_SEPARATOR))
                     .find(|&k| safe(k));
-                brk = (line_start + 2..brk).rev().find(|&k| safe(k)).or(carry).unwrap_or(brk);
+                brk = (line_start + 1..brk).rev().find(|&k| safe(k)).or(carry).unwrap_or(brk);
             }
             lines.push((line_start, brk, false, para));
             line_start = brk;

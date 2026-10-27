@@ -335,6 +335,22 @@ fn thai_comes_from_a_thai_font_when_one_is_installed() {
 }
 
 #[test]
+fn thai_emergency_break_can_back_up_to_the_first_letter() {
+    // #1219: in "กเม" the overflow lands between the leading vowel and its consonant; the only
+    // safe break is right after the first letter, so the vowel moves down with "ม".
+    let s = "กเม";
+    let thai = ["Noto Sans Thai", "Noto Sans Thai UI", "Leelawadee UI", "Thonburi", "Tahoma"];
+    if face().is_none() || !thai.iter().any(|t| find_face(t, "Regular").is_some_and(|t| s.chars().all(|c| t.has_char(c)))) {
+        return;
+    }
+    let mut t = text(s, TextAutoResize::Height);
+    t.style.font_size = 16.0;
+    let two = layout(&t, None, None).caret(2).0;
+    let lines = layout(&t, Some(two + 0.5), None).lines;
+    assert_eq!(lines.get(1).map(|l| l.char_start), Some(1), "the leading vowel stays with its consonant");
+}
+
+#[test]
 fn thai_emergency_breaks_keep_marks_and_leading_vowels_with_their_letter() {
     // #1219: Thai writes no spaces between words, so a paragraph is one run with no break
     // opportunity and wraps where it overflows. Even that emergency break must not start a line
