@@ -165,7 +165,7 @@ pub(crate) fn letter_spacing(v: &Value) -> Option<LetterSpacing> {
 fn four(v: &Value) -> Option<[f64; 4]> {
     match v {
         Value::Array(a) => {
-            let f: Vec<f64> = a.iter().filter_map(f64_of).collect();
+            let f: Vec<f64> = a.iter().map(f64_of).collect::<Option<_>>()?;
             match f.as_slice() {
                 [x] => Some([*x; 4]),
                 [a, b] => Some([*a, *b, *a, *b]),
@@ -1290,5 +1290,14 @@ mod tests {
             assert!(letter_spacing(&json!(s)).is_none(), "letter_spacing accepted {s}");
         }
         assert!(matches!(line_height(&json!("150%")), Some(LineHeight::Percent(p)) if p == 150.0));
+    }
+
+    #[test]
+    fn four_rejects_non_numeric_entries() {
+        assert_eq!(four(&json!([10, "abc"])), None);
+        assert_eq!(four(&json!([10, "abc", null, 20])), None);
+        assert_eq!(four(&json!([10, 20, 30])), None);
+        assert_eq!(four(&json!([1, 2, 3, 4])), Some([1.0, 2.0, 3.0, 4.0]));
+        assert_eq!(four(&json!([1, 2])), Some([1.0, 2.0, 1.0, 2.0]));
     }
 }
