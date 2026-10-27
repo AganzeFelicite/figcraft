@@ -3,7 +3,7 @@ const POINTS_PER_INCH: f64 = 72.0;
 const METERS_PER_INCH: f64 = 0.0254;
 const UNIT_METER: u8 = 1;
 const MAX_DENSITY: f64 = 4.0;
-const DENSITY_TOLERANCE: f64 = 0.05;
+const DENSITY_TOLERANCE: f64 = 0.005;
 
 pub fn pixel_density(bytes: &[u8]) -> f64 {
     png_pixels_per_meter(bytes).map_or(1.0, density_from_pixels_per_meter)

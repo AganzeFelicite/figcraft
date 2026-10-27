@@ -524,3 +524,13 @@ fn a_retina_screenshot_on_the_clipboard_pastes_at_its_point_size_centred() {
     let at = doc.world_bounds(pasted.id).unwrap();
     assert_eq!((at.x0, at.y0), ((view.cx - 200.0).round(), (view.cy - 150.0).round()));
 }
+
+#[test]
+fn an_unreadable_png_on_the_clipboard_falls_back_to_the_decoded_image() {
+    let mut w = Win::new();
+    *w.clip.borrow_mut() = Clip { png: Some(b"\x89PNG\r\n\x1a\nnot an image".to_vec()), image: Some((2, 2, vec![255; 16])), ..Clip::default() };
+    w.cmd_v(CMD);
+    let doc = w.app.session.doc().unwrap();
+    let pasted = doc.nodes().find(|n| n.name == "Pasted image").expect("pasted from the decoded image");
+    assert_eq!((pasted.width, pasted.height), (2.0, 2.0));
+}

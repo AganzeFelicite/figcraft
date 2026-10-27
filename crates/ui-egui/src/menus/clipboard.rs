@@ -101,11 +101,10 @@ fn paste_text(app: &mut FigApp, text: &str, (cx, cy): (f64, f64), center: bool) 
 
 /// The system clipboard's image as PNG bytes, with its size.
 fn clipboard_png(app: &mut FigApp) -> Option<(Vec<u8>, f64, f64)> {
-    let png = match app.services.clipboard_get_png() {
-        Some(png) => png,
-        None => encoded_clipboard_image(app)?,
+    let (png, (w, h)) = match app.services.clipboard_get_png().and_then(with_pixel_size) {
+        Some(readable) => readable,
+        None => with_pixel_size(encoded_clipboard_image(app)?)?,
     };
-    let (w, h) = image::ImageReader::new(std::io::Cursor::new(&png)).with_guessed_format().ok()?.into_dimensions().ok()?;
     if w == 0 || h == 0 || u64::from(w) * u64::from(h) > MAX_PASTED_IMAGE_PIXELS {
         return None;
     }
@@ -115,6 +114,11 @@ fn clipboard_png(app: &mut FigApp) -> Option<(Vec<u8>, f64, f64)> {
 }
 
 const MAX_PASTED_IMAGE_PIXELS: u64 = 100_000_000;
+
+fn with_pixel_size(png: Vec<u8>) -> Option<(Vec<u8>, (u32, u32))> {
+    let size = image::ImageReader::new(std::io::Cursor::new(&png)).with_guessed_format().ok()?.into_dimensions().ok()?;
+    Some((png, size))
+}
 
 fn encoded_clipboard_image(app: &mut FigApp) -> Option<Vec<u8>> {
     let (w, h, rgba) = app.services.clipboard_get_image()?;

@@ -69,6 +69,18 @@ fn a_print_resolution_is_not_read_as_a_screen_density() {
 }
 
 #[test]
+fn a_density_near_a_screen_density_is_not_read_as_one() {
+    for (dpi, pixels_per_meter) in [(141, 5551), (143, 5630), (145, 5709)] {
+        let near = with_pixels_per_meter(&png(4, 4), pixels_per_meter);
+        assert_eq!(figcraft_format::pixel_density(&near), 1.0, "{dpi} dpi");
+    }
+    for (density, pixels_per_meter) in [(2.0, 5670), (3.0, 8504), (4.0, 11339)] {
+        let screen = with_pixels_per_meter(&png(4, 4), pixels_per_meter);
+        assert_eq!(figcraft_format::pixel_density(&screen), density, "{pixels_per_meter} pixels per metre");
+    }
+}
+
+#[test]
 fn only_a_side_past_4096_is_fitted() {
     let mut s = Session::new();
     let (w, h) = place(&mut s, &png(8192, 100), json!({}));
