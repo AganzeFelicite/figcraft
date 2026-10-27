@@ -307,6 +307,32 @@ fn task_vector_edit_keys() {
     assert!(c.call("run_command", json!({"command": "vector.edit.state", "params": {}}))["isError"] == true, "Enter left edit mode");
 }
 
+#[test]
+fn task_node_find_without_selecting_then_use_ids_in_batch() {
+    let mut c = Client::new();
+    let card = c.create(json!({"type": "frame", "name": "Card"}));
+    let title = c.create(json!({"type": "text", "parent": card, "name": "Title", "text": "Hello"}));
+    c.ok("select", json!({"ids": [card]}));
+    let before = c.doc();
+    assert_eq!(c.run("node.find", json!({"root": card, "type": "text", "text": "HELLO"})), json!({"ids": [title], "total": 1}));
+    let after = c.doc();
+    for key in ["selection", "currentPage", "history"] {
+        assert_eq!(after[key], before[key], "{key}");
+    }
+    let out = c.ok(
+        "batch",
+        json!({"commands": [
+            {"command": "node.find", "params": {"root": card, "name": "title"}},
+            {"command": "node.set", "params": {"ids": [{"$step": 0, "field": "ids/0"}], "props": {"name": "Found title"}}}
+        ]}),
+    );
+    assert_eq!(out[0], json!({"ids": [title], "total": 1}));
+    assert_eq!(c.node(&title)["name"], "Found title");
+    assert_eq!(c.doc()["selection"], before["selection"]);
+    c.run("edit.undo", json!({}));
+    assert_eq!(c.node(&title)["name"], "Title");
+}
+
 /// A whole card in one `batch` call: later steps reach the frames earlier steps created through
 /// `{"$step": n}`, so the tree is built in one round-trip and one undo step.
 #[test]

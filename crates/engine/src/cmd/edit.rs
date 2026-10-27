@@ -26,6 +26,74 @@ use select::{
     select_parent, select_same, select_sibling, toggle,
 };
 
+/// The layer types `node.find` takes, as `NodeKind::type_name` spells them.
+const LAYER_TYPES: [&str; 16] = [
+    "PAGE",
+    "FRAME",
+    "GROUP",
+    "SECTION",
+    "RECTANGLE",
+    "ELLIPSE",
+    "POLYGON",
+    "STAR",
+    "LINE",
+    "VECTOR",
+    "TEXT",
+    "BOOLEAN_OPERATION",
+    "COMPONENT",
+    "COMPONENT_SET",
+    "INSTANCE",
+    "SLICE",
+];
+
+fn node_find(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "node.find";
+    let filter = |key| -> Result<Option<String>> {
+        get(p, key).map(|v| v.as_str().map(str::to_lowercase).ok_or_else(|| bad(cmd, format!("`{key}` must be a string")))).transpose()
+    };
+    let name = filter("name")?;
+    let text = filter("text")?;
+    let component = filter("component")?;
+    let kind = filter("type")?;
+    if let Some(kind) = &kind
+        && !LAYER_TYPES.iter().any(|t| t.eq_ignore_ascii_case(kind))
+    {
+        return Err(bad(cmd, format!("unknown type; use one of {}", LAYER_TYPES.join(", "))));
+    }
+    let limit = match get(p, "limit") {
+        None => 100,
+        Some(v) => v.as_u64().filter(|n| *n <= 10000).ok_or_else(|| bad(cmd, "`limit` must be an integer from 0 to 10000"))? as usize,
+    };
+    let root = opt_id(cmd, p, "root")?.map_or_else(|| s.page(), Ok)?;
+    let doc = s.doc()?;
+    // Keep one child iterator per ancestor, not a materialised subtree or all pending siblings.
+    let mut stack = vec![doc.get(root)?.children.iter()];
+    let mut ids = Vec::new();
+    let mut total = 0usize;
+    while let Some(children) = stack.last_mut() {
+        let Some(&id) = children.next() else {
+            stack.pop();
+            continue;
+        };
+        let n = doc.get(id)?;
+        stack.push(n.children.iter());
+        if name.as_ref().is_some_and(|q| !n.name.to_lowercase().contains(q))
+            || kind.as_ref().is_some_and(|q| !n.kind.type_name().eq_ignore_ascii_case(q))
+            || text.as_ref().is_some_and(|q| !matches!(&n.kind, NodeKind::Text(t) if t.characters.to_lowercase().contains(q)))
+            || component.as_ref().is_some_and(|q| {
+                !matches!(&n.kind, NodeKind::Instance { component, .. } if doc.node(*component).is_some_and(|c| c.name.to_lowercase().contains(q)))
+            })
+        {
+            continue;
+        }
+        total += 1;
+        if ids.len() < limit {
+            ids.push(id);
+        }
+    }
+    Ok(json!({"ids": ids, "total": total}))
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         spec!("edit.undo", "Undo", "{}", false, |s, _| Ok(json!({"undone": s.undo()?}))),
@@ -232,6 +300,13 @@ pub fn specs() -> Vec<CommandSpec> {
             let i = req_id("node.get", p, "id")?;
             Ok(crate::inspect::node_json(s.doc()?, i, 1))
         }),
+        spec!(
+            "node.find",
+            "Find layers",
+            "{root? (strict descendants; default current page), name?, type? (canonical layer type), text?, component? (main component name), limit? (0-10000; default 100)}: every filter must match; name, text and component are case-insensitive substrings, type is exact (any case); returns {ids, total} and does not select",
+            false,
+            node_find
+        ),
         spec!(
             "node.reparent",
             "Move layer into",

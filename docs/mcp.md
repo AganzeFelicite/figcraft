@@ -303,6 +303,17 @@ Or in a project's `.mcp.json`:
 - Programmatic calls never open dialogs.
 - Verify your work: `inspect_document` / `get_node` for numbers, `screenshot` for pixels.
 
+To find layers without changing the selection, use `run_command` with `node.find`, for example
+`{"command": "node.find", "params": {"root": 12, "type": "TEXT", "text": "hello", "limit": 20}}`.
+It searches strict descendants of `root`, or the current page without one, in stored child order
+(depth-first, parent before children), including hidden and locked layers and instance children.
+`name`, `text` (text layers only) and `component` (instances by their main component's name) are
+case-insensitive literal substrings; `type` is a canonical layer type, case-insensitive. All
+filters must match. The result is `{"ids": [...], "total": N}`: at most `limit` ids (default 100,
+0 to 10000), with every match counted in `total`; `limit: 0` counts only. A root on another page
+works without switching pages. Unknown roots or types and invalid limits are errors. In a batch,
+a later step can use `{"$step": 0, "field": "ids/0"}` to target the first match.
+
 ## Tools
 
 | Tool | What it does |
