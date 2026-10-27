@@ -1384,8 +1384,9 @@ fn bind_applied_tokens(doc: &mut Document, active_modes: &BTreeMap<String, Strin
     let mut index: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
     for var in &doc.variables.variables {
         let Some(raw) = var.id.strip_prefix("penpot:tokens:files/") else { continue };
-        let Some((file_id, _)) = raw.split_once(':') else { continue };
-        let Some((_, short_name)) = var.name.split_once('/') else { continue };
+        let Some((file_id, path)) = raw.split_once(':') else { continue };
+        // Legacy ids include the set; themed ids contain just the token path.
+        let short_name = var.id.strip_prefix(&format!("{}:", var.collection)).unwrap_or(path);
         for token_name in [short_name, var.name.as_str()] {
             index.entry((file_id.to_owned(), token_name.to_owned())).or_default().push(var.id.clone());
         }
@@ -6020,6 +6021,22 @@ mod tests {
         assert_eq!(restored_node.bound, n.bound);
         assert!(restored_node.plugin_data.contains_key("penpot.source.appliedTokens"));
         assert!(doc.validate().is_empty());
+    }
+
+    #[test]
+    fn bindings_accept_short_names_in_nested_token_sets() {
+        let tokens = serde_json::json!({"sets":{"Mode/Light":{"tokens":{
+            "palette/bg":{"type":"color","value":"#336699"},
+            "width":{"type":"number","value":120}
+        }}}});
+        let layer = serde_json::json!({"id":"cccccccc-cccc-cccc-cccc-cccccccccccc", "name":"Nested token set", "type":"rect",
+            "width":120,"height":60,"fills":[{"fillColor":"#336699"}],
+            "appliedTokens":{"fill":"palette/bg","width":"Mode/Light/width"}});
+        let (doc, warnings) = import(&archive_with_design_system(tokens, None, None, Some(layer))).unwrap();
+        let node = doc.nodes().find(|n| n.name == "Nested token set").unwrap();
+        assert_eq!(node.bound.get("fills/0/color"), doc.variables.get("Mode/Light/palette/bg").map(|v| &v.id));
+        assert_eq!(node.bound.get("width"), doc.variables.get("Mode/Light/width").map(|v| &v.id));
+        assert_eq!(node.bound.len(), 2, "{warnings:?}");
     }
 
     #[test]

@@ -13,7 +13,6 @@ start with [`docs/gaps.md`](docs/gaps.md).
 
 | | Value | Kind |
 |---|---|---|
-| 2026-10-25 | minor | M6: offline Penpot 2.x open/import/export through the editor, CLI and MCP using the existing document model. Unsupported layout settings retain saved positions and bounded source metadata with warnings; font binaries and toggle-overlay are reported, and provider fonts are never downloaded. Shared ZIP/JSON/token budgets guard untrusted input. Figma parity numbers unchanged. |
 | Menu/command breadth | **100%** (212 / 212) | measured, [`docs/parity-checklist.md`](docs/parity-checklist.md) (`cargo xtask parity`) |
 | Feature breadth | **~85%** (core editor ~94%) | estimated, [`docs/target-app-parity.md`](docs/target-app-parity.md) |
 | Ready for real work | **~53%** | estimated, same doc (written dimension weights and scores) |
@@ -352,6 +351,7 @@ Ranked; detail and milestones in [`docs/roadmap.md`](docs/roadmap.md).
 | Date | Change | Summary |
 |---|---|---|
 | 2026-10-26 | minor | Non-ASCII layer names transliterate in code export (M6, #1235): `class_name` transliterates through the new `deunicode` dependency (pure Rust tables, zero deps, BSD-3-Clause), so Korean, Cyrillic, Latin-diacritic and CJK names become readable ASCII classes (`rogeuin-hwamyeon`, `knopka`, `uber`, `an-niu`) in HTML/CSS/React/Leptos output, component roots and `data-*` variant attributes; symbols-only names take the node's kind (`.text`) instead of `layer-`, and the 40-character cut lands on a word boundary. `html_codegen_tests` updated and extended. Numbers unchanged |
+| 2026-10-25 | minor | M6: offline Penpot 2.x open/import/export through the editor, CLI and MCP using the existing document model. Unsupported layout settings retain saved positions and bounded source metadata with warnings; font binaries and toggle-overlay are reported, and provider fonts are never downloaded. Shared ZIP/JSON/token budgets guard untrusted input. Figma parity numbers unchanged. |
 | 2026-10-25 | minor | egui 0.37 capture lifecycle: screenshots with hidden or unknown visibility queue, request a hidden paint, and expire after 60 seconds if no capture arrives (headless-tested contract). Logic-only edits, saves and inspection continue while hidden. Native visible GUI and forced hidden-window paint, browser and Wayland behavior remain unqualified; parity percentages are unchanged. |
 | 2026-10-24 | minor | Server memory (#1134): when the last person leaves a file nobody edited, figcraft-server keeps the client ids it issued in the log instead of rewriting the snapshot (compaction still follows `compact_after`/`compact_mb` and edits), and a snapshot is encoded straight into its file buffer, without a second copy of the body; the file format is unchanged. Numbers unchanged |
 | 2026-10-24 | minor | Boards (M12): a dot grid on board pages under the layers, connector ends dragged onto other objects or empty canvas (`board.reattach`), curved connectors, elbows that go around what they join. Boards row ~35% → ~37%, ~20% → ~21%, 30–60 h → 28–56 h; headline numbers unchanged (boards are outside the weighted sum) |

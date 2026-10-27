@@ -334,7 +334,7 @@ pub(super) fn page_flows(doc: &Document, flows: &Value, by_penpot_id: &BTreeMap<
         let Some(start) = flow.get("startingFrame").and_then(Value::as_str) else { continue };
         let Some(&frame) = by_penpot_id.get(start) else {
             // A flow whose starting frame is not in the file cannot start anything.
-            warnings.push("A Penpot flow names a starting frame that is not in the file; it was skipped".into());
+            warn(warnings, "A Penpot flow names a starting frame that is not in the file; it was skipped".into());
             continue;
         };
         // The player shows the top-level frame a starting frame sits in.
@@ -343,4 +343,23 @@ pub(super) fn page_flows(doc: &Document, flows: &Value, by_penpot_id: &BTreeMap<
         out.push(Flow { name: name.chars().take(256).collect(), start, description: String::new() });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn missing_flow_warnings_are_deduplicated_and_bounded_across_pages() {
+        let doc = Document::new("Missing flows");
+        let flows = serde_json::json!({"a":{"startingFrame":"missing"},"b":{"startingFrame":"missing"}});
+        let mut warnings = Vec::new();
+        for _ in 0..110 {
+            assert!(page_flows(&doc, &flows, &BTreeMap::new(), &mut warnings).is_empty());
+        }
+        assert_eq!(warnings.len(), 1);
+        warnings = (0..100).map(|i| format!("Prior warning {i}")).collect();
+        page_flows(&doc, &flows, &BTreeMap::new(), &mut warnings);
+        assert_eq!(warnings.len(), 100);
+    }
 }
