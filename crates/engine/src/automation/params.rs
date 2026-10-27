@@ -167,7 +167,7 @@ pub fn color_of(v: &Value) -> Option<Color> {
         Value::String(s) => Color::parse_css(s),
         Value::Object(_) => serde_json::from_value::<Color>(v.clone()).ok().map(Color::sanitized),
         Value::Array(a) => {
-            let c: Vec<f32> = a.iter().filter_map(|x| x.as_f64()).map(|f| f as f32).collect();
+            let c = a.iter().map(|x| x.as_f64().map(|f| f as f32)).collect::<Option<Vec<f32>>>()?;
             match c.as_slice() {
                 [r, g, b] => Some(Color::new(*r, *g, *b, 1.0)),
                 [r, g, b, a] => Some(Color::new(*r, *g, *b, *a)),
@@ -276,5 +276,18 @@ pub fn parse<T: serde::de::DeserializeOwned>(cmd: &str, p: &Value, key: &str) ->
     match get(p, key) {
         None => Ok(None),
         Some(v) => serde_json::from_value(v.clone()).map(Some).map_err(|e| bad(cmd, format!("`{key}`: {e}"))),
+    }
+}
+
+#[cfg(test)]
+mod color_of_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn color_of_rejects_non_numeric_array_entries() {
+        assert_eq!(color_of(&json!([1, "x", 0, 0])), None);
+        assert_eq!(color_of(&json!([1, 0, 0, "x"])), None);
+        assert_eq!(color_of(&json!([1, 0, 0, 0.5])), Some(Color::new(1.0, 0.0, 0.0, 0.5)));
     }
 }
