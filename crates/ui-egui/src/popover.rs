@@ -98,8 +98,14 @@ pub struct Popover {
 impl Popover {
     /// A popover titled `title`; `id` names its egui area, so it must be stable and unique.
     pub fn new(id: impl std::hash::Hash + std::fmt::Debug, title: impl Into<String>) -> Self {
+        Self::with_id(Id::unique(id), title)
+    }
+
+    /// A popover whose egui area is `id` itself — not a hash of it — so a caller that publishes the
+    /// id can find the area again (the colour picker's [`crate::colorpicker::window_id`]).
+    pub fn with_id(id: Id, title: impl Into<String>) -> Self {
         Self {
-            id: Id::new(id),
+            id,
             title: title.into(),
             width: WIDTH,
             pad: SLOT_PAD,

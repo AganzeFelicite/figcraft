@@ -18,6 +18,9 @@
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
      xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <?ifndef HasCraftFontLicences ?>
+  <?define HasCraftFontLicences=0 ?>
+  <?endif ?>
   <Package
       Name="FigCraft"
       Manufacturer="Learning Machines LLC"
@@ -52,6 +55,9 @@
     </Property>
 
     <Feature Id="Main" Title="FigCraft" Level="1">
+      <?if $(var.HasCraftFontLicences) = 1 ?>
+      <ComponentGroupRef Id="CraftFontLicences" />
+      <?endif ?>
       <ComponentGroupRef Id="FigcraftFiles" />
     </Feature>
 
@@ -82,8 +88,14 @@
   </Package>
 
   <Fragment>
+    <?if $(var.HasCraftFontLicences) = 1 ?>
+    <ComponentGroup Id="CraftFontLicences" Directory="INSTALLFOLDER">
+      <Files Include="$(var.DocsDir)\**" />
+    </ComponentGroup>
+    <?endif ?>
     <ComponentGroup Id="FigcraftFiles" Directory="INSTALLFOLDER">
       <Component Id="FigcraftApp" Guid="238228C3-4C1D-4B33-8C5D-C31B65BC2DA4">
+        <File Id="FigcraftNotice" Source="$(var.BinDir)\NOTICE" KeyPath="no" />
         <File Id="FigcraftExe" Source="$(var.BinDir)\figcraft.exe" KeyPath="yes">
           <Shortcut Id="StartMenuShortcut" Directory="ProgramMenuFolder" Name="FigCraft"
               Description="FigCraft interface design and prototyping" WorkingDirectory="INSTALLFOLDER" Advertise="yes"
@@ -103,6 +115,10 @@
         <RegistryValue Root="HKLM" Key="Software\Classes\.png\OpenWithProgids" Name="Figcraft.Image" Value="" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\.jpg\OpenWithProgids" Name="Figcraft.Image" Value="" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\.jpeg\OpenWithProgids" Name="Figcraft.Image" Value="" Type="string" />
+        <!-- Sketch files (opened as a copy; FigCraft doesn't save .sketch): "Open with" only too. -->
+        <ProgId Id="Figcraft.Sketch" Description="Sketch Document" Icon="FigcraftExe" IconIndex="0" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Figcraft.Sketch\shell\open\command" Value="&quot;[#FigcraftExe]&quot; &quot;%1&quot;" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\.sketch\OpenWithProgids" Name="Figcraft.Sketch" Value="" Type="string" />
 
         <!-- "Open with" app list and the Run dialog (Win+R "figcraft"). -->
         <RegistryValue Root="HKLM" Key="Software\Classes\Applications\figcraft.exe" Name="FriendlyAppName" Value="FigCraft" Type="string" />
@@ -112,6 +128,7 @@
         <RegistryValue Root="HKLM" Key="Software\Classes\Applications\figcraft.exe\SupportedTypes" Name=".png" Value="" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\Applications\figcraft.exe\SupportedTypes" Name=".jpg" Value="" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Classes\Applications\figcraft.exe\SupportedTypes" Name=".jpeg" Value="" Type="string" />
+        <RegistryValue Root="HKLM" Key="Software\Classes\Applications\figcraft.exe\SupportedTypes" Name=".sketch" Value="" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\figcraft.exe" Value="[#FigcraftExe]" Type="string" />
         <RegistryValue Root="HKLM" Key="Software\FigCraft" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" />
       </Component>
