@@ -475,7 +475,8 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
             "locked" => doc.get_mut(id)?.locked = v.as_bool().ok_or_else(|| bad(cmd, "`locked` must be a boolean"))?,
             "opacity" => {
                 let o = f64_of(v).ok_or_else(|| bad(cmd, "`opacity` must be a number"))?;
-                let o = if o > 1.0 { o / 100.0 } else { o };
+                let percent = v.as_str().is_some_and(|s| s.trim().ends_with('%'));
+                let o = if percent || o > 1.0 { o / 100.0 } else { o };
                 doc.get_mut(id)?.opacity = o.clamp(0.0, 1.0) as f32;
             }
             "blend" | "blendMode" => {

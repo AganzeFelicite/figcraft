@@ -475,3 +475,14 @@ fn page_navigation_skips_dividers() {
     ex(&mut s, "view.nextPage", json!({}));
     assert_eq!(s.page().unwrap(), later, "Next page stops on the last page");
 }
+
+#[test]
+fn opacity_percent_strings_always_divide_by_100() {
+    let mut s = Session::new();
+    let r = rect(&mut s, "R", 0.0, 0.0, None);
+    for (v, want) in [(json!("1%"), 0.01), (json!("0.5%"), 0.005), (json!("50%"), 0.5), (json!(1), 1.0), (json!(50), 0.5), (json!(0.25), 0.25)] {
+        ex(&mut s, "node.set", json!({"id": r, "props": {"opacity": v.clone()}}));
+        let o = s.doc().unwrap().node(r).unwrap().opacity;
+        assert!((o - want).abs() < 1e-6, "opacity {v} gave {o}, want {want}");
+    }
+}
