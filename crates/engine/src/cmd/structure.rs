@@ -80,7 +80,7 @@ pub fn specs() -> Vec<CommandSpec> {
             }
             ok()
         }),
-        spec!("layout.suggest", "Suggest auto layout", "{ids?}", true, layout_add),
+        spec!("layout.suggest", "Suggest auto layout", "{ids?, direction? (horizontal|vertical|grid)}", true, layout_add),
         spec!("object.moveToPage", "Move to page", "{ids?, page}", true, move_to_page),
         spec!("object.setThumbnail", "Set as thumbnail", "{id?}", true, |s, p| {
             let id = targets(s, p).first().copied().ok_or_else(|| bad("object.setThumbnail", "select a frame"))?;

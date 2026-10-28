@@ -410,7 +410,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 Ok(json!({"id": id, "link": link(id)}))
             }
         ),
-        spec!("comment.reply", "Reply to comment", "{id, text, author?}", true, |s, p| {
+        spec!("comment.reply", "Reply to comment", "{id | link, text, author?}", true, |s, p| {
             let id = req_comment("comment.reply", s, p)?;
             let who = author(s, p);
             let r = Message::new(who.clone(), text("comment.reply", p)?, now_secs());
@@ -420,7 +420,7 @@ pub fn specs() -> Vec<CommandSpec> {
             c.touched_by(&who);
             Ok(json!({"reply": c.replies.len() - 1}))
         }),
-        spec!("comment.edit", "Edit comment", "{id, text, reply? (index; omit for the first message), author?}", true, |s, p| {
+        spec!("comment.edit", "Edit comment", "{id | link, text, reply? (index; omit for the first message), author?}", true, |s, p| {
             let id = req_comment("comment.edit", s, p)?;
             let t = text("comment.edit", p)?;
             let who = author(s, p);
@@ -441,7 +441,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "comment.react",
             "React to comment",
-            "{id, emoji, reply? (index; omit for the first message), on? (default: toggle), author?}",
+            "{id | link, emoji, reply? (index; omit for the first message), on? (default: toggle), author?}",
             true,
             |s, p| {
                 let id = req_comment("comment.react", s, p)?;
@@ -463,7 +463,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 Ok(json!({"on": on}))
             }
         ),
-        spec!("comment.resolve", "Resolve comment", "{id, resolved? (default true)}", true, |s, p| {
+        spec!("comment.resolve", "Resolve comment", "{id | link, resolved? (default true)}", true, |s, p| {
             let id = req_comment("comment.resolve", s, p)?;
             let v = boolean(p, "resolved").unwrap_or(true);
             if let Some(c) = s.doc_mut()?.comment_mut(id) {
@@ -474,7 +474,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "comment.move",
             "Move comment",
-            "{id, x, y, anchor? (default true: pin to the innermost frame under the point; false: to the page; or a node id)}",
+            "{id | link, x, y, anchor? (default true: pin to the innermost frame under the point; false: to the page; or a node id)}",
             true,
             |s, p| {
                 let id = req_comment("comment.move", s, p)?;
@@ -489,24 +489,30 @@ pub fn specs() -> Vec<CommandSpec> {
                 ok()
             }
         ),
-        spec!("comment.delete", "Delete comment", "{id, reply? (index: delete one reply; omit to delete the thread), author?}", true, |s, p| {
-            let id = req_comment("comment.delete", s, p)?;
-            let who = author(s, p);
-            let doc = s.doc_mut()?;
-            let c = doc.comment_mut(id).ok_or_else(|| bad("comment.delete", "no comment"))?;
-            match message_index("comment.delete", c, p)? {
-                0 => {
-                    own("comment.delete", &c.first, &who, "delete this thread")?;
-                    doc.comments.retain(|c| c.id != id);
+        spec!(
+            "comment.delete",
+            "Delete comment",
+            "{id | link, reply? (index: delete one reply; omit to delete the thread), author?}",
+            true,
+            |s, p| {
+                let id = req_comment("comment.delete", s, p)?;
+                let who = author(s, p);
+                let doc = s.doc_mut()?;
+                let c = doc.comment_mut(id).ok_or_else(|| bad("comment.delete", "no comment"))?;
+                match message_index("comment.delete", c, p)? {
+                    0 => {
+                        own("comment.delete", &c.first, &who, "delete this thread")?;
+                        doc.comments.retain(|c| c.id != id);
+                    }
+                    i => {
+                        let m = c.message(i).ok_or_else(|| bad("comment.delete", "no message"))?;
+                        own("comment.delete", m, &who, "delete this reply")?;
+                        c.replies.remove(i - 1);
+                    }
                 }
-                i => {
-                    let m = c.message(i).ok_or_else(|| bad("comment.delete", "no message"))?;
-                    own("comment.delete", m, &who, "delete this reply")?;
-                    c.replies.remove(i - 1);
-                }
+                ok()
             }
-            ok()
-        }),
+        ),
         spec!(
             "comment.markRead",
             "Mark comment as read",
@@ -545,7 +551,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "comment.next",
             "Next comment",
-            "{id? (the thread to step from; omitted: the first or last), dir? (1 next, -1 previous; default 1), page?, filter?, sort?, query? (the list, as comment.list), author?}",
+            "{id? (the thread to step from; omitted: the first or last), dir? (1 next, -1 previous; default 1), page?, filter?, sort?, query?, frame?, resolved? (the list, as comment.list), author?}",
             false,
             |s, p| {
                 let dir = num(p, "dir").unwrap_or(1.0);
@@ -582,7 +588,7 @@ pub fn specs() -> Vec<CommandSpec> {
             }
             Ok(json!({"zoom": v.zoom}))
         }),
-        spec!("comment.link", "Copy link to comment", "{id}", false, |s, p| {
+        spec!("comment.link", "Copy link to comment", "{id | link}", false, |s, p| {
             let id = req_comment("comment.link", s, p)?;
             Ok(json!({"link": link(id)}))
         }),

@@ -245,8 +245,8 @@ pub fn specs() -> Vec<CommandSpec> {
             s.doc_mut()?.reorder(i, idx)?;
             ok()
         }),
-        spec!("fill.add", "Add fill", "{ids?, paint? (default #D9D9D9 or white for frames)}", true, |s, p| paint_list(s, p, true, true)),
-        spec!("stroke.add", "Add stroke", "{ids?, paint? (default black)}", true, |s, p| paint_list(s, p, false, true)),
+        spec!("fill.add", "Add fill", "{ids?, paint? | color? (default #D9D9D9 or white for frames)}", true, |s, p| paint_list(s, p, true, true)),
+        spec!("stroke.add", "Add stroke", "{ids?, paint? | color? (default black)}", true, |s, p| paint_list(s, p, false, true)),
         spec!("fill.remove", "Remove fill", "{ids?, index}", true, |s, p| paint_list(s, p, true, false)),
         spec!("stroke.remove", "Remove stroke", "{ids?, index}", true, |s, p| paint_list(s, p, false, false)),
         spec!("fill.set", "Set fill", "{ids?, index?, paint | color, opacity?, visible?, blend?}", true, |s, p| paint_set(s, p, true)),
@@ -270,7 +270,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "fill.pattern",
             "Pattern fill",
-            "{source (layer id), ids?, index? (default the top fill), tile? (grid|horizontalHex|verticalHex), scale? (1 = the source's size), spacing? [x, y], align? (start|center|end), opacity?}  the source layer tiled; it updates as the source changes",
+            "{source (layer id), ids?, index? (default the top fill), tile? (grid|horizontalHex|verticalHex), scale? (1 = the source's size), spacing? [x, y], align? (start|center|end), opacity?, visible?, blend?}  the source layer tiled; it updates as the source changes",
             true,
             pattern_fill
         ),
@@ -351,7 +351,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "export.update",
             "Edit export setting",
-            "{ids?, index, size? (2x|512w|512h|{by, value}), suffix?, format? (png|jpg|svg|pdf|webp|xml: Android Vector Drawable), bleed? (PDF: points, or with a unit: \"3mm\", \"0.125in\", \"9pt\"), cropMarks?, bleedMarks?, cmyk? (PDF print options), vdCompat? (XML: bestEffort|exact|ignore)}",
+            "{ids?, index, size? (2x|512w|512h|{by, value}), suffix?, format? (png|jpg|svg|pdf|webp|xml: Android Vector Drawable), bleed? (PDF: points, or with a unit: \"3mm\", \"0.125in\", \"9pt\"), cropMarks?, bleedMarks?, cmyk? (PDF print options), vdCompat? (XML: bestEffort|exact|ignore), contentsOnly?, includeBoundingBox?, svgOutlineText?, svgIdAttribute?, svgSimplifyStroke?}",
             true,
             |s, p| {
                 let cmd = "export.update";
