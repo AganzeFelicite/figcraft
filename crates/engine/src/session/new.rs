@@ -28,6 +28,8 @@ impl Session {
             plugins: plugins::Runtime::default(),
             live: live::Lives::default(),
             background: background::Background::default(),
+            events: Arc::new(events::EventLog::default()),
+            pending_events: Vec::new(),
         }
     }
 

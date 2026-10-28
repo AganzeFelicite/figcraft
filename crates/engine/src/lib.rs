@@ -17,6 +17,7 @@ pub mod catalog;
 pub mod cmd;
 mod content;
 mod dev;
+pub mod events;
 mod extensions;
 pub mod fonts;
 pub mod guard;
@@ -143,6 +144,10 @@ pub struct Session {
     pub live: live::Lives,
     /// Commands the UI runs without waiting on a server ([`Session::start_background`]).
     pub background: background::Background,
+    /// Live agent events (comment changes), shared with the control channel's `events.poll`.
+    pub events: Arc<events::EventLog>,
+    /// Events recorded inside a group: (kind, document, path, data).
+    pending_events: Vec<(String, String, Option<String>, Value)>,
 }
 
 impl Default for Session {
@@ -253,6 +258,8 @@ mod draw_tools_tests;
 mod duplicate_spacing_tests;
 #[cfg(test)]
 mod effects_tests;
+#[cfg(test)]
+mod events_tests;
 #[cfg(test)]
 mod export_behaviour_tests;
 #[cfg(test)]
