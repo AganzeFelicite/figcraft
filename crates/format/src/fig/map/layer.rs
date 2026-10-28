@@ -526,7 +526,6 @@ impl<'a> Mapper<'a> {
             .collect();
         let segments: Vec<Value> =
             net.segments.iter().map(|s| json!({"a": s.a, "b": s.b, "ta": [s.ta.0 * sx, s.ta.1 * sy], "tb": [s.tb.0 * sx, s.tb.1 * sy]})).collect();
-        let mut region_paint_elements = 0usize;
         let regions: Vec<Value> = net
             .regions
             .iter()
@@ -554,12 +553,12 @@ impl<'a> Mapper<'a> {
                                     });
                                     let oversized_stops =
                                         source_paints.iter().any(|paint| paint.get("stops").map(Kv::list).unwrap_or_default().len() > 256);
-                                    if source_paints.len() > 256 || oversized_stops || region_paint_elements.saturating_add(paint_cost) > 200_000 {
+                                    if source_paints.len() > 256 || oversized_stops || self.region_paint_elements.saturating_add(paint_cost) > 200_000
+                                    {
                                         self.warn("vector region paint data exceeded import limits and was skipped");
-                                        region_paint_elements = 200_000;
                                         return region;
                                     }
-                                    region_paint_elements += paint_cost;
+                                    self.region_paint_elements += paint_cost;
                                     let paints: Vec<Value> = source_paints.iter().filter_map(|p| paint(p, &mut |w| self.warn(w))).collect();
                                     if paints.len() != source_paints.len() {
                                         self.warn("invalid vector region paints were skipped");

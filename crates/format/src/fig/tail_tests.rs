@@ -408,6 +408,43 @@ fn vector_region_link_to_non_fill_style_keeps_own_fill() {
 }
 
 #[test]
+fn vector_region_paint_budget_covers_the_whole_file() {
+    // 190 gradients of 255 stops: 48,640 elements per layer, so four layers fit and a fifth doesn't.
+    let stop = o(vec![("position", f(0.0)), ("color", o(vec![("r", f(1.0)), ("g", f(0.0)), ("b", f(0.0)), ("a", f(1.0))]))]);
+    let gradient = o(vec![("type", e("GRADIENT_LINEAR")), ("stops", arr(vec![stop; 255]))]);
+    let mut message = tail_message();
+    let Kv::Array(nodes) = field_mut(&mut message, "nodeChanges").unwrap() else { panic!() };
+    let wave = nodes.iter_mut().find(|node| node.get("name").and_then(Kv::str) == Some("Wave")).unwrap();
+    let vector_data = field_mut(wave, "vectorData").unwrap();
+    let Kv::Array(styles) = field_mut(vector_data, "styleOverrideTable").unwrap() else { panic!() };
+    let Kv::Object(style_fields) = styles.first_mut().unwrap() else { panic!() };
+    style_fields.push(("fillPaints", arr(vec![gradient; 190])));
+    let wave = wave.clone();
+    for (index, position) in ["w", "x", "y", "z"].into_iter().enumerate() {
+        let mut copy = wave.clone();
+        let Kv::Object(fields) = &mut copy else { panic!() };
+        for (key, value) in fields.iter_mut() {
+            match *key {
+                "guid" => *value = g(60 + index as u64),
+                "name" => *value = Kv::Str(format!("Wave {index}")),
+                "parentIndex" => *value = o(vec![("guid", g(1)), ("position", s(position))]),
+                _ => {}
+            }
+        }
+        nodes.push(copy);
+    }
+    let mut network = network::decode(&square_blob()).unwrap();
+    network.regions[0].style = 1;
+    let Kv::Array(blobs) = field_mut(&mut message, "blobs").unwrap() else { panic!() };
+    *field_mut(blobs.get_mut(1).unwrap(), "bytes").unwrap() = Kv::Bytes(network::encode(&network));
+
+    let (doc, warnings) = import(&canvas(&schema(), &message), "Region paint budget").unwrap();
+    let painted = ["Wave", "Wave 0", "Wave 1", "Wave 2", "Wave 3"].iter().filter(|name| network_of(&doc, name).regions[0].fills.is_some()).count();
+    assert_eq!(painted, 4);
+    assert!(warnings.iter().any(|warning| warning.contains("region paint data exceeded import limits")), "{warnings:?}");
+}
+
+#[test]
 fn vector_regions_keep_distinct_solid_paints() {
     let mut message = tail_message();
     let Kv::Array(nodes) = field_mut(&mut message, "nodeChanges").unwrap() else { panic!() };

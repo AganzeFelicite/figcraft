@@ -285,3 +285,23 @@ fn removal_preserves_holes_and_transformed_gradient_frames() {
     assert!(net.region_contains(0, Point::new(90.0, 50.0)), "the unselected ring remains filled");
     assert_same_transform(before, normalized_paint_world(&s, vector, 0));
 }
+
+#[test]
+fn removing_the_left_region_keeps_the_right_region_paint_frame() {
+    let mut s = Session::new();
+    let vector = split_vector(&mut s);
+    {
+        let NodeKind::Vector { network } = &mut s.doc_mut().unwrap().get_mut(vector).unwrap().kind else { panic!("expected vector") };
+        network.regions[1].fills = Some(vec![Paint::gradient(Gradient::default_for(GradientKind::Linear, Color::from_hex("#0000ff").unwrap()))]);
+    }
+    let before = normalized_paint_world(&s, vector, 1);
+    s.set_selection(vec![vector]);
+    ex(&mut s, "shapeBuilder.remove", json!({"points": [[25, 50]]}));
+    let node = s.doc().unwrap().node(vector).unwrap();
+    assert!((node.width - 50.0).abs() < 1e-6, "the layer is reboxed to the surviving region: {}", node.width);
+    let net = network(&s, vector);
+    assert_eq!(net.regions.len(), 1);
+    assert!(matches!(&net.regions[0].fills.as_ref().unwrap()[0].kind, figcraft_color::PaintKind::Gradient(_)));
+    assert!((world_region_area(&s, vector, 0) - 5000.0).abs() < 1e-6);
+    assert_same_transform(before, normalized_paint_world(&s, vector, 0));
+}

@@ -415,8 +415,9 @@ fn apply(s: &mut Session, cmd: &str, p: &Value, merge: bool) -> Result<Value> {
     // Merging every region of a single shape would only replace it with a copy of itself.
     let whole_shape =
         touched.len() == 1 && a.regions.iter().enumerate().all(|(i, r)| pick.contains(&i) || !r.sources.iter().any(|x| touched.contains(x)));
-    let single_fill_part = touched_parts.len() == 1 && touched_parts.iter().all(|part| !part.stroke);
-    if merge && whole_shape && single_fill_part {
+    // A vector's distinct region paints are separate fill parts that merging does unify.
+    let fill_parts = touched_parts.iter().filter(|part| !part.stroke).count();
+    if merge && whole_shape && fill_parts <= 1 {
         return Ok(json!({"id": null, "changed": [], "removed": [], "outlines": [], "regions": pick}));
     }
     let doc = s.doc_mut()?;
