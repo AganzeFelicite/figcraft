@@ -1143,8 +1143,10 @@ impl Document {
             Arc::make_mut(&mut self.libraries).store = store;
         }
         self.pages.retain(|p| self.nodes.get(p).is_some_and(|n| n.is_page()) && Some(*p) != store);
+        // Unlisted pages join the list; a set keeps many pages from making this quadratic (#1078).
+        let mut listed: std::collections::BTreeSet<NodeId> = self.pages.iter().copied().collect();
         for (k, n) in self.nodes.iter() {
-            if n.is_page() && !self.pages.contains(k) && Some(*k) != store {
+            if n.is_page() && Some(*k) != store && listed.insert(*k) {
                 self.pages.push(*k);
             }
         }
