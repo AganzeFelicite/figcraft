@@ -534,3 +534,17 @@ fn an_unreadable_png_on_the_clipboard_falls_back_to_the_decoded_image() {
     let pasted = doc.nodes().find(|n| n.name == "Pasted image").expect("pasted from the decoded image");
     assert_eq!((pasted.width, pasted.height), (2.0, 2.0));
 }
+
+#[test]
+fn a_clipboard_png_past_the_byte_limit_falls_back_to_the_decoded_image() {
+    let mut w = Win::new();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::new(4, 4).write_to(&mut png, image::ImageFormat::Png).unwrap();
+    let mut png = png.into_inner();
+    png.resize(crate::MAX_CLIPBOARD_PNG_BYTES + 1, 0);
+    *w.clip.borrow_mut() = Clip { png: Some(png), image: Some((2, 2, vec![255; 16])), ..Clip::default() };
+    w.cmd_v(CMD);
+    let doc = w.app.session.doc().unwrap();
+    let pasted = doc.nodes().find(|n| n.name == "Pasted image").expect("pasted from the decoded image");
+    assert_eq!((pasted.width, pasted.height), (2.0, 2.0));
+}

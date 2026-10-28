@@ -1,5 +1,7 @@
 use super::*;
 
+pub const MAX_CLIPBOARD_PNG_BYTES: usize = 256 * 1024 * 1024;
+
 /// Platform services the app crate provides (file dialogs, clipboard, URLs).
 pub trait Services {
     fn pick_open(&mut self, _title: &str, _exts: &[&str]) -> DialogFuture {

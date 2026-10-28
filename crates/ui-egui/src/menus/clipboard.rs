@@ -101,7 +101,8 @@ fn paste_text(app: &mut FigApp, text: &str, (cx, cy): (f64, f64), center: bool) 
 
 /// The system clipboard's image as PNG bytes, with its size.
 fn clipboard_png(app: &mut FigApp) -> Option<(Vec<u8>, f64, f64)> {
-    let (png, (w, h)) = match app.services.clipboard_get_png().and_then(with_pixel_size) {
+    let clipboard_png = app.services.clipboard_get_png().filter(|png| png.len() <= crate::MAX_CLIPBOARD_PNG_BYTES);
+    let (png, (w, h)) = match clipboard_png.and_then(with_pixel_size) {
         Some(readable) => readable,
         None => with_pixel_size(encoded_clipboard_image(app)?)?,
     };

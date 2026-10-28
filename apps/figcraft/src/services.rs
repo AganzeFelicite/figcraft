@@ -445,7 +445,7 @@ impl Services for Desktop {
     fn clipboard_get_png(&mut self) -> Option<Vec<u8>> {
         let board = objc2_app_kit::NSPasteboard::generalPasteboard();
         let png = board.dataForType(&objc2_foundation::NSString::from_str(MACOS_PASTEBOARD_PNG))?;
-        Some(png.to_vec())
+        (png.len() <= figcraft_ui_egui::MAX_CLIPBOARD_PNG_BYTES).then(|| png.to_vec())
     }
     fn open_url(&mut self, url: &str) {
         let _ = webbrowser::open(url);
