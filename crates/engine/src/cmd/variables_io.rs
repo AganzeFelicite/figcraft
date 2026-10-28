@@ -1,6 +1,6 @@
 //! Variables import and export: a file's collections as the local variables JSON (the shape the
-//! REST importer reads, so exports round-trip) or as CSS custom properties, and such JSON read
-//! back into a file.
+//! REST importer reads, so exports round-trip), as CSS custom properties or as Dart constants for
+//! Flutter, and such JSON read back into a file.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -18,7 +18,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "variable.export",
             "Export variables",
-            "{collections? [ids or names; default every collection of this file, not library copies], format? (json (default): the local variables JSON that variable.import reads | css: custom properties, the default mode on :root and each other mode on [data-<collection>=\"<mode>\"]; numbers in px unless layers or scopes use them as opacity or font weight | tailwind: a Tailwind CSS v4 stylesheet, the default mode as an @theme block named the way inspect.code's tailwind utilities read them: --color-*, --radius-*, --text-*, --spacing-*, --font-*, unique per file), path? (write it there)}  → {text}, or {path} when written",
+            "{collections? [ids or names; default every collection of this file, not library copies], format? (json (default): the local variables JSON that variable.import reads | css: custom properties, the default mode on :root and each other mode on [data-<collection>=\"<mode>\"]; numbers in px unless layers or scopes use them as opacity or font weight | tailwind: a Tailwind CSS v4 stylesheet, the default mode as an @theme block named the way inspect.code's tailwind utilities read them: --color-*, --radius-*, --text-*, --spacing-*, --font-*, unique per file) | dart: a Dart file for Flutter, a class of constants per collection and mode (Color, double, String, bool), aliases resolved), path? (write it there)}  → {text}, or {path} when written",
             false,
             export
         ),
@@ -48,7 +48,8 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
             .map_err(|e| EngineError::Other(e.to_string()))?,
         "css" => css(doc, &colls, false),
         "tailwind" => css(doc, &colls, true),
-        _ => return Err(bad(cmd, "format: json|css|tailwind")),
+        "dart" => dart(&doc.variables, &colls),
+        _ => return Err(bad(cmd, "format: json|css|tailwind|dart")),
     };
     match string(p, "path") {
         Some(path) => {
@@ -101,6 +102,143 @@ fn css(doc: &Document, colls: &[&Collection], tailwind: bool) -> String {
                     None => continue,
                 };
                 out.push_str(&format!("  {}: {value};\n", name(v)));
+            }
+            out.push_str("}\n");
+        }
+    }
+    out
+}
+
+/// Words Dart never takes as a name.
+const DART_RESERVED: &[&str] = &[
+    "assert", "await", "break", "case", "catch", "class", "const", "continue", "default", "do", "else", "enum", "extends", "false", "final",
+    "finally", "for", "if", "in", "is", "new", "null", "rethrow", "return", "super", "switch", "this", "throw", "true", "try", "var", "void",
+    "while", "with", "yield",
+];
+
+/// Dart's built-in identifiers (no type may take them), and the types the constants use or name,
+/// which a class or constant of that name would shadow.
+const DART_BUILT_IN: &[&str] = &[
+    "abstract",
+    "as",
+    "bool",
+    "Color",
+    "covariant",
+    "deferred",
+    "double",
+    "dynamic",
+    "export",
+    "extension",
+    "external",
+    "factory",
+    "Function",
+    "get",
+    "implements",
+    "import",
+    "int",
+    "interface",
+    "late",
+    "library",
+    "List",
+    "mixin",
+    "num",
+    "Object",
+    "operator",
+    "part",
+    "required",
+    "set",
+    "static",
+    "String",
+    "typedef",
+];
+
+/// `name` as a Dart identifier: its words (anything but ASCII letters and digits separates them)
+/// in camelCase, or PascalCase for a type; never empty, never starting with a digit or reserved.
+fn dart_ident(name: &str, pascal: bool) -> String {
+    let mut out = String::new();
+    for w in name.split(|c: char| !c.is_ascii_alphanumeric()).filter(|w| !w.is_empty()) {
+        let mut cs = w.chars();
+        let Some(first) = cs.next() else { continue };
+        if out.is_empty() && !pascal {
+            out.push(first.to_ascii_lowercase());
+        } else {
+            out.push(first.to_ascii_uppercase());
+        }
+        out.extend(cs);
+    }
+    if out.is_empty() || out.starts_with(|c: char| c.is_ascii_digit()) {
+        out.insert(0, if pascal { 'V' } else { 'v' });
+    }
+    if DART_RESERVED.contains(&out.as_str()) || DART_BUILT_IN.contains(&out.as_str()) {
+        out.push('_');
+    }
+    out
+}
+
+/// `base`, or `base2`, `base3`… when `taken` has it already; the result is taken.
+fn dart_unique(base: String, taken: &mut BTreeSet<String>) -> String {
+    let mut name = base.clone();
+    let mut n = 2;
+    while !taken.insert(name.clone()) {
+        name = format!("{base}{n}");
+        n += 1;
+    }
+    name
+}
+
+/// `text` inside a Dart single-quoted string.
+fn dart_string(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '$' => out.push_str("\\$"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() => out.push_str(&format!("\\u{{{:x}}}", u32::from(c))),
+            c => out.push(c),
+        }
+    }
+    out
+}
+
+/// `x` at full precision as a Dart literal: whole numbers as integers (`4`), the rest in Rust's
+/// shortest round-trip form (`0.125`, `1e21`), which Dart reads as the same double.
+fn dart_number(x: f64) -> String {
+    if x.fract() == 0.0 && x.abs() < 1e15 { format!("{x}") } else { format!("{x:?}") }
+}
+
+/// `text` on one line of a Dart comment.
+fn dart_comment(text: &str) -> String {
+    text.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
+}
+
+/// Each collection's variables as Dart constants for Flutter: a class per mode (the default mode's
+/// named after the collection, the others after the collection and the mode) with a `static const`
+/// per variable. Aliases are resolved to their value in that mode (a variable of another
+/// collection in that collection's default mode), so each class stands alone.
+fn dart(vars: &Variables, colls: &[&Collection]) -> String {
+    let mut out = String::from("// Variables exported from FigCraft.\n\nimport 'dart:ui';\n");
+    let mut classes = BTreeSet::new();
+    for c in colls {
+        let base = dart_ident(&c.name, true);
+        let mut members = BTreeSet::new();
+        let names: Vec<(&Variable, String)> =
+            vars.variables.iter().filter(|v| v.collection == c.id).map(|v| (v, dart_unique(dart_ident(&v.name, false), &mut members))).collect();
+        for (i, m) in c.modes.iter().enumerate() {
+            let class = dart_unique(if i == 0 { base.clone() } else { format!("{base}{}", dart_ident(&m.name, true)) }, &mut classes);
+            out.push_str(&format!("\n/// {} · {}\nabstract final class {class} {{\n", dart_comment(&c.name), dart_comment(&m.name)));
+            let modes = BTreeMap::from([(c.id.clone(), m.id.clone())]);
+            for (v, name) in &names {
+                let (ty, value) = match vars.resolve(&v.id, &modes) {
+                    Some(VariableValue::Color(col)) => ("Color", crate::codegen::kotlin_color(col)),
+                    Some(VariableValue::Number(x)) if x.is_finite() => ("double", dart_number(x)),
+                    Some(VariableValue::String(t)) => ("String", format!("'{}'", dart_string(&t))),
+                    Some(VariableValue::Boolean(b)) => ("bool", b.to_string()),
+                    _ => continue,
+                };
+                out.push_str(&format!("  static const {ty} {name} = {value};\n"));
             }
             out.push_str("}\n");
         }

@@ -4,7 +4,7 @@
 
 Design systems are why teams adopt Figma. **Components: breadth ~96%, ready ~72%. Styles and
 variables: breadth ~95%, ready ~76% (estimated).** QA'd with a synthetic design system of ~300
-components used 2,000 times (`crates/engine/src/synthetic_ds.rs`, `components_scale_tests.rs`);
+components used 2,000 times (`crates/engine/src/content/synthetic_ds.rs`, `components_scale_tests.rs`);
 not with real libraries. Remaining: 4–10 h here, plus team libraries' tail (4–8 h, partly after
 accounts).
 
@@ -70,7 +70,7 @@ updates with overrides kept: `library_tests.rs`, `components_scale_tests.rs`.
 | Explicit modes per frame, library collections' modes | done | |
 | Gradient stops and variant properties bound to variables | done | a stop's binding follows it when earlier stops are removed |
 | Extended collections | done | library collections, including a library's own extended collections (chains through libraries); overrides per mode with reset; follow library updates, variables new to the library collection being an update of their own; modes inherited. Checked with synthetic libraries only ([gaps](gaps.md) #14) |
-| Variables import/export (JSON) | done | the REST local variables shape (round-trips; merges by collection, mode and variable name; `variableCollections` and `variables` read under `meta` or at the top level, a warning when no variables are found or fewer than the collections list); CSS custom properties export; in the browser the export arrives as a download (import there still needs a file picker) |
+| Variables import/export (JSON) | done | the REST local variables shape (round-trips; merges by collection, mode and variable name; `variableCollections` and `variables` read under `meta` or at the top level, a warning when no variables are found or fewer than the collections list); CSS custom properties and Dart constants (Flutter) export; in the browser the export arrives as a download (import there still needs a file picker) |
 | Expressions in prototype set-variable actions | done | see [prototyping-parity](prototyping-parity.md) |
 
 ## Revision history

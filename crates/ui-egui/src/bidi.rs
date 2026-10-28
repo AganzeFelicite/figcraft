@@ -70,5 +70,4 @@ pub fn script_fallbacks(have: &dyn Fn(char) -> bool, taken: &mut Vec<Arc<figcraf
 }
 
 #[cfg(test)]
-#[path = "rtl_names_tests.rs"]
 mod tests;

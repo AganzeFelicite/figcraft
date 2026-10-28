@@ -8,6 +8,9 @@ name = "Bahasa Indonesia"
 status = "draft — needs native review"
 
 [ui]
+"Relative to" = "Relatif terhadap"
+"Trigger layer" = "Layer pemicu"
+"Whole screen" = "Seluruh layar"
 
 "% of all commits" = "% dari semua commit"
 "(no longer published)" = "(tidak lagi dipublikasikan)"
@@ -239,7 +242,7 @@ status = "draft — needs native review"
 "Changes on main" = "Perubahan di main"
 "Changes on the branch" = "Perubahan di branch"
 "Changes unknown" = "Perubahan tidak diketahui"
-"Choose React, Leptos, SwiftUI, Compose or ArkUI above to connect this component to its code." = "Pilih React, Leptos, SwiftUI, Compose, atau ArkUI di atas untuk menghubungkan component ini ke kodenya."
+"Choose React, Leptos, Vue, SwiftUI, Compose or ArkUI above to connect this component to its code." = "Pilih React, Leptos, Vue, SwiftUI, Compose, atau ArkUI di atas untuk menghubungkan component ini ke kodenya."
 "Choose another profile to change it." = "Pilih profil lain untuk mengubahnya."
 "Choose collection" = "Pilih koleksi"
 "Choose image" = "Pilih gambar"

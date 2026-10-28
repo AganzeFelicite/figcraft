@@ -401,7 +401,7 @@ fn vector_region_missing_fills_inherit_and_unresolved_link_keeps_own_fill() {
 #[test]
 fn vector_region_link_to_non_fill_style_keeps_own_fill() {
     let own = solid(0.1, 0.2, 0.9);
-    let (doc, _) = import(&region_canvas_with_typed_link(Some(own), Some(50), "EFFECT", solid(0.9, 0.1, 0.2)), "Effect-linked region").unwrap();
+    let (doc, _) = import(&region_canvas_with_typed_link(Some(own), Some(50), "TEXT", solid(0.9, 0.1, 0.2)), "Text-linked region").unwrap();
     let fills = network_of(&doc, "Wave").regions[0].fills.as_ref().unwrap();
     let figcraft_doc::color::PaintKind::Solid { color } = &fills[0].kind else { panic!("{fills:?}") };
     assert_eq!((color.r, color.g, color.b), (0.1, 0.2, 0.9));
