@@ -348,7 +348,12 @@ pub(super) fn paints(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeI
     if !fills && !empty {
         let weight = common(doc, sel, |n| n.stroke.weight);
         let align = common(doc, sel, |n| n.stroke.align);
-        let half = (ui.available_width() - PAD * 2.0 - 8.0) / 2.0;
+        let sided = sel.iter().all(|i| doc.node(*i).is_some_and(|n| n.kind.is_frame_like() || matches!(n.kind, NodeKind::Rectangle)));
+        // The position and the weight share what the buttons (Advanced, and per-side strokes for
+        // layers with sides) leave: halving the whole row left the weight too narrow for its value
+        // beside the variable button and ran the row past the panel's edge (#1452).
+        let buttons = if sided { 2.0 } else { 1.0 } * (24.0 + 8.0);
+        let field_w = ((ui.available_width() - PAD * 2.0 - 8.0 - buttons) / 2.0).max(40.0);
         row(ui, 32.0, |ui| {
             let resp = widgets::dropdown(
                 ui,
@@ -358,7 +363,7 @@ pub(super) fn paints(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeI
                     Some(StrokeAlign::Outside) => tr("Outside"),
                     None => tr("Mixed"),
                 },
-                half,
+                field_w,
                 None,
             );
             menu_popup(&resp).show(|ui| {
@@ -369,8 +374,6 @@ pub(super) fn paints(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeI
                     }
                 }
             });
-            let sided = sel.iter().all(|i| doc.node(*i).is_some_and(|n| n.kind.is_frame_like() || matches!(n.kind, NodeKind::Rectangle)));
-            let weight_w = half - if sided { 60.0 } else { 32.0 };
             let e = crate::variable_ui::number_field_mixed(
                 app,
                 ui,
@@ -380,7 +383,7 @@ pub(super) fn paints(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeI
                 Lead::Icon(Icon::Menu, tr("Stroke weight")),
                 weight,
                 "",
-                weight_w,
+                field_w,
             );
             app.field_of(&ids, "strokeWeight", e, |n| n.stroke.weight, |v| json!(v.max(0.0)));
             if sided {
