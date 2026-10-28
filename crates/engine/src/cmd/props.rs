@@ -403,15 +403,12 @@ fn apply_order(k: &str) -> u8 {
 /// would turn it back on (`layout_mut`), so the call is refused rather than one of them losing.
 fn layout_keys_beside_none(cmd: &str, props: &Map<String, Value>) -> Result<()> {
     let off = ["layout", "layoutMode"]
-        .iter()
-        .filter_map(|k| props.get(*k))
-        .any(|v| v.is_null() || v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("none")));
+        .into_iter()
+        .find(|k| props.get(*k).is_some_and(|v| v.is_null() || v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("none"))));
     let tuning: Vec<String> = props.keys().filter(|k| LAYOUT_KEYS.contains(&k.as_str())).map(|k| format!("`{k}`")).collect();
-    if !off || tuning.is_empty() {
-        return Ok(());
-    }
+    let Some(off) = off.filter(|_| !tuning.is_empty()) else { return Ok(()) };
     let (what, are) = if tuning.len() == 1 { ("an auto layout property", "is") } else { ("auto layout properties", "are") };
-    Err(bad(cmd, format!("{} {are} {what}, and `layout` in the same call turns auto layout off", tuning.join(", "))))
+    Err(bad(cmd, format!("{} {are} {what}, and `{off}` in the same call turns auto layout off", tuning.join(", "))))
 }
 
 /// An explicit width (`is_w`) or height makes hugging or filling on that axis fixed, like typing

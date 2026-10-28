@@ -267,7 +267,9 @@ fn auto_layout_keys_beside_no_auto_layout_are_refused() {
         assert!(e.contains("turns auto layout off"), "{props}: {e}");
     }
     let e = s.execute("node.set", &json!({"id": f, "props": {"layout": null, "gap": 8, "padding": 4}})).unwrap_err().to_string();
-    assert!(e.contains("`gap`, `padding` are auto layout properties"), "{e}");
+    assert!(e.contains("`gap`, `padding` are auto layout properties, and `layout` in the same call"), "{e}");
+    let e = s.execute("node.set", &json!({"id": f, "props": {"layoutMode": "NONE", "wrap": true}})).unwrap_err().to_string();
+    assert!(e.contains("`wrap` is an auto layout property, and `layoutMode` in the same call"), "{e}");
     // Without other auto layout keys, `layout: null` still removes it.
     set(&mut s, f, json!({"layout": "vertical", "gap": 8}));
     set(&mut s, f, json!({"layout": null, "name": "Plain"}));
