@@ -1856,7 +1856,7 @@ status = "draft — reviewed by a native speaker, awaiting a maintainer's approv
 "Exported {n} files; some content was changed or left out" = { one = "ექსპორტირებულია ფაილი: {n}; ზოგი შიგთავსი შეიცვალა ან გამოტოვებულია", other = "ექსპორტირებულია ფაილი: {n}; ზოგი შიგთავსი შეიცვალა ან გამოტოვებულია" }
 "FigCraft {version} is currently the newest version available." = "FigCraft {version} ამჟამად უახლესი ხელმისაწვდომი ვერსიაა."
 "Format" = "ფორმატი"
-"Ignore unsupported" = "მხარდაუჭერლის უგულებელყოფა"
+"Ignore unsupported" = "მხარდაუჭერელის უგულებელყოფა"
 "Leaving the prototype" = "პროტოტიპიდან გასვლა"
 "Paste effect" = "ეფექტის ჩასმა"
 "Paste fill" = "შევსების ჩასმა"
