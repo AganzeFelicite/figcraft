@@ -424,6 +424,8 @@ mod save_format_tests;
 #[cfg(test)]
 mod scale_tool_tests;
 #[cfg(test)]
+mod scaled_instance_tests;
+#[cfg(test)]
 mod section_contents_tests;
 #[cfg(test)]
 mod section_tests;
