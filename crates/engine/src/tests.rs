@@ -478,11 +478,19 @@ fn every_command_survives_junk_params() {
             continue;
         }
         for j in &junk {
-            let mut s = sess();
-            let _ = s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 10, "height": 10}));
-            let _ = s.execute("text.create", &json!({"text": "t"}));
-            if let Err(EngineError::Internal { cmd, msg }) = s.execute(spec.id, j) {
-                panic!("{cmd} panicked on {j}: {msg}");
+            // Each junk object as given (names the command doesn't take are refused) and cut down
+            // to the names it takes, so the junk values still reach its parsers.
+            let mut taken = j.clone();
+            if let (Some(names), Some(o)) = (crate::cmd::param_names(spec.id), taken.as_object_mut()) {
+                o.retain(|k, _| matches!(k.as_str(), "ids" | "id") || names.contains(&k.as_str()));
+            }
+            for params in if taken == *j { vec![j] } else { vec![j, &taken] } {
+                let mut s = sess();
+                let _ = s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 10, "height": 10}));
+                let _ = s.execute("text.create", &json!({"text": "t"}));
+                if let Err(EngineError::Internal { cmd, msg }) = s.execute(spec.id, params) {
+                    panic!("{cmd} panicked on {params}: {msg}");
+                }
             }
         }
     }

@@ -97,7 +97,8 @@ Run any command (the same ids as the menus, shortcuts, Actions palette, CLI and 
 calls never open dialogs: dialog requests are dropped. Returns the command's result (creation
 commands return `{"id": N}`). Paints (`fills`, `strokes`, `paint`) take a colour, the full paint
 JSON or the gradient shorthand `{"type":"linearGradient","stops":["#hex","#hex"],"from"?,"to"?}`
-(as in `docs/mcp.md`).
+(as in `docs/mcp.md`). A parameter the command's doc (`engine.commands`) doesn't list is an error
+naming it and the ones it takes, never ignored; `ids` and `id` are always taken.
 
 ```json
 {"id":1,"method":"engine.execute","params":{"command":"shape.rectangle","params":{"x":10,"y":10,"width":100,"height":50}}}
