@@ -383,18 +383,35 @@ fn paint_none(v: &Value) -> bool {
     v.is_null() || v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("none"))
 }
 
-/// The order [`apply`] takes keys in: geometry first so rotation applies to the final size, style
-/// links after the values so a link wins over values its style sets, variable bindings last so
-/// paints set in the same call don't detach them.
+/// The order [`apply`] takes keys in: geometry first so rotation applies to the final size, the
+/// auto layout mode before the keys that tune it (an object `layout` replaces the whole auto
+/// layout), style links after the values so a link wins over values its style sets, variable
+/// bindings last so paints set in the same call don't detach them.
 fn apply_order(k: &str) -> u8 {
     match k {
         "path" | "width" | "height" | "w" | "h" => 0,
-        "rotation" => 2,
-        "x" | "y" => 3,
-        "fillStyle" | "strokeStyle" | "effectStyle" | "textStyle" | "gridStyle" => 4,
-        "boundVariables" => 5,
-        _ => 1,
+        "layout" | "layoutMode" => 1,
+        "rotation" => 3,
+        "x" | "y" => 4,
+        "fillStyle" | "strokeStyle" | "effectStyle" | "textStyle" | "gridStyle" => 5,
+        "boundVariables" => 6,
+        _ => 2,
     }
+}
+
+/// Auto layout keys given beside a `layout` (or `layoutMode`) that turns auto layout off: they
+/// would turn it back on (`layout_mut`), so the call is refused rather than one of them losing.
+fn layout_keys_beside_none(cmd: &str, props: &Map<String, Value>) -> Result<()> {
+    let off = ["layout", "layoutMode"]
+        .iter()
+        .filter_map(|k| props.get(*k))
+        .any(|v| v.is_null() || v.as_str().is_some_and(|s| s.eq_ignore_ascii_case("none")));
+    let tuning: Vec<String> = props.keys().filter(|k| LAYOUT_KEYS.contains(&k.as_str())).map(|k| format!("`{k}`")).collect();
+    if !off || tuning.is_empty() {
+        return Ok(());
+    }
+    let (what, are) = if tuning.len() == 1 { ("an auto layout property", "is") } else { ("auto layout properties", "are") };
+    Err(bad(cmd, format!("{} {are} {what}, and `layout` in the same call turns auto layout off", tuning.join(", "))))
 }
 
 /// An explicit width (`is_w`) or height makes hugging or filling on that axis fixed, like typing
@@ -411,6 +428,7 @@ fn fix_axis(doc: &mut Document, id: NodeId, is_w: bool) -> Result<()> {
 
 /// Apply a property map to one node. `x`/`y` are relative to the parent.
 pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Value>) -> Result<()> {
+    layout_keys_beside_none(cmd, props)?;
     let mut unknown = Vec::new();
     let mut keys: Vec<(&String, &Value)> = props.iter().collect();
     keys.sort_by_key(|(k, _)| apply_order(k));
