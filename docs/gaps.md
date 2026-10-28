@@ -248,9 +248,10 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   page, a zoom after quick renders), a watchdog thread previews any such render still running
   after 12 ms (desktop only; the browser renders inline).
 - **Landed (2026-10-28):** the browser refines a zoom's preview only once no newer request has
-  come for 120 ms (`SETTLE_MS`): its full renders run on the UI thread, and one between every two
-  wheel steps held the page up for seconds. Pans and edits (no preview) are refined at once; the
-  desktop, with its render thread, is unchanged.
+  come for 120 ms (`SETTLE_MS`), or for as long as its last full render took when that is shorter:
+  its full renders run on the UI thread, and one between every two wheel steps held the page up
+  for seconds. Pans and edits (no preview) are refined at once; the desktop, with its render
+  thread, is unchanged.
 - **Landed (2026-10-15):** a bounded render margin is reused during panning and refilled before
   the visible view reaches its edge. The extra rendered area is capped at 1.6× visible pixels;
   this reduces blank strips without changing the CPU renderer.

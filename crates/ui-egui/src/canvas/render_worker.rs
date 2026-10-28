@@ -13,7 +13,9 @@
 //! the render from scratch has run past [`PREVIEW_AFTER_MS`], beside it (the full render keeps the
 //! other cores), and drops it if the full image is there first.
 //! The browser renders on the UI thread, so a zoom's full render blocks the page: there a preview
-//! is refined only once no newer request has come for [`SETTLE_MS`] (the zoom has paused).
+//! is refined only once no newer request has come for [`SETTLE_MS`] (the zoom has paused), or for
+//! as long as the last full render took when that is shorter (a wait never costs more than the
+//! render it may save).
 
 use std::sync::Arc;
 
@@ -27,9 +29,9 @@ use web_time::Instant;
 pub const PREVIEW_FACTOR: f64 = 4.0;
 /// Full renders quicker than this (about a frame) show without a preview.
 pub const PREVIEW_AFTER_MS: f64 = 12.0;
-/// The browser refines a zoom's preview only once no newer request came for this long: a full
-/// render there blocks the page, and one between every two wheel steps of a zoom held it up for
-/// seconds.
+/// The browser refines a zoom's preview only once no newer request came for this long (or for as
+/// long as the last full render took, when shorter): a full render there blocks the page, and one
+/// between every two wheel steps of a zoom held it up for seconds.
 pub const SETTLE_MS: u64 = 120;
 
 #[derive(Clone)]
@@ -354,7 +356,11 @@ pub struct Inline {
     /// rendering the preview itself can take longer than the wait (the page is blocked meanwhile,
     /// so no newer request could have come).
     since: Instant,
+    /// How long to wait after a preview, at most: `wait` is this capped by the last full render's
+    /// time, so a page whose renders are quick is not held coarse for longer than one would take.
     settle: std::time::Duration,
+    /// The wait for the pending job's preview.
+    wait: std::time::Duration,
     renders: Renders,
 }
 
@@ -367,7 +373,17 @@ impl Inline {
     }
     /// Refining a preview after `settle` without newer requests (tests: zero, the next frame).
     pub fn with_settle(ctx: egui::Context, settle: std::time::Duration) -> Self {
-        Self { ctx, pending: None, submitted: 0, previewed: false, preview_shown: false, since: Instant::now(), settle, renders: Renders::default() }
+        Self {
+            ctx,
+            pending: None,
+            submitted: 0,
+            previewed: false,
+            preview_shown: false,
+            since: Instant::now(),
+            settle,
+            wait: settle,
+            renders: Renders::default(),
+        }
     }
     pub fn submit(&mut self, job: Job) {
         self.pending = Some(job);
@@ -375,6 +391,7 @@ impl Inline {
         self.previewed = false;
         self.preview_shown = false;
     }
+    /// Whether a request is still to be refined (a preview's wait counts).
     pub fn in_flight(&self) -> bool {
         self.pending.is_some()
     }
@@ -384,14 +401,16 @@ impl Inline {
             if let Some(d) = self.pending.as_ref().and_then(|job| self.renders.preview(job)) {
                 self.preview_shown = true;
                 self.since = Instant::now();
-                self.ctx.request_repaint_after(self.settle);
+                let full = std::time::Duration::try_from_secs_f64(self.renders.full_ms / 1000.0);
+                self.wait = full.map_or(self.settle, |full| full.min(self.settle));
+                self.ctx.request_repaint_after(self.wait);
                 return Some(answering(d, self.submitted));
             }
         }
         if self.pending.is_some() && self.preview_shown {
             let waited = self.since.elapsed();
-            if waited < self.settle {
-                self.ctx.request_repaint_after(self.settle - waited);
+            if waited < self.wait {
+                self.ctx.request_repaint_after(self.wait - waited);
                 return None;
             }
         }
