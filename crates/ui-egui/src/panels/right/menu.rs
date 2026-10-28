@@ -19,11 +19,16 @@ pub(crate) fn menu_style(s: &mut egui::Style) {
 /// (else its 600 px default area width) and keeps the size measured; rows ([`menu_row`]) take the
 /// larger of that width and their content, so the menu fits its content. Chain `.width(w)` for a
 /// menu at least `w` wide.
-/// The blend modes as menu items in groups (pass-through only for layers); the one picked.
-pub fn blend_menu(ui: &mut Ui, with_pass_through: bool) -> Option<BlendMode> {
+/// The blend modes as menu items in groups (pass-through only for layers); the one picked. Each
+/// row `preview`s its mode on the canvas while hovered.
+pub fn blend_menu(ui: &mut Ui, with_pass_through: bool, mut preview: impl FnMut(BlendMode)) -> Option<BlendMode> {
     let mut picked = None;
     for b in BlendMode::ALL.into_iter().filter(|b| with_pass_through || *b != BlendMode::PassThrough) {
-        if menu_item(ui, tr(b.label()), "") {
+        let resp = menu_row(ui, tr(b.label()), "", 0.0, |_, _, _| {});
+        if resp.hovered() {
+            preview(b);
+        }
+        if resp.clicked() {
             picked = Some(b);
             ui.close();
         }
@@ -32,6 +37,11 @@ pub fn blend_menu(ui: &mut Ui, with_pass_through: bool) -> Option<BlendMode> {
         }
     }
     picked
+}
+
+/// Show `blend` on `ids` on the canvas while its row in a blend mode menu is hovered.
+pub(crate) fn preview_blend(app: &mut FigApp, ctx: &egui::Context, ids: &[NodeId], blend: BlendMode) {
+    app.preview_text(ctx, "node.set", json!({"ids": ids, "props": {"blend": blend.label()}}));
 }
 
 pub fn menu_popup(anchor: &egui::Response) -> egui::Popup<'static> {

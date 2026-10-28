@@ -102,13 +102,15 @@ impl Session {
         };
         match target {
             Some(target) => {
-                // Clicking inside the current selection's box keeps it (drag them all).
+                // Clicking inside the current selection's box keeps it (drag them all); a click
+                // that doesn't become a drag narrows it to the clicked layer.
                 let in_sel_box = sel.len() > 1 && doc.bounds_of(&sel).is_some_and(|b| b.contains(ev.p())) && !ev.shift;
                 // Shift on a selected layer takes it out on release if the press doesn't become a
                 // drag; a drag moves the selection with it. Where no drag can start, it goes now.
                 let deselect = (ev.shift && sel.contains(&target)).then_some(target);
                 let without_target = || sel.iter().copied().filter(|x| *x != target).collect::<Vec<_>>();
-                let new_sel = if in_sel_box && (sel.contains(&target) || sel.iter().any(|s| doc.is_ancestor(*s, target))) {
+                let keep = (in_sel_box && !ev.cmd && (sel.contains(&target) || sel.iter().any(|s| doc.is_ancestor(*s, target)))).then_some(target);
+                let new_sel = if keep.is_some() {
                     sel.clone()
                 } else if ev.shift && deselect.is_none() {
                     let mut s2 = sel.clone();
@@ -132,6 +134,9 @@ impl Session {
                 if new_sel.is_empty() || doc.node(target).is_some_and(|n| n.locked) || ids.is_empty() {
                     if deselect.is_some() {
                         self.set_selection(without_target());
+                    } else if keep.is_some() {
+                        // No drag can start here, so the click narrows the selection now.
+                        self.set_selection(vec![target]);
                     }
                     return Ok(());
                 }
@@ -148,7 +153,7 @@ impl Session {
                     }
                     return Err(e);
                 }
-                self.tool.gesture = Gesture::Move { start: ev.p(), ids, targets, duplicate: ev.alt, moved: false, deselect };
+                self.tool.gesture = Gesture::Move { start: ev.p(), ids, targets, duplicate: ev.alt, moved: false, deselect, keep };
                 self.tool.overlay.cursor = if ev.alt { Cursor::Copy } else { Cursor::Default };
             }
             None => {
