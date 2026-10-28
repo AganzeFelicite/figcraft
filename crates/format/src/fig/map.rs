@@ -1826,7 +1826,7 @@ impl<'a> Mapper<'a> {
                                 }
                                 let linked_style = style_link(&View::of(s), "styleIdForFill", "inheritFillStyleID")
                                     .and_then(|id| self.nodes.get(&id).copied())
-                                    .filter(|style| style.get("styleType").and_then(Kv::str).is_some());
+                                    .filter(|style| style.get("styleType").and_then(Kv::str) == Some("FILL"));
                                 match linked_style {
                                     Some(style) => style.get("fillPaints"),
                                     None => Some(own_fills),
