@@ -259,6 +259,7 @@ pub fn tool_definitions() -> Vec<Value> {
                 json!({
                     "path": string("File path"),
                     "variables": {"description": "REST API file JSON only: the local variables JSON (`GET /v1/files/:key/variables/local`) as a path or the JSON object. Default: `<name>.variables.json` or `variables.json` next to the file."},
+                    "reload": boolean("A file that is already open: read it again from disk into its tab (refused while the tab has unsaved changes). Without it, the result says `stale: true` when the file changed on disk since the tab read or saved it"),
                 }),
                 &["path"],
             ),
@@ -991,6 +992,9 @@ fn open_file(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, 
         None | Some(Value::Null) => {}
         Some(v @ (Value::String(_) | Value::Object(_))) => params["variables"] = v.clone(),
         Some(_) => return Err("`variables` must be a path or the local variables JSON object".into()),
+    }
+    if let Some(reload) = a.get("reload").filter(|v| !v.is_null()) {
+        params["reload"] = reload.clone();
     }
     let r = exec(b, "file.open", params)?;
     let doc = b.call("document.inspect", json!({"depth": 1}))?;
