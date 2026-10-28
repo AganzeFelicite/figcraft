@@ -8,6 +8,7 @@ use base64::Engine as _;
 use figcraft_doc::{Collection, Comment, DevSnapshot, Document, ImageData, Style, Variable};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use crate::Error;
 use crate::change::{Change, DocProp, Entry, Family, Json};
@@ -164,13 +165,63 @@ struct ImageValue {
     bytes: String,
 }
 
+/// Largest decoded image an entry may carry: 32 MiB, mirroring `MAX_IMAGE_FILE_BYTES` in
+/// `figcraft_format::thumbnail` (collab sits below the format crate and can't name it).
+pub(crate) const MAX_IMAGE_BYTES: usize = 32 << 20;
+
+/// Largest image side: JPEG and GIF size fields are 16-bit; PNG can claim more, but no
+/// image this app realistically opens reaches it — an entry claiming a bigger side is
+/// refused rather than trusted. Zero is allowed: the format crate stores 0×0 for bytes it
+/// couldn't probe (`image_data`).
+pub(crate) const MAX_IMAGE_SIDE: u32 = 65_535;
+
+/// Whether `key` has the shape of a content hash: 64 hex chars, what `image_hash` in
+/// `figcraft_format` (sha256) produces — which writes it lowercase, so a match is exact:
+/// an uppercase look-alike claims a content address it doesn't have, and storing bytes
+/// there would file a second copy under a name no honest lookup reaches. Other key
+/// shapes exist and stay valid (the svg importer's FNV-128 keys, the REST importer's
+/// placeholder under the imageRef itself); they claim no content address, so only the
+/// key-name rule and the size bounds apply to them. One untestable edge: a REST imageRef of exactly 64 hex
+/// chars would be hash-shaped — Figma's imageRefs are 40 hex, so it doesn't occur.
+fn is_content_hash(key: &str) -> bool {
+    key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// Lowercase sha256 hex, the same form `figcraft_format::image_hash` produces.
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+}
+
 fn image_json(img: &ImageData) -> Result<Json, Error> {
     Json::of(&ImageValue { width: img.width, height: img.height, bytes: base64::engine::general_purpose::STANDARD.encode(img.bytes.as_slice()) })
 }
 
-fn image_of(value: &Json) -> Result<ImageData, Error> {
+/// The image a change carries, validated as a collaborator's claim (an invalid entry
+/// rejects its batch, leaving every replica's store clean): a key that can name an archive
+/// member ([`ImageData::is_valid_key`]: a saved file writes it as `images/<key>`), dimensions within
+/// [`MAX_IMAGE_SIDE`], decoded bytes within [`MAX_IMAGE_BYTES`] (the encoded length is
+/// capped before decoding so hostile text can't force a large allocation), and a key with
+/// the shape of a content hash must be that hash of these bytes — a poisoned
+/// content-addressed store would show the wrong image everywhere at once (#1086).
+fn image_of(key: &str, value: &Json) -> Result<ImageData, Error> {
+    if !ImageData::is_valid_key(key) {
+        return Err(Error::Invalid(format!("image: {key:?} can't name an image (1–128 letters, digits, - or _)")));
+    }
     let v: ImageValue = value.read("image")?;
+    if v.width > MAX_IMAGE_SIDE || v.height > MAX_IMAGE_SIDE {
+        return Err(Error::Invalid(format!("image: {}×{} passes the {} a side may be", v.width, v.height, MAX_IMAGE_SIDE)));
+    }
+    let max_encoded = (MAX_IMAGE_BYTES / 3) * 4 + 4;
+    if v.bytes.len() > max_encoded {
+        return Err(Error::Invalid(format!("image: base64 text longer than {max_encoded} bytes for {MAX_IMAGE_BYTES} of bytes")));
+    }
     let bytes = base64::engine::general_purpose::STANDARD.decode(v.bytes.as_bytes()).map_err(|e| Error::Invalid(format!("image: {e}")))?;
+    if bytes.len() > MAX_IMAGE_BYTES {
+        return Err(Error::Invalid(format!("image: {} bytes pass the {MAX_IMAGE_BYTES} an image may be", bytes.len())));
+    }
+    if is_content_hash(key) && key != sha256_hex(&bytes) {
+        return Err(Error::Invalid(format!("image: the bytes aren't what their key {key} hashes to")));
+    }
     Ok(ImageData { bytes: Arc::new(bytes), width: v.width, height: v.height })
 }
 
@@ -286,7 +337,7 @@ pub(crate) fn apply(doc: &mut Document, change: &Change) -> Result<bool, Error> 
                 doc.dev_snapshots.insert(*k, Arc::new(snap));
             }
             Entry::Image(k) => {
-                let img = image_of(value)?;
+                let img = image_of(k, value)?;
                 doc.images.insert(k.clone(), img);
             }
             Entry::Ballot(k) => {

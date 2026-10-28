@@ -720,9 +720,9 @@ fn read_images<R: Read + Seek>(z: &mut zip::ZipArchive<R>, own: Option<&BTreeSet
     hashes.sort_by_key(|h| !own.is_some_and(|o| o.contains(h)));
     let mut images = BTreeMap::new();
     let mut unread = Vec::new();
-    // Member names that aren't plain hashes (`../x`, `a/b`) are never read, so never written back.
+    // Member names that can't be real image keys (`../x`, `a/b`) are never read, so never written back.
     hashes.retain(|h| {
-        let ok = library::is_valid_hash(h);
+        let ok = ImageData::is_valid_key(h);
         if !ok {
             unread.push((h.clone(), FormatError::Corrupt("its name isn't a valid image hash".to_string())));
         }

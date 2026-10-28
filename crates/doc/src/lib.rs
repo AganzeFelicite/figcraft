@@ -161,6 +161,16 @@ pub struct ImageData {
     pub height: u32,
 }
 
+impl ImageData {
+    /// Whether `key` can name an image: 1–128 ASCII letters, digits, `-` and `_` (content hashes,
+    /// the svg importer's FNV keys, the REST importer's `rest-image-missing` placeholder). A key
+    /// becomes an archive member name (`images/<key>`) when the file is saved, so only these are
+    /// read back from a file or taken from a collaborator: never `/`, `.` or other path text.
+    pub fn is_valid_key(key: &str) -> bool {
+        (1..=128).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    }
+}
+
 /// A whole design file.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Document {

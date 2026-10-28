@@ -151,7 +151,12 @@ As built:
   colour profile, image presets, annotation categories and library data (whole values); styles,
   comment threads, variable collections and variables (one entry per id plus the order of ids;
   the whole list when ids aren't unique); dev-mode snapshots (per layer); images (per content
-  hash, the encoded bytes as base64); a board's timer and vote (whole values, `DocProp::Timer` and
+  hash, the encoded bytes as base64; as an entry applies the claim is checked: every key is
+  1–128 ASCII letters, digits, `-` or `_` (a saved file names the image `images/<key>`), a key
+  with the shape of a content hash (64 hex chars) must be exactly the lowercase sha256 hex of
+  those bytes (as the app writes them); a side is at most 65 535 px and the decoded bytes at
+  most 32 MiB, and base64 that can't decode is refused); a
+  board's timer and vote (whole values, `DocProp::Timer` and
   `DocProp::Vote`) and the vote's ballots (`Entry::Ballot(voter)`, one per voter, so people voting
   at once write different entries). The timer travels as its end time (or, paused, the time left),
   never as ticks: each client counts down on its own clock. The page order is the pages'
