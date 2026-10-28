@@ -10,18 +10,19 @@ use serde_json::{Value, json};
 use crate::control::{ControlReply, ControlRequest};
 use crate::{FigApp, NoServices};
 
-/// One main-window frame, as the desktop app runs it; `close` asks the window to close.
-fn frame(ctx: &egui::Context, app: &mut FigApp, close: bool) {
+/// One main-window frame, as the desktop app runs it; `close` asks the window to close. Returns
+/// the commands the frame sent the main window.
+fn frame(ctx: &egui::Context, app: &mut FigApp, close: bool) -> Vec<egui::ViewportCommand> {
     let mut input = RawInput::default();
     if close {
         input.viewports.insert(ViewportId::ROOT, ViewportInfo { events: vec![ViewportEvent::Close], ..Default::default() });
     }
-    ctx.run_ui(input, |ui| {
+    let mut out = ctx.run_ui(input, |ui| {
         crate::windows::on_close_request(app, ui.ctx());
         app.ui(ui);
-    })
-    .textures_delta
-    .clear();
+    });
+    out.textures_delta.clear();
+    out.viewport_output.remove(&ViewportId::ROOT).map(|v| v.commands).unwrap_or_default()
 }
 
 /// A control request queued for the UI, and where its reply arrives.
@@ -500,4 +501,23 @@ fn enter_answers_save() {
     assert_eq!(rects_in(&path), 1, "Enter saved");
     assert!(app.ui.quit);
     std::fs::remove_dir_all(&d).ok();
+}
+
+/// macOS's Quit (⌘Q, the app menu's Quit item, the Dock) reaches the app as a close request on
+/// the main window (#857: the craft-menu app menu replaces winit's, whose Quit ended the process
+/// at once). With unsaved changes the window cancels the close, so the process stays, and asks;
+/// Don't Save then closes it.
+#[test]
+fn a_quit_with_unsaved_changes_waits_for_the_answer() {
+    let mut s = Session::new();
+    s.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap();
+    let ctx = egui::Context::default();
+    let mut app = FigApp::new(s, Box::new(NoServices));
+    frame(&ctx, &mut app, false);
+    let sent = frame(&ctx, &mut app, true);
+    assert!(sent.contains(&egui::ViewportCommand::CancelClose), "the quit is held: {sent:?}");
+    assert!(app.ui.confirm_close && !app.ui.quit, "and the question asks");
+    crate::windows::answer_close(&mut app, &ctx, crate::windows::CloseAnswer::DontSave);
+    let sent = frame(&ctx, &mut app, false);
+    assert!(app.ui.quit && sent.contains(&egui::ViewportCommand::Close), "Don't Save quits: {sent:?}");
 }
