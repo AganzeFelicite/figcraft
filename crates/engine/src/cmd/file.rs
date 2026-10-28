@@ -118,13 +118,19 @@ pub fn specs() -> Vec<CommandSpec> {
             false,
             export_layers
         ),
-        spec!("file.exportSvg", "Export selection as SVG", "{ids?, path?}", false, |s, p| {
-            let mut q = p.clone();
-            if let Some(o) = q.as_object_mut() {
-                o.insert("format".into(), json!("svg"));
+        spec!(
+            "file.exportSvg",
+            "Export selection as SVG",
+            "{ids?, path?, scale? | size?, contentsOnly?, includeBoundingBox?, svgOutlineText?, svgIdAttribute?, svgSimplifyStroke? (as file.export)}",
+            false,
+            |s, p| {
+                let mut q = p.clone();
+                if let Some(o) = q.as_object_mut() {
+                    o.insert("format".into(), json!("svg"));
+                }
+                export(s, &q)
             }
-            export(s, &q)
-        }),
+        ),
         spec!(
             "file.exportFramesPdf",
             "Export frames to PDF",
@@ -139,7 +145,13 @@ pub fn specs() -> Vec<CommandSpec> {
             true,
             import
         ),
-        spec!("file.placeImage", "Place image", "{path | data, x?, y?}", true, super::create::place_image),
+        spec!(
+            "file.placeImage",
+            "Place image",
+            "{path | data, x?, y?, width?, height?, parent?, name?, target?, mode? (as image.place)}",
+            true,
+            super::create::place_image
+        ),
         spec!("file.close", "Close tab", "{index?, force? (discard unsaved changes)}", false, close),
         spec!("file.moveTab", "Move tab", "{from, to} (indices among open documents)", false, |s, p| {
             let from = req_index("file.moveTab", p, "from")?;

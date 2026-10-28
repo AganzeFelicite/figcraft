@@ -51,6 +51,9 @@ fn documented_alternatives_and_empty_params_are_taken() {
     assert_eq!(param_names("proto.interaction.add").map(|n| n.contains(&"delayMs") && n.contains(&"dest")), Some(true));
     assert_eq!(param_names("collab.join"), Some(&["code", "link"][..]));
     assert_eq!(param_names("proto.interaction.set").map(|n| n.contains(&"trigger") && n.contains(&"interaction")), Some(true));
+    // Commands that run another command's code take its names too.
+    assert_eq!(param_names("file.placeImage").map(|n| ["width", "height", "target", "mode"].iter().all(|k| n.contains(k))), Some(true));
+    assert_eq!(param_names("file.exportSvg").map(|n| ["scale", "size", "contentsOnly", "svgOutlineText"].iter().all(|k| n.contains(k))), Some(true));
     // Alternative groups: `{x, y} | {points: …}`.
     assert_eq!(param_names("vector.edit.paint"), Some(&["x", "y", "points"][..]));
     assert_eq!(param_names("vector.edit.cut"), Some(&["segment", "t", "vertex", "from", "to"][..]));

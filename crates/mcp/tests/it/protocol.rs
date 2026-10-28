@@ -91,6 +91,10 @@ fn tools_call_happy_and_error_paths() {
     assert_eq!(r["error"]["code"], -32602);
     // The document is unharmed by all of that.
     assert_eq!(c.page_children().len(), 1);
+    // Arguments the tools pass on are in their schemas, so they still go through.
+    c.ok("create_node", json!({"type": "vector", "points": [[0, 0], [10, 0], [5, 8]], "closed": true, "select": false}));
+    c.ok("key", json!({"key": "Escape", "ctrl": false}));
+    c.ok("pointer", json!({"kind": "hover", "x": 1, "y": 1, "ctrl": false}));
 }
 
 #[test]
