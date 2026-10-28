@@ -14,6 +14,8 @@ use crate::theme::{ACCENT, COMPONENT, Tokens, regular, semibold};
 use crate::{FigApp, LeftTab};
 
 pub const ROW: f32 = 32.0;
+/// Width of the icon rail left of the side panel; the Home tab above it is as wide.
+pub const RAIL_WIDTH: f32 = 56.0;
 
 /// A boolean operation's icon.
 pub fn op_icon(op: figcraft_doc::BoolOp) -> Icon {
