@@ -384,6 +384,7 @@ pub fn specs() -> Vec<CommandSpec> {
                     for (i, c) in a.iter().enumerate() {
                         let cmd =
                             c.get("command").and_then(Value::as_str).ok_or_else(|| bad("command.batch", format!("step {i} has no `command`")))?;
+                        crate::batch::refuse_unknown_step_keys(i, c)?;
                         let params = c.get("params").cloned().unwrap_or(json!({}));
                         out.push(BatchStep { name: crate::batch::step_name(i, c)?, ..BatchStep::new(cmd, params) });
                     }

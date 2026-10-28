@@ -1866,6 +1866,10 @@ turned off 0°.
 
 Tool failures come back as results with `isError: true` and a message; protocol problems (unknown
 tool, malformed JSON, wrong parameter types) are JSON-RPC errors. Nothing crashes the server.
+A name a tool or command doesn't take (`run_command {args}` for `params`, a step key other than
+`command`, `params` and `as`, or a parameter its `list_commands` entry doesn't list, such as
+`comment.list {filterr}`) is an error that lists the names it does take, never ignored; `ids` and
+`id` are taken by every command.
 
 ## Resources
 

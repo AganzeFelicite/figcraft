@@ -75,10 +75,13 @@ fn every_doc_item_names_a_parameter() {
     assert!(nameless.is_empty(), "doc items without a name: {nameless:#?}");
 }
 
-/// A batch step's unknown parameter is refused, naming the step.
+/// A batch step key other than `command`, `params` and `as` (`args` for `params`) is refused, and
+/// so is a step's unknown parameter, naming the step.
 #[test]
-fn batch_steps_refuse_unknown_parameters() {
+fn batch_steps_refuse_unknown_keys_and_parameters() {
     let mut s = Session::new();
+    let e = err(&mut s, "command.batch", json!({"commands": [{"command": "select.all"}, {"command": "inspect.code", "args": {"id": 2}}]}));
+    assert!(e.contains("step 1: unknown key `args`"), "{e}");
     let e =
         err(&mut s, "command.batch", json!({"commands": [{"command": "select.all"}, {"command": "comment.list", "params": {"filterr": "open"}}]}));
     assert!(e.contains("comment.list") && e.contains("step 1: unknown parameter `filterr`"), "{e}");
