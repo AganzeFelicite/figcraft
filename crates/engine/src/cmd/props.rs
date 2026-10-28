@@ -621,13 +621,13 @@ pub fn apply(cmd: &str, doc: &mut Document, id: NodeId, props: &Map<String, Valu
                 }
             }
             "paddingHorizontal" => {
-                let val = f64_of(v).unwrap_or(0.0).max(0.0);
+                let val = f64_of(v).ok_or_else(|| bad(cmd, format!("`{k}` must be a number")))?.max(0.0);
                 let l = layout_mut(cmd, k, doc.get_mut(id)?)?;
                 l.padding[1] = val;
                 l.padding[3] = val;
             }
             "paddingVertical" => {
-                let val = f64_of(v).unwrap_or(0.0).max(0.0);
+                let val = f64_of(v).ok_or_else(|| bad(cmd, format!("`{k}` must be a number")))?.max(0.0);
                 let l = layout_mut(cmd, k, doc.get_mut(id)?)?;
                 l.padding[0] = val;
                 l.padding[2] = val;
