@@ -238,8 +238,9 @@ fn a_size_given_with_a_new_path_fixes_that_axis() {
 /// an object that replaces the whole auto layout) applies first and the other keys tune it.
 #[test]
 fn auto_layout_keys_in_one_call_tune_the_mode_given_beside_them() {
-    for mode in [json!("vertical"), json!({"mode": "vertical"})] {
-        let props = json!({"layout": mode, "gap": 8, "padding": 4, "crossAlign": "center"});
+    for (key, mode) in ["layout", "layoutMode"].into_iter().flat_map(|k| [(k, json!("vertical")), (k, json!({"mode": "vertical"}))]) {
+        let mut props = json!({"gap": 8, "padding": 4, "crossAlign": "center"});
+        props[key] = mode;
         let mut s = Session::new();
         let created = id(s.execute("node.create", &json!({"type": "frame", "props": props})).unwrap());
         let set_on = id(s.execute("frame.create", &json!({"x": 0, "y": 0, "width": 100, "height": 100})).unwrap());
