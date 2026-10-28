@@ -461,3 +461,33 @@ fn the_wait_counts_from_the_preview_not_from_the_request() {
     std::thread::sleep(settle);
     assert!(w.poll().is_some_and(|d| !d.coarse && d.view.scale == 1.0));
 }
+
+/// Until the zoom's full render has run, the kept image is of the old zoom, so a pan or an edit
+/// at the new zoom renders from scratch too: it shows a preview and restarts the wait rather than
+/// running a full render between it and the next step. Once refined, requests at that zoom build
+/// on the kept image: no preview, no wait.
+#[test]
+fn same_zoom_requests_before_the_zoom_refines_keep_waiting_and_refine_at_once_after() {
+    let view = |c, scale| view_at(c, scale, 1200, 1200);
+    let s = slow_scene(&[view((300.0, 200.0), 2.0), view((300.0, 200.0), 1.0)], 3.0 * PREVIEW_AFTER_MS);
+    let ds = s.ds().unwrap();
+    let at = |c, scale| job(&ds.doc, ds.page, ds.uid, view(c, scale));
+    let settle = std::time::Duration::from_millis(SETTLE_MS);
+    let mut w = Inline::with_settle(egui::Context::default(), settle);
+    w.submit(at((300.0, 200.0), 2.0));
+    assert!(w.poll().is_some_and(|d| !d.coarse), "the first render: no preview, no wait");
+    // A zoom step, then a pan at the new zoom before the pause: a preview each, no full render.
+    w.submit(at((300.0, 200.0), 1.0));
+    assert!(w.poll().is_some_and(|d| d.coarse));
+    assert!(w.poll().is_none() && w.in_flight());
+    w.submit(at((340.0, 200.0), 1.0));
+    assert!(w.poll().is_some_and(|d| d.coarse), "from scratch still: the kept image is of the old zoom");
+    assert!(w.poll().is_none() && w.in_flight(), "the wait starts over");
+    std::thread::sleep(settle);
+    let d = w.poll().expect("refined once it settled");
+    assert!(!d.coarse && d.view.scale == 1.0 && !w.in_flight());
+    // From then on a pan at this zoom builds on the kept image: no preview, refined at once.
+    w.submit(at((380.0, 200.0), 1.0));
+    let d = w.poll().expect("the refined image");
+    assert!(!d.coarse && !w.in_flight());
+}
