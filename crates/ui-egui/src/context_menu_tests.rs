@@ -85,10 +85,10 @@ fn copying_a_link_with_nothing_selected_copies_nothing() {
     assert!(u.app.ui.toast.is_none());
 }
 
+/// With a section selected, a right-click on either frame inside it links that frame, not the
+/// section that was selected before.
 #[test]
 fn copying_a_link_on_a_frame_inside_a_selected_section_links_that_frame() {
-    // The section holds both frames; right-clicking each one must link that frame, not the section
-    // that was selected before.
     let mut s = Session::new();
     let sec = id(&s.execute("node.create", &json!({"type": "section", "x": 0, "y": 0, "width": 800, "height": 400, "name": "Flow"})).unwrap());
     let a = id(&s.execute("frame.create", &json!({"x": 20, "y": 60, "width": 300, "height": 200, "name": "main", "parent": sec})).unwrap());
@@ -107,10 +107,10 @@ fn copying_a_link_on_a_frame_inside_a_selected_section_links_that_frame() {
     }
 }
 
+/// A frame inside a section has its label above it, inside the section: a right-click there picks
+/// the frame whose label it is, not the section behind the label.
 #[test]
 fn copying_a_link_from_a_frames_name_label_links_that_frame() {
-    // A frame inside a section has its label above it, inside the section: a right-click there
-    // must pick the frame whose label it is, not the section behind the label.
     let mut s = Session::new();
     let sec = id(&s.execute("node.create", &json!({"type": "section", "x": 0, "y": 0, "width": 800, "height": 400, "name": "Flow"})).unwrap());
     let a = id(&s.execute("frame.create", &json!({"x": 20, "y": 80, "width": 300, "height": 200, "name": "main", "parent": sec})).unwrap());

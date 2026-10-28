@@ -243,7 +243,9 @@ fn send(app: &mut FigApp, kind: PointerKind, pos: Pos2, m: &egui::Modifiers) {
 }
 
 /// Right-click at screen `pos`: select what's under the pointer (`deep`: the nested layer), then
-/// open the context menu there.
+/// open the context menu there. A frame's name label counts as the frame, as on a press, so a
+/// label drawn over its section picks the frame, not the section behind it. A layer that is
+/// already selected keeps the whole selection.
 pub fn open_context_menu(app: &mut FigApp, pos: Pos2, deep: bool) {
     let p = app.to_page(pos);
     if let Ok(ds) = app.session.ds() {
