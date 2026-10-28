@@ -977,6 +977,8 @@ pub fn load_file(path: &std::path::Path) -> Result<(Document, Vec<String>), Form
 #[cfg(test)]
 mod branch_tests;
 #[cfg(test)]
+mod guides_tests;
+#[cfg(test)]
 mod image_budget_tests;
 #[cfg(test)]
 mod image_tests;
