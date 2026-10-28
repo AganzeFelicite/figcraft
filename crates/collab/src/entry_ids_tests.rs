@@ -92,6 +92,37 @@ fn client_ids_skip_spaces_used_by_styles_and_comments() {
     assert_eq!(join(&mut server).id(), 10);
 }
 
+#[test]
+fn an_id_in_the_top_space_does_not_block_joins() {
+    let mut d = Document::new("a");
+    d.styles.push(style(format!("{STYLE_ID_PREFIX}{}", u64::MAX), "Out of range"));
+    let c = comment(u64::from(u32::MAX) << 32, &d);
+    d.comments.push(c);
+    let mut server = Server::new(d, "", Limits::default());
+    let a = join(&mut server);
+    assert!(a.id() > 0 && a.id() < u32::MAX, "{}", a.id());
+    // After a reload the session still takes newcomers and keeps the document as it was.
+    let state = server.state().unwrap();
+    let mut restored = Server::restore(state.clone(), "", Limits::default()).unwrap();
+    let b = join(&mut restored);
+    assert!(b.id() > a.id() && b.id() < u32::MAX, "{}", b.id());
+    assert_eq!(restored.document().styles.len(), 1);
+    assert_eq!(restored.document().comments.len(), 1);
+    // A state saved while the counter was stuck at the top recovers too.
+    let stuck = crate::SessionState { next_client: u32::MAX, ..state };
+    let mut restored = Server::restore(stuck, "", Limits::default()).unwrap();
+    let c = join(&mut restored);
+    assert!(c.id() > a.id() && c.id() < u32::MAX, "{}", c.id());
+    // A new entry may not take an id from a space nobody was given yet.
+    for (k, space) in [c.id() + 1, c.id() + 1000, u32::MAX].into_iter().enumerate() {
+        let id = format!("{STYLE_ID_PREFIX}{}", (u64::from(space) << 32) | 1);
+        let ServerMsg::Reject { reason, .. } = send(&mut restored, c.id(), 1 + k as u64, vec![put_style(id.clone())]) else {
+            panic!("accepted {id}")
+        };
+        assert!(reason.contains("id space"), "{reason}");
+    }
+}
+
 /// Each client makes `rounds` styles, collections (with an extra mode), variables and comments
 /// before seeing anyone else's.
 fn create_everything(doc: &mut Document, who: usize, round: usize) {

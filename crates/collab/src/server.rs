@@ -153,7 +153,13 @@ impl Server {
         server.state = replica;
         server.session = state.session;
         server.seq = state.seq;
-        server.next_client = server.next_client.max(state.next_client);
+        // A counter stuck at the top (saved while an out-of-range id in the document blocked
+        // every join) carries on above the ids actually handed out.
+        let saved = match state.next_client {
+            u32::MAX => state.issued.keys().chain(state.log.iter().map(|a| &a.author)).max().map_or(0, |c| c.saturating_add(1)),
+            n => n,
+        };
+        server.next_client = server.next_client.max(saved);
         server.issued = state.issued.into_iter().filter(|(id, _)| *id < server.next_client).collect();
         server.deleted = state.deleted;
         server.removed = state.removed;
@@ -481,9 +487,9 @@ impl Server {
 
     /// The document-level entries (styles, variables, collections, comments) a batch adds or
     /// removes, each with whether it is there afterwards. A new one is refused when its id lies in
-    /// the space of another client this session gave an id to (unless it was removed before: undo
-    /// puts entries back); ids from before the session (space 0, earlier sessions, other files)
-    /// are fine.
+    /// the space of another client this session gave an id to, or of one it hasn't given out yet
+    /// (unless it was removed before: undo puts entries back); ids from before the session (space
+    /// 0, earlier sessions, other files) are fine.
     fn check_entries(&self, from: u32, changes: &[Change], after: &Document) -> Result<Vec<(Entry, bool)>, Error> {
         let before = self.state.document();
         let mut touched: BTreeSet<Entry> = BTreeSet::new();
@@ -510,7 +516,7 @@ impl Server {
             }
             if now
                 && !self.removed.contains(&entry)
-                && let Some(space) = entry.id_space().filter(|s| *s != from && self.issued.contains_key(s))
+                && let Some(space) = entry.id_space().filter(|s| *s != from && (self.issued.contains_key(s) || *s >= self.next_client))
             {
                 return Err(Error::Invalid(format!("new {} isn't in client {from}'s id space (it is client {space}'s)", entry.describe())));
             }
