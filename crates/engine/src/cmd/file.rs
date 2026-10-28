@@ -121,7 +121,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "file.exportSvg",
             "Export selection as SVG",
-            "{ids?, path?, scale? | size?, contentsOnly?, includeBoundingBox?, svgOutlineText?, svgIdAttribute?, svgSimplifyStroke? (as file.export)}",
+            "{ids?, path?, scale? | size?, contentsOnly?, includeBoundingBox?, svgOutlineText?, svgIdAttribute?, svgSimplifyStroke? (file.export's SVG options)}",
             false,
             |s, p| {
                 let mut q = p.clone();
