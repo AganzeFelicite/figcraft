@@ -161,7 +161,9 @@ Or in a project's `.mcp.json`:
   ignored); a layer a mask hides can't be clicked there, and a mask group's box and exports are
   the mask's (plus any layers under the mask).
 - Children of an auto-layout frame are positioned by the layout: set `layout`, `gap`, `padding`,
-  `mainAlign`, `crossAlign`, `sizingH`/`sizingV` instead of x/y. More auto layout props:
+  `mainAlign`, `crossAlign`, `sizingH`/`sizingV` instead of x/y. In one call, `layout` applies
+  before the keys that tune it, so `{"layout": {"mode": "vertical"}, "gap": 8}` keeps the gap;
+  auto layout keys beside a `layout` of `null` or `"none"` are refused. More auto layout props:
   - `sizingH` / `sizingV`: `fixed`, `hug` (auto layout frames and text) or `fill` (children in an
     auto layout flow). A child can't fill an axis its parent hugs: setting `fill` turns the parent
     `fixed` on that axis, and a parent set to `hug` turns the children that filled it `fixed`. A
