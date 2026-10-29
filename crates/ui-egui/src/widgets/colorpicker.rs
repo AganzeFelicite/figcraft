@@ -866,7 +866,8 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
     };
     let open = beside.map(Open::At).unwrap_or_else(|| {
         let top = app.ui.picker_button.map_or(140.0, |r| r.min.y);
-        Open::Anchor(pos2(screen.max.x - app.ui.right_width - 8.0, top))
+        let edge = app.ui.right_panel_rect.map_or(screen.max.x - app.ui.right_width, |r| r.min.x);
+        Open::Anchor(pos2(edge - 8.0, top))
     });
     // The colour picker's own header — title 16 in, the X 8 in from the right — is the shared
     // popover's chrome now; the picker keeps its body. Its area id is [`window_id`], the one the
@@ -877,7 +878,8 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
     let picking = app.session.tool.pick_only || app.session.tool.picked.is_some();
     pop = pop.close_on_outside(!picking);
     // Only the opening control is held out: any other sidebar or canvas press dismisses it.
-    let held: Vec<Rect> = app.ui.picker_button.into_iter().collect();
+    let mut held: Vec<Rect> = app.ui.picker_button.into_iter().collect();
+    held.extend(crate::variable_ui::picker_rect(ctx));
     let closed = pop.show(ctx, open, Hold { rects: &held, escape: false }, |ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
         // The eyedropper's colour goes to this picker's paint (a stroke, an effect, a gradient stop...).
@@ -1042,6 +1044,7 @@ pub fn close(app: &mut FigApp) {
     app.ui.picker = None;
     app.ui.picker_popover = None;
     app.ui.picker_button = None;
+    app.ui.picker_button_id = None;
 }
 
 /// Swatches wrapped in rows inset 16 points from both sides of the picker.

@@ -241,7 +241,7 @@ fn added_paints_open_beside_the_sidebar_and_close_on_a_sidebar_press() {
         }
         assert!(matches!(u.app.ui.picker, Some(PickerTarget::Paint { fills: f, .. }) if f == fills));
         let pop = u.app.ui.picker_popover.as_ref().unwrap();
-        let sidebar_left = 1440.0 - u.app.ui.right_width;
+        let sidebar_left = u.app.ui.right_panel_rect.unwrap().min.x;
         assert!((pop.rect.max.x - (sidebar_left - 8.0)).abs() < 1.0, "{:?}", pop.rect);
         assert!(pop.rect.min.y <= add.y, "the picker aligns with its opener or lifts to fit");
         assert!(pop.rect.max.y <= 900.0 - 8.0);
@@ -269,6 +269,6 @@ fn page_colour_picker_closes_on_an_outside_press_and_reopens_at_its_control() {
         u.frame(vec![]);
     }
     let rect = u.app.ui.picker_popover.as_ref().unwrap().rect;
-    assert!((rect.max.x - (1440.0 - u.app.ui.right_width - 8.0)).abs() < 1.0);
-    assert!((rect.min.y - button.min.y).abs() < 1.0);
+    assert!((rect.max.x - (u.app.ui.right_panel_rect.unwrap().min.x - 8.0)).abs() < 1.0);
+    assert!((rect.min.y - u.app.ui.picker_button.unwrap().min.y).abs() < 1.0);
 }
