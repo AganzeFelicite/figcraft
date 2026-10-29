@@ -450,8 +450,9 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> ToolResult {
         Ok(a) => a,
         Err(e) => return ToolResult::error(e),
     };
-    let tools = tool_definitions();
-    if let Some(schema) = tools.iter().find(|t| t.get("name").and_then(Value::as_str) == Some(name)).and_then(|t| t.get("inputSchema"))
+    // Built once: the catalogue is the same on every call.
+    static TOOLS: std::sync::LazyLock<Vec<Value>> = std::sync::LazyLock::new(tool_definitions);
+    if let Some(schema) = TOOLS.iter().find(|t| t.get("name").and_then(Value::as_str) == Some(name)).and_then(|t| t.get("inputSchema"))
         && let Err(e) = refuse_unknown_args(schema, &Value::Object(a.clone()), "")
     {
         return ToolResult::error(e);
