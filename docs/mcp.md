@@ -314,7 +314,7 @@ Or in a project's `.mcp.json`:
 | Tool | What it does |
 |---|---|
 | `list_commands {filter?}` | Every command: id, label, menu, shortcut, undoable, params doc. |
-| `run_command {command, params}` | Run any command (e.g. `align.left`, `layout.add`, `component.create`, `instance.place` (drop an instance at a page point into the frame or auto layout slot under it), `component.exposeInstance` / `instance.exposed` (nested instance properties on instances), `component.makeSlot` / `instance.slotInsert` / `instance.resetSlot` (slots, below), `inspect.code` (CSS, HTML + CSS for a whole frame, React, Leptos, Vue, SwiftUI, Jetpack Compose or ArkUI for a layer; components take their properties as parameters and instances are calls, see Dev Mode below), `inspect.properties` (layout, auto layout, typography, fills, strokes and effects with their style and variable names; `colorFormat`: hex, rgb, css, hsl or hsb), `inspect.assets` (layers under the selection with export settings, icons and images, each with its `kind`), `inspect.code` takes `unit: rem` and `rootFontSize` for CSS, HTML, React, Leptos and Vue, `style.create`, `variable.bind`, `variable.update` (rename, describe, scope), `variable.set` with `{alias}`, `variable.renameMode` / `variable.removeMode`, `variable.deleteCollection`, `proto.interaction.add`, `codeConnect.set` (components linked to real code, see Dev Mode below)). |
+| `run_command {command, params}` | Run any command (e.g. `align.left`, `layout.add`, `component.create`, `instance.place` (drop an instance at a page point into the frame or auto layout slot under it), `component.exposeInstance` / `instance.exposed` (nested instance properties on instances), `component.makeSlot` / `instance.slotInsert` / `instance.resetSlot` (slots, below), `inspect.code` (CSS, HTML + CSS for a whole frame, React, Leptos, Vue, SwiftUI, Jetpack Compose, ArkUI or Flutter for a layer; components take their properties as parameters and instances are calls, see Dev Mode below), `inspect.properties` (layout, auto layout, typography, fills, strokes and effects with their style and variable names; `colorFormat`: hex, rgb, css, hsl or hsb), `inspect.assets` (layers under the selection with export settings, icons and images, each with its `kind`), `inspect.code` takes `unit: rem` and `rootFontSize` for CSS, HTML, React, Leptos and Vue, `style.create`, `variable.bind`, `variable.update` (rename, describe, scope), `variable.set` with `{alias}`, `variable.renameMode` / `variable.removeMode`, `variable.deleteCollection`, `proto.interaction.add`, `codeConnect.set` (components linked to real code, see Dev Mode below)). |
 | `batch {commands: [{command, params}], label?}` | Several commands as one undo step (`command.batch`); all-or-nothing for open documents and their document state. Failed inner commands are removed from the journal; preferences, clipboard, tool state and UI requests are not rolled back. A step can use what an earlier step returned: name it with `"as": "card"` and `{"$ref": "card"}` anywhere in a later step's params becomes the `id` in its result (`{"$step": n}` does the same by zero-based position); `"field"` takes another key or a slash path such as `ids/0` (see Step references below). |
 | `create_node {type, x, y, width, height, parent, index, name, text, path, props}` | Create a frame, rectangle, ellipse, polygon, star, line, arrow, text, vector, section, component or slice; returns `{id, node}`. |
 | `set_properties {ids, props}` | `node.set` on layers (geometry, fills, strokes, effects, corner radius, auto layout, sizing, constraints, masks (`isMask`, `maskType: alpha\|vector\|luminance`), handoff status (`devStatus: none\|readyForDev\|completed`; marking again clears "Changed"), a section's `sectionContentsHidden`, text…); returns the updated layers. |
@@ -1529,16 +1529,16 @@ permissions: without it nothing is downloaded); `plugin.directory.publish {path 
   same layer names, mobile layout) the code is mobile first: the mobile frame's classes, the
   desktop frame's that differ behind `lg:`, and layers only on desktop `hidden` plus `lg:flex`
   (auto layout frames) or `lg:block` (other layers).
-- **Component code:** `inspect.code {id, language: react|leptos|vue|swiftui|compose|arkui}` on a component,
+- **Component code:** `inspect.code {id, language: react|leptos|vue|swiftui|compose|arkui|flutter}` on a component,
   a component set or a variant writes the component as a reusable unit: React (TSX) with a props
   interface, Leptos with a `#[component]` function (`#[prop]` defaults, `view!` markup), Vue as a
   single-file component (`<template>`, a `<script setup>` with `defineProps` and its defaults, a
   `<style scoped>`; a slot layer is Vue's own `<slot>`, so it takes no prop), SwiftUI
   with a `View` struct, Compose with a `@Composable` function, ArkUI with a `@Component` ArkTS
-  struct (`@Prop` parameters, `@BuilderParam` for swaps and slots). Its component properties are the
+  struct (`@Prop` parameters, `@BuilderParam` for swaps and slots), Flutter with a `StatelessWidget`. Its component properties are the
   parameters, with their defaults: variant properties become string unions (React, Vue) or enums,
   booleans become flags around the layers they show, text properties strings, instance swaps views
-  (`React.ReactNode`, Leptos `ViewFn`, `AnyView`, a composable lambda, an ArkUI builder) and slots
+  (`React.ReactNode`, Leptos `ViewFn`, `AnyView`, a composable lambda, an ArkUI builder, a `Widget`) and slots
   optional content.
   Every variant of a set shares one definition; in React, Vue and Leptos the other variants'
   differences become CSS rules on `data-*` attributes. A Vue template holds no arbitrary
@@ -1549,13 +1549,13 @@ permissions: without it nothing is downloaded); `plugin.directory.publish {path 
   state="Hover" label="Buy" />`, `<Button state=ButtonState::Hover label="Buy" />`,
   `<Button state="Hover" />`, `Button(state:
   .hover, label: "Buy")`, `Button(state = ButtonState.Hover, label = "Buy")`, `Button({ state:
-  ButtonState.Hover, label: "Buy" })`. Names are escaped and
+  ButtonState.Hover, label: "Buy" })`, `Button(state: ButtonState.hover, label: "Buy")`. Names are escaped and
   unique (keywords get a suffix, `default` → `defaultValue`, Rust's `type` → `type_`; Leptos names
-  are snake_case; names that would shadow framework types get one too, `Text` → `TextComponent`). `inspect.componentCode
+  are snake_case, Dart enum members lowerCamel; names that would shadow framework types get one too, `Text` → `TextComponent`). `inspect.componentCode
   {id?, language?}` returns the parts: `{component, name, set, properties: [{name, param, type,
   default, value? (instances)}], definition, usage? (instances)}`.
 - **Code connect:** link a component (a variant links its set) to the code component it is built
-  as, per language (`react`, `leptos`, `vue`, `swiftui`, `compose`, `arkui`): `codeConnect.set {id?, language?, importPath?,
+  as, per language (`react`, `leptos`, `vue`, `swiftui`, `compose`, `arkui`, `flutter`): `codeConnect.set {id?, language?, importPath?,
   name?, template?}` (undoable; fields left out keep their value; the defaults are the generated
   name and a call passing every property) → `{component, language, code, unknown}`. Templates are
   text, never executed: `{property}` (its name or parameter name) is the instance's value escaped
