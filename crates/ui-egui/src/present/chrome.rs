@@ -1,7 +1,10 @@
 use super::layout::{Chrome, FULL, Place};
 use super::player::player;
 use super::scroll::page_settings;
-use super::*;
+use super::{
+    Align2, Color32, CornerRadius, Document, Easing, FigApp, HashSet, Icon, Id, NodeId, Pos2, PresentScale, Presenter, PrototypeSettings, Rect,
+    Sense, Stroke, Tokens, Transition, Ui, icons, json, pos2, regular, tr, vec2, widgets,
+};
 
 /// What the player's top bar asked for.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
