@@ -353,6 +353,8 @@ mod menu_gaps_tests;
 #[cfg(test)]
 mod nested_override_tests;
 #[cfg(test)]
+mod node_find_tests;
+#[cfg(test)]
 mod node_set_refusals_tests;
 #[cfg(test)]
 mod normalize_guard_tests;
@@ -496,6 +498,8 @@ mod theme_pages_tests;
 mod tiff_tests;
 #[cfg(test)]
 mod transform_behaviour_tests;
+#[cfg(test)]
+mod unknown_params_tests;
 #[cfg(test)]
 mod variable_tests;
 #[cfg(test)]

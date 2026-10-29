@@ -2120,6 +2120,7 @@ status = "draft — reviewed by a native speaker, awaiting a maintainer's approv
 "measure.distances" = "მანძილების გაზომვა"
 "measure.padding" = "ავტოგანლაგების შიდა დაშორების გაზომვა"
 "node.create" = "შრის შექმნა"
+"node.find" = "შრეების ძებნა"
 "node.get" = "შრის მიღება"
 "node.reorder" = "შრის გადალაგება"
 "node.reparent" = "შრის შიგნით გადატანა"

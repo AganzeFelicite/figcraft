@@ -133,6 +133,13 @@ fn tools_call_happy_and_error_paths() {
     assert!(c.err("pointer", json!({"x": 1})).contains("`y`"));
     assert!(c.err("type_text", json!({"text": "hi"})).contains("not editing text"));
     assert!(c.err("open_file", json!({"path": "/definitely/not/here.figcraft"})).contains("here.figcraft"));
+    // Names a tool or a command doesn't take are refused, not ignored (#1413).
+    let e = c.err("run_command", json!({"command": "inspect.code", "args": {"id": id, "language": "html"}}));
+    assert!(e.contains("unknown argument `args` (it takes command, params)"), "{e}");
+    let e = c.err("batch", json!({"commands": [{"command": "comment.list", "args": {"filter": "open"}}]}));
+    assert!(e.contains("unknown argument `commands[0].args`"), "{e}");
+    let e = c.err("run_command", json!({"command": "comment.list", "params": {"filterr": "open"}}));
+    assert!(e.contains("unknown parameter `filterr`"), "{e}");
     // Protocol-level errors.
     let r = c.rpc("tools/call", json!({"name": "no_such_tool", "arguments": {}}));
     assert_eq!(r["error"]["code"], -32602);
@@ -142,6 +149,10 @@ fn tools_call_happy_and_error_paths() {
     assert_eq!(r["error"]["code"], -32602);
     // The document is unharmed by all of that.
     assert_eq!(c.page_children().len(), 1);
+    // Arguments the tools pass on are in their schemas, so they still go through.
+    c.ok("create_node", json!({"type": "vector", "points": [[0, 0], [10, 0], [5, 8]], "closed": true, "select": false}));
+    c.ok("key", json!({"key": "Escape", "ctrl": false}));
+    c.ok("pointer", json!({"kind": "hover", "x": 1, "y": 1, "ctrl": false}));
 }
 
 #[test]

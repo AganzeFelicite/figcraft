@@ -39,6 +39,18 @@ pub fn step_name(step: usize, json: &Value) -> Result<Option<String>> {
     }
 }
 
+/// Refuse a step key other than `command`, `params` and `as` (`step` is its index, for the
+/// error): `args` in place of `params` would run the command without them.
+pub fn refuse_unknown_step_keys(step: usize, json: &Value) -> Result<()> {
+    let Some(o) = json.as_object() else { return Ok(()) };
+    let unknown: Vec<String> = o.keys().filter(|k| !matches!(k.as_str(), "command" | "params" | "as")).map(|k| format!("`{k}`")).collect();
+    if unknown.is_empty() {
+        return Ok(());
+    }
+    let s = if unknown.len() == 1 { "" } else { "s" };
+    Err(bad("command.batch", format!("step {step}: unknown key{s} {} (a step takes command, params and as)", unknown.join(", "))))
+}
+
 /// The steps of one batch run so far: their results, and which step each `as` name belongs to.
 /// A nested `command.batch` step gets its own scope, so its references are to its own steps.
 #[derive(Clone, Debug, Default)]
