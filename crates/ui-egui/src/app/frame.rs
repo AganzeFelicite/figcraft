@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    Arc, CJK_CHANGES, FigApp, LEFT_PANEL, MobilePanel, PANEL_DEFAULT, RIGHT_PANEL, RightTab, TOAST_SECS, ToastClock, Value, a11y, cjk, i18n, icons,
+    json, repaint_in, theme,
+};
 
 impl FigApp {
     /// Show what `command params` would do on the canvas as a live preview (`text.preview`) while
@@ -31,9 +34,9 @@ impl FigApp {
 
     /// Clicking the control that opened the colour picker closes it again; clicking another opens
     /// the picker for that one.
-    pub fn toggle_picker(&mut self, target: colorpicker::PickerTarget, _top: Option<f32>) {
+    pub fn toggle_picker(&mut self, target: crate::colorpicker::PickerTarget, _top: Option<f32>) {
         if self.ui.picker.as_ref() == Some(&target) {
-            colorpicker::close(self);
+            crate::colorpicker::close(self);
         } else {
             self.ui.picker = Some(target);
         }

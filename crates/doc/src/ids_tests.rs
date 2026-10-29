@@ -110,3 +110,11 @@ fn the_highest_space_counts_every_kind_of_id() {
     assert_eq!(id_space("S:99999999999999999999999", "S:"), 0, "too big for a number");
     assert_eq!(mode_number("1:0"), None);
 }
+
+#[test]
+fn nodeid_rejects_plus_sign() {
+    assert!("+12".parse::<crate::NodeId>().is_err());
+    assert!("0:+12".parse::<crate::NodeId>().is_err());
+    assert_eq!("12".parse::<crate::NodeId>(), Ok(crate::NodeId(12)));
+    assert_eq!("0:12".parse::<crate::NodeId>(), Ok(crate::NodeId(12)));
+}
