@@ -67,6 +67,10 @@ impl std::str::FromStr for NodeId {
         // Accept "12" and Figma-style "0:12".
         let t = s.trim();
         let t = t.rsplit(':').next().unwrap_or(t);
+        if t.starts_with('+') {
+            // `u64::parse` accepts a leading '+'; ids are digits only.
+            return "-".parse::<u64>().map(NodeId);
+        }
         t.parse::<u64>().map(NodeId)
     }
 }
@@ -909,6 +913,15 @@ impl Document {
                     && let Some(m) = map.get(&NodeId(pt.source))
                 {
                     pt.source = m.0;
+                }
+            }
+            if let NodeKind::Vector { network } = &mut c.kind {
+                for p in network.regions.iter_mut().filter_map(|r| r.fills.as_mut()).flatten() {
+                    if let figcraft_color::PaintKind::Pattern(pt) = &mut p.kind
+                        && let Some(m) = map.get(&NodeId(pt.source))
+                    {
+                        pt.source = m.0;
+                    }
                 }
             }
             self.reserve_ids(*new_id);
