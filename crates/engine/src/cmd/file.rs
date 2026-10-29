@@ -36,7 +36,7 @@ pub(crate) use load::{load_fig, read_capped, recovered, variables_param, write};
 pub use open::MAX_RECENT;
 #[cfg(test)]
 use open::append_pages;
-use open::{import, open, open_recent};
+use open::{import, open, open_recent, revert};
 pub(crate) use save::save_ends_preview;
 pub use save::{FileSnapshot, file_bytes, thumbnail};
 use save::{color_profile, mark_saved, save, save_as};
@@ -75,7 +75,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "file.open",
             "Open",
-            "{path | data (base64) + name (tells the format; opens as a new unsaved document), variables? (REST: the local variables JSON as an object, JSON text or a path; default `<name>.variables.json` or `variables.json` next to the file)} (.figcraft, .json: FigCraft or REST API file JSON, .fig (best effort), .sketch (Sketch 48 or newer, best effort), .svg, .png, .jpg …); REST, .fig and .sketch imports return `warnings`; a file opened anew returns `summary` {name, pages, layers, images} (one that was already open just returns its `index`)",
+            "{path | data (base64) + name (tells the format; opens as a new unsaved document), variables? (REST: the local variables JSON as an object, JSON text or a path; default `<name>.variables.json` or `variables.json` next to the file), reload? (a file already open: read it again into its tab, which must have no unsaved changes)} (.figcraft, .json: FigCraft or REST API file JSON, .fig (best effort), .sketch (Sketch 48 or newer, best effort), .svg, .png, .jpg …); REST, .fig and .sketch imports return `warnings`; a file opened anew returns `summary` {name, pages, layers, images} (one that was already open returns its `index`, with `stale: true` when the file changed on disk since the tab read or saved it, or `reloaded: true` after `reload`)",
             false,
             open
         ),
@@ -203,21 +203,7 @@ pub fn specs() -> Vec<CommandSpec> {
             Ok(json!({"index": s.active}))
         }),
         spec!("file.revert", "Revert to saved", "{}  leave the live session first, if any", false, |s, _| {
-            let path = s.ds()?.path.clone().ok_or_else(|| EngineError::Disabled("file.revert".into(), "the file was never saved".into()))?;
-            // Stamped before reading: a change made during the read makes the next save refuse.
-            let on_disk = crate::library::stat(&path).ok();
-            let (loaded, _) = load_path(&path, None)?;
-            let i = s.active;
-            let uid = s.ds()?.uid;
-            if let Some(slot) = s.docs.get_mut(i) {
-                *slot = DocState::new(loaded.doc, Some(path.clone()))
-                    .with_versions(loaded.versions)
-                    .with_branches(loaded.branches)
-                    .with_images_left_in_file(&path, loaded.images_past_budget);
-                slot.on_disk = on_disk;
-            }
-            // Edits on its branch tabs are reverted too.
-            crate::branches::close_tabs(s, uid, None);
+            revert(s)?;
             ok()
         }),
         spec!(

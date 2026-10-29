@@ -236,6 +236,10 @@ fn task_export_png_and_svg() {
     c.ok("save_file", json!({"path": file.to_string_lossy()}));
     let opened = c.ok("open_file", json!({"path": file.to_string_lossy()}));
     assert!(opened["document"]["pages"][0]["children"].to_string().contains("Banner"));
+    // The tab is that file: `reload` reads it again from disk (#997).
+    let reread = c.ok("open_file", json!({"path": file.to_string_lossy(), "reload": true}));
+    assert_eq!(reread["opened"]["reloaded"], true, "{reread}");
+    assert!(reread["document"]["pages"][0]["children"].to_string().contains("Banner"));
     std::fs::remove_dir_all(&dir).ok();
 }
 
