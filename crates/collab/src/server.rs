@@ -25,6 +25,12 @@ pub enum Outgoing {
 /// Why a viewer's batch is refused.
 pub const VIEW_ONLY: &str = "you can only view this file (your link is view-only)";
 
+/// A new style, variable, collection or comment may not take an id in a space at or above this
+/// that isn't its creator's. Client ids start above every space in the document after a restart,
+/// so no member can use them up: at least this many always remain. Lower spaces stay open, for
+/// entries imported from other files' sessions.
+pub const NO_SESSION_SPACE: u32 = 1 << 31;
+
 /// What changed a server's lasting state, in order: what a store appends to its log between
 /// snapshots ([`Server::journaling`]) and replays over the last snapshot after a restart
 /// ([`Server::replay`]). Presence and who is connected aren't in it.
@@ -506,9 +512,9 @@ impl Server {
 
     /// The document-level entries (styles, variables, collections, comments) a batch adds or
     /// removes, each with whether it is there afterwards. A new one is refused when its id lies in
-    /// the space of another client this session gave an id to, or of one it hasn't given out yet
-    /// (unless it was removed before: undo puts entries back); ids from before the session (space
-    /// 0, earlier sessions, other files) are fine.
+    /// the space of another client this session gave an id to, or in a space at or above
+    /// [`NO_SESSION_SPACE`] (unless it was removed before: undo puts entries back); ids from
+    /// before the session (space 0, earlier sessions, other files) are fine.
     fn check_entries(&self, from: u32, changes: &[Change], after: &Document) -> Result<Vec<(Entry, bool)>, Error> {
         let before = self.state.document();
         let mut touched: BTreeSet<Entry> = BTreeSet::new();
@@ -535,7 +541,7 @@ impl Server {
             }
             if now
                 && !self.removed.contains(&entry)
-                && let Some(space) = entry.id_space().filter(|s| *s != from && (self.issued.contains_key(s) || *s >= self.next_client))
+                && let Some(space) = entry.id_space().filter(|s| *s != from && (self.issued.contains_key(s) || *s >= NO_SESSION_SPACE))
             {
                 return Err(Error::Invalid(format!("new {} isn't in client {from}'s id space (it is client {space}'s)", entry.describe())));
             }
