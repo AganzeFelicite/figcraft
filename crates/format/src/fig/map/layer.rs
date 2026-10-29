@@ -3,8 +3,8 @@ use super::connector::connector_has_saved_label;
 use super::layout::{layout_grid, tracks};
 use super::paint::{effect, export_setting, paint, paint_bound, stroke};
 use super::{
-    Affine, BTreeMap, BTreeSet, Kv, MAX_COMMANDS, MAX_DEPTH, Mapper, Obj, Value, View, copy_num, copy_str, guid, json, matrix, network, num, rows,
-    size,
+    Affine, BTreeMap, BTreeSet, Kv, MAX_COMMANDS, MAX_DEPTH, Mapper, Obj, Value, View, copy_num, copy_str, generated_record, guid, json, matrix,
+    network, num, rows, size,
 };
 
 /// How the layers of a resized container follow it when the file gives no derived layout for
