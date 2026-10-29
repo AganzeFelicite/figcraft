@@ -19,11 +19,11 @@ impl<'d> Exporter<'d> {
             ("phase", e("CREATED")),
             ("parentIndex", o(vec![("guid", parent_guid), ("position", s(&position(index)))])),
         ];
-        let children = if let NodeKind::Page { background, guides, prototype, .. } = &n.kind {
+        let children = if let NodeKind::Page { background, prototype, .. } = &n.kind {
             f.extend([("type", e("CANVAS")), ("name", s(&n.name))]);
             f.extend(root_fields());
             f.extend([("backgroundColor", color(*background)), ("backgroundOpacity", fl(background.a.into())), ("backgroundEnabled", b(true))]);
-            if !guides.is_empty() {
+            if !n.guides.is_empty() {
                 self.warn("ruler guides were left out");
             }
             if *prototype != Default::default() {
