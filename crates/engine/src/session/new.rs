@@ -1,4 +1,4 @@
-use super::*;
+use super::{Arc, Clipboard, DocState, Document, Prefs, Session, background, cmd, library, live, plugins, tools};
 
 impl Session {
     /// A session with one new document.
