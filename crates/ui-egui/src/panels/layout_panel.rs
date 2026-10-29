@@ -26,6 +26,7 @@ fn parent_of(doc: &Document, id: NodeId) -> Option<&Node> {
 pub fn layout_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeId]) {
     let ids = sel.to_vec();
     let frames = sel.iter().all(|i| doc.node(*i).is_some_and(|n| n.kind.is_frame_like()));
+    let layout_containers = sel.iter().all(|i| doc.node(*i).is_some_and(|n| n.kind.is_frame_like() || matches!(n.kind, NodeKind::Group)));
     let al = common(doc, sel, |n| n.layout.clone());
     let has_al = matches!(al, Some(Some(_)));
     let title = if has_al { tr("Auto layout") } else { tr("Layout") };
@@ -35,7 +36,7 @@ pub fn layout_section(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[Node
     let nested = sel.iter().any(|i| figcraft_engine::components::inside_instance(doc, *i));
     let btns: Vec<(Icon, &str)> = if in_instance {
         vec![]
-    } else if frames && !has_al {
+    } else if layout_containers && !has_al {
         vec![(Icon::Plus, crate::shortcuts::tip(tr("Add auto layout"), "layout.add"))]
     } else if has_al {
         vec![(Icon::Minus, crate::shortcuts::tip(tr("Remove auto layout"), "layout.remove"))]

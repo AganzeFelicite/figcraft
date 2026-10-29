@@ -30,6 +30,56 @@ fn kind(s: &Session, n: NodeId) -> NodeKind {
 }
 
 #[test]
+fn adding_auto_layout_converts_a_single_group_and_arranges_its_children_directly() {
+    let mut s = Session::new();
+    let page = s.page().unwrap();
+    let (a, b) = (rect(&mut s, page, 10.0, 20.0), rect(&mut s, page, 90.0, 20.0));
+    let group = id(ex(&mut s, "object.group", json!({"ids": [a, b], "name": "Actions"})));
+    let siblings = s.doc().unwrap().node(page).unwrap().children.clone();
+    let before = [page_box(&s, group), page_box(&s, a), page_box(&s, b)];
+
+    let result = ex(&mut s, "layout.add", json!({"ids": [group], "direction": "horizontal"}));
+    assert_eq!(result["ids"], json!([group]), "the group's identity is retained");
+    let doc = s.doc().unwrap();
+    let frame = doc.node(group).unwrap();
+    assert!(matches!(frame.kind, NodeKind::Frame));
+    assert_eq!(frame.name, "Actions");
+    assert_eq!(frame.parent, Some(page));
+    assert_eq!(frame.children, vec![a, b], "no intermediate group or wrapper frame");
+    assert!(frame.layout.is_some() && frame.fills.is_empty() && !frame.clip);
+    assert_eq!(doc.node(page).unwrap().children, siblings);
+    assert_eq!([page_box(&s, group), page_box(&s, a), page_box(&s, b)], before);
+
+    // The second child now follows changes to the first through auto layout.
+    ex(&mut s, "node.set", json!({"id": a, "props": {"width": 60}}));
+    assert_eq!(page_box(&s, b), [110.0, 20.0, 150.0, 40.0]);
+    s.undo().unwrap();
+    s.undo().unwrap();
+    let restored = s.doc().unwrap().node(group).unwrap();
+    assert!(matches!(restored.kind, NodeKind::Group) && restored.layout.is_none());
+    assert_eq!(restored.children, vec![a, b]);
+    assert_eq!([page_box(&s, group), page_box(&s, a), page_box(&s, b)], before);
+    s.redo().unwrap();
+    assert!(matches!(kind(&s, group), NodeKind::Frame));
+    assert!(s.doc().unwrap().node(group).unwrap().layout.is_some());
+}
+
+#[test]
+fn adding_auto_layout_to_multiple_groups_still_wraps_the_selection() {
+    let mut s = Session::new();
+    let page = s.page().unwrap();
+    let (a, b) = (rect(&mut s, page, 10.0, 20.0), rect(&mut s, page, 90.0, 20.0));
+    let g1 = id(ex(&mut s, "object.group", json!({"ids": [a]})));
+    let g2 = id(ex(&mut s, "object.group", json!({"ids": [b]})));
+    let result = ex(&mut s, "layout.add", json!({"ids": [g1, g2]}));
+    let frame = crate::params::id_of(&result["ids"][0]).unwrap();
+    let doc = s.doc().unwrap();
+    assert!(matches!(doc.node(frame).unwrap().kind, NodeKind::Frame));
+    assert_eq!(doc.node(frame).unwrap().children, vec![g1, g2]);
+    assert!(matches!(kind(&s, g1), NodeKind::Group) && matches!(kind(&s, g2), NodeKind::Group));
+}
+
+#[test]
 fn a_frame_becomes_a_group_around_its_layers() {
     let mut s = Session::new();
     let f = id(ex(

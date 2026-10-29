@@ -613,7 +613,14 @@ fn layout_add(s: &mut Session, p: &Value) -> Result<Value> {
     let dir = string(p, "direction");
     let doc = s.doc()?;
     let all_frames = ids.iter().all(|i| doc.node(*i).is_some_and(|n| n.kind.is_frame_like() && n.layout.is_none()));
-    let targets = if all_frames {
+    let single_group = ids.len() == 1 && ids.first().and_then(|i| doc.node(*i)).is_some_and(|n| matches!(n.kind, NodeKind::Group));
+    let in_place = all_frames || single_group;
+    let targets = if in_place {
+        if single_group {
+            // Layout must arrange the group's children directly. Wrapping the group would
+            // leave them in a single fixed-size layout item and add an unnecessary layer.
+            convert(s, &json!({"ids": ids}), "layout.add", true)?;
+        }
         ids
     } else {
         // Wrap non-frames in a new frame without a fill, then add auto layout to it.
@@ -646,7 +653,7 @@ fn layout_add(s: &mut Session, p: &Value) -> Result<Value> {
         let n = doc.get_mut(*f)?;
         n.children = kids;
         n.layout = Some(al);
-        if !all_frames || !empty {
+        if !in_place || !empty {
             // A frame wrapped around the selection hugs it; an existing frame with no flow
             // children keeps its size instead of collapsing to its padding.
             n.child_layout.sizing_h = Sizing::Hug;
