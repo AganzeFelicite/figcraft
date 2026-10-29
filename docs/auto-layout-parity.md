@@ -1,6 +1,6 @@
 # Auto layout and constraints parity
 
-> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-29 · **Change:** minor (Layout sidebar: Add auto layout (+) is available for groups and converts a single group to a frame in place; adding auto layout to an empty frame keeps its size (#369); `node.set` applies auto layout keys only to frames, with warnings (#603); core editor leftovers: auto gap handles, wrapped-line alignment; behaviour suite written from the public documentation, every rule's status; fixes and the missing settings it found) · **Target:** Figma Design (desktop app 126.10.7)
+> **Last reviewed:** 2026-10-11 · **Last updated:** 2026-10-29 · **Change:** minor (Layout sidebar: Add auto layout (+) is available for groups and converts a single group to a frame in place, with mask order, flow-only inference and Fill sizing preserved; adding auto layout to an empty frame keeps its size (#369); `node.set` applies auto layout keys only to frames, with warnings (#603); core editor leftovers: auto gap handles, wrapped-line alignment; behaviour suite written from the public documentation, every rule's status; fixes and the missing settings it found) · **Target:** Figma Design (desktop app 126.10.7)
 
 Auto layout is the most used layout feature in Figma and the one where small differences (a
 hugging frame one pixel off, text wrapping at another width) break real files. **Breadth ~98%,
@@ -14,7 +14,11 @@ Figma files. Remaining: 3–6 h.
 With one group selected, Add auto layout converts that group into a frame in place, retaining its
 id, name, parent and direct children. The Layout sidebar’s +, context menu, Shift+A and API calls
 all dispatch `layout.add`, so they share the conversion and a single undo step restores the group.
-The layout settings are inferred from the children, as for an existing frame.
+The layout settings are inferred from visible, non-absolute children, matching the layout engine’s
+flow. Hidden and absolute children therefore do not distort direction, gap or padding. A converted
+group keeps Fill sizing on either axis in its auto layout parent. Sorting by position preserves
+mask boundaries and the paint order within masked runs. The sidebar offers Add only when every
+selected container has no auto layout, including mixed selections.
 
 This follows the Figma behavior reported by the contributor and the sidebar workflow users know from
 similar design tools: start with a group and make its children participate in auto layout.
@@ -91,6 +95,7 @@ Status: **pass** (a case in the suite holds), **fixed** (the suite found a diver
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-29 | minor | M2 review fixes: conversion preserves mask runs and Fill sizing per axis; layout inference uses visible, non-absolute flow children; the sidebar hides Add for mixed selections containing existing auto layout. Regression coverage includes rendered mask pixels, visible-child positions, parent layout stability and the sidebar accessibility tree. Numbers unchanged |
 | 2026-10-29 | minor | M2: the Layout sidebar exposes Add auto layout (+) for groups. `layout.add` converts one selected group into a frame in place rather than wrapping it: same id, name and direct children; the layout arranges those children, and one undo restores the group. Sidebar, menu, shortcut and API calls all use the corrected command. This follows the contributor’s observed Figma behavior and the workflow familiar to users of similar design tools. Tests cover direct-child reflow, stable hierarchy, undo/redo and wrapping a multi-group selection. Numbers unchanged |
 | 2026-10-17 | minor | Community batch #753: adding auto layout to an empty frame keeps its size, Fixed, while a frame with content hugs it (#369); `node.set` applies auto layout keys to the frames among its targets and warns about the others, and a font style the family lacks warns with the nearest face (#603). Checked over MCP. Numbers unchanged |
 | 2026-10-13 | minor | Auto layout, on-canvas handles of automatic gaps (M2): the handle between spread rows or columns (and between items with an auto gap) shows the distance the layout gives the gap instead of the stored value, and dragging it makes the gap a fixed one from there, as typing a gap in the panel does; one undo step (`gap_handle_tests`). Before, the drag changed a value that had no effect. The documentation is silent on dragging an automatic gap. Numbers unchanged. |
