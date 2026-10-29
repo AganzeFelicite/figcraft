@@ -5,6 +5,7 @@ use super::{
     Align2, COMPONENT, Color32, CornerRadius, Document, FigApp, NodeId, NodeKind, Point, Pos2, Rect, Shape, Stroke, StrokeKind, Tokens, ToolId,
     doc_c32, pos2, selection_box, selection_frame, semibold, tr, vec2,
 };
+use figcraft_doc::{HConstraint, VConstraint};
 
 /// Everything drawn over the rendered page; returns the frame labels drawn (frame, corners on the
 /// page) for the engine to hit-test.
@@ -246,6 +247,11 @@ fn selection_overlay(
     for id in sel {
         draw_outline(app, painter, doc, *id, stroke(col, 1.0));
     }
+    // Constraint guides belong to the normal selection overlay: not while the Shape Builder
+    // reshapes by regions, nor while measuring to another layer (Alt), whose lines take over.
+    if app.session.tool.tool != ToolId::ShapeBuilder && app.session.tool.overlay.measure_box.is_none() {
+        constraint_lines(app, painter, doc, sel);
+    }
     // The shape builder reshapes by regions: no transform box.
     if app.session.tool.tool != ToolId::ShapeBuilder
         && let Some(b) = selection_box(doc, sel)
@@ -405,6 +411,80 @@ fn transform_box(
         return Some(pill(painter, pos2(cx, bottom + 9.0), Align2::CENTER_TOP, label, col));
     }
     None
+}
+
+/// Blue dashed guides showing how a selected layer is pinned within its parent frame, and a short
+/// solid mark at the layer's centre when it is centred on an axis. A left constraint draws a
+/// horizontal line from the layer's left-edge midpoint to the frame's left edge; right, top and
+/// bottom likewise (the line is perpendicular to the edge it leaves). A centre constraint draws a
+/// short bar through the layer's middle — a horizontal one, a vertical one, or both (a cross when
+/// the layer is centred on both axes). Auto-layout frames ignore constraints, so no guides are
+/// drawn there, except for a layer that ignores the auto layout (absolute position).
+fn constraint_lines(app: &FigApp, painter: &egui::Painter, doc: &Document, sel: &[NodeId]) {
+    let s = stroke(accent(painter), 1.0);
+    let line = |a: Pos2, b: Pos2| {
+        painter.add(Shape::dashed_line(&[a, b], s, 4.0, 3.0));
+    };
+    // A short solid bar at the layer's centre: horizontal, vertical, or both (a cross).
+    let mark = |c: Pos2, half: f32, h: bool, v: bool| {
+        if h {
+            painter.line_segment([pos2(c.x - half, c.y), pos2(c.x + half, c.y)], s);
+        }
+        if v {
+            painter.line_segment([pos2(c.x, c.y - half), pos2(c.x, c.y + half)], s);
+        }
+    };
+    for &id in sel {
+        let Some(n) = doc.node(id) else { continue };
+        let Some(parent_id) = n.parent else { continue };
+        let Some(parent) = doc.node(parent_id) else { continue };
+        // Constraints bind a layer only to a frame it sits inside: one without auto layout, or one
+        // whose auto layout the layer ignores (absolute position).
+        if !parent.kind.is_frame_like() || (parent.layout.is_some() && !n.child_layout.absolute) {
+            continue;
+        }
+        let nw = doc.world_transform(id);
+        let pw = doc.world_transform(parent_id);
+        let (nw_w, nw_h) = (n.width, n.height);
+        let (pw_w, pw_h) = (parent.width, parent.height);
+        let sp = |p: Point| app.to_screen(p.x, p.y);
+        // The layer's edge midpoints and centre in page space.
+        let n_left = sp(nw * Point::new(0.0, nw_h / 2.0));
+        let n_right = sp(nw * Point::new(nw_w, nw_h / 2.0));
+        let n_top = sp(nw * Point::new(nw_w / 2.0, 0.0));
+        let n_bottom = sp(nw * Point::new(nw_w / 2.0, nw_h));
+        let n_c = sp(nw * Point::new(nw_w / 2.0, nw_h / 2.0));
+        // The frame's edges and centre in page space (axis-aligned approximation).
+        let p_left = sp(pw * Point::new(0.0, 0.0)).x;
+        let p_right = sp(pw * Point::new(pw_w, 0.0)).x;
+        let p_top = sp(pw * Point::new(0.0, 0.0)).y;
+        let p_bottom = sp(pw * Point::new(0.0, pw_h)).y;
+        match n.constraints.horizontal {
+            HConstraint::Left => line(n_left, pos2(p_left, n_left.y)),
+            HConstraint::Right => line(n_right, pos2(p_right, n_right.y)),
+            HConstraint::LeftRight => {
+                line(n_left, pos2(p_left, n_left.y));
+                line(n_right, pos2(p_right, n_right.y));
+            }
+            HConstraint::Center | HConstraint::Scale => {}
+        }
+        match n.constraints.vertical {
+            VConstraint::Top => line(n_top, pos2(n_top.x, p_top)),
+            VConstraint::Bottom => line(n_bottom, pos2(n_bottom.x, p_bottom)),
+            VConstraint::TopBottom => {
+                line(n_top, pos2(n_top.x, p_top));
+                line(n_bottom, pos2(n_bottom.x, p_bottom));
+            }
+            VConstraint::Center | VConstraint::Scale => {}
+        }
+        // A centred axis marks the layer itself with a short bar through its middle (a cross when
+        // both axes are centred), rather than a guide reaching the frame's centre.
+        let hc = matches!(n.constraints.horizontal, HConstraint::Center);
+        let vc = matches!(n.constraints.vertical, VConstraint::Center);
+        if hc || vc {
+            mark(n_c, 8.0, hc, vc);
+        }
+    }
 }
 
 /// A canvas readout: white `text` on a `col` pill placed at `at` by `align` (its box returned).

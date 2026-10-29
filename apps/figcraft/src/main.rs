@@ -234,7 +234,7 @@ fn main() -> eframe::Result {
     }
     let queue: Arc<Mutex<Vec<ControlRequest>>> = Arc::new(Mutex::new(Vec::new()));
     if let Some(p) = port {
-        control_server::start(p, queue.clone(), ctx_slot.clone());
+        control_server::start(p, queue.clone(), ctx_slot.clone(), fig.session.events.clone());
     }
     let icon = services::window_icon();
     // The app id is the Wayland app_id and the X11 window class on Linux: the desktop entry's name
