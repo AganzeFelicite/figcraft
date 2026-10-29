@@ -550,55 +550,31 @@ pub fn import(bytes: &[u8]) -> Result<(Document, Vec<String>), FormatError> {
             let svg_defs = svg_gradients(&shapes);
             let roots: Vec<String> = list(root, "shapes").filter_map(Value::as_str).map(str::to_owned).collect();
             let mut seen = BTreeSet::new();
+            let mut layers = LayerImport {
+                z: &mut z,
+                base: &base,
+                shapes: &shapes,
+                children_by_parent: &children_by_parent,
+                svg_defs: &svg_defs,
+                masters: &masters,
+                doc: &mut doc,
+                images: &mut image_keys,
+                image_bytes: &mut image_bytes,
+                inflate_budget: &mut inflate_budget,
+                svg_bytes: &mut svg_bytes,
+                warnings: &mut warnings,
+                seen: &mut seen,
+                count: &mut layer_count,
+            };
             for id in roots {
-                add_layer(
-                    &mut z,
-                    &base,
-                    &shapes,
-                    &children_by_parent,
-                    &svg_defs,
-                    &masters,
-                    &id,
-                    page,
-                    Affine::IDENTITY,
-                    None,
-                    &mut doc,
-                    &mut image_keys,
-                    &mut image_bytes,
-                    &mut inflate_budget,
-                    &mut svg_bytes,
-                    &mut warnings,
-                    &mut seen,
-                    0,
-                    &mut layer_count,
-                )?;
+                layers.add_layer(&id, page, Affine::IDENTITY, None, 0)?;
             }
             // Recover root children not listed in the export's stacking-order array.
             if let Some(unlinked) = children_by_parent.get(ROOT_ID) {
                 for id in unlinked {
-                    if !seen.contains(id) {
-                        warn(&mut warnings, "Penpot page omitted a top-level child from its stacking list; recovered it by parentId".into());
-                        add_layer(
-                            &mut z,
-                            &base,
-                            &shapes,
-                            &children_by_parent,
-                            &svg_defs,
-                            &masters,
-                            id,
-                            page,
-                            Affine::IDENTITY,
-                            None,
-                            &mut doc,
-                            &mut image_keys,
-                            &mut image_bytes,
-                            &mut inflate_budget,
-                            &mut svg_bytes,
-                            &mut warnings,
-                            &mut seen,
-                            0,
-                            &mut layer_count,
-                        )?;
+                    if !layers.seen.contains(id) {
+                        warn(layers.warnings, "Penpot page omitted a top-level child from its stacking list; recovered it by parentId".into());
+                        layers.add_layer(id, page, Affine::IDENTITY, None, 0)?;
                     }
                 }
             }
@@ -608,69 +584,29 @@ pub fn import(bytes: &[u8]) -> Result<(Document, Vec<String>), FormatError> {
             // First recover the true orphan roots, preserving their descendants
             // with the original global Penpot coordinates.
             for (id, shape) in &shapes {
-                if id == ROOT_ID || seen.contains(id) {
+                if id == ROOT_ID || layers.seen.contains(id) {
                     continue;
                 }
                 let parent_id = string(shape, "parentId");
                 let parent_exists = parent_id.is_some_and(|pid| pid != id.as_str() && shapes.contains_key(pid));
                 if !parent_exists {
                     warn(
-                        &mut warnings,
+                        layers.warnings,
                         format!(
                             "Penpot orphan layer '{}' has no reachable parent; attached to page",
                             string(shape, "name").unwrap_or(id).chars().take(80).collect::<String>()
                         ),
                     );
-                    add_layer(
-                        &mut z,
-                        &base,
-                        &shapes,
-                        &children_by_parent,
-                        &svg_defs,
-                        &masters,
-                        id,
-                        page,
-                        Affine::IDENTITY,
-                        None,
-                        &mut doc,
-                        &mut image_keys,
-                        &mut image_bytes,
-                        &mut inflate_budget,
-                        &mut svg_bytes,
-                        &mut warnings,
-                        &mut seen,
-                        0,
-                        &mut layer_count,
-                    )?;
+                    layers.add_layer(id, page, Affine::IDENTITY, None, 0)?;
                 }
             }
             // Remaining disconnected subgraphs can be caused by cycles or a
             // parent chain deeper than MAX_DEPTH. Import one deterministic root
             // for each instead of dropping editable content without warning.
             for id in shapes.keys() {
-                if id != ROOT_ID && !seen.contains(id) {
-                    warn(&mut warnings, format!("Penpot disconnected/cyclic layer graph at {id}; recovered as a page layer"));
-                    add_layer(
-                        &mut z,
-                        &base,
-                        &shapes,
-                        &children_by_parent,
-                        &svg_defs,
-                        &masters,
-                        id,
-                        page,
-                        Affine::IDENTITY,
-                        None,
-                        &mut doc,
-                        &mut image_keys,
-                        &mut image_bytes,
-                        &mut inflate_budget,
-                        &mut svg_bytes,
-                        &mut warnings,
-                        &mut seen,
-                        0,
-                        &mut layer_count,
-                    )?;
+                if id != ROOT_ID && !layers.seen.contains(id) {
+                    warn(layers.warnings, format!("Penpot disconnected/cyclic layer graph at {id}; recovered as a page layer"));
+                    layers.add_layer(id, page, Affine::IDENTITY, None, 0)?;
                 }
             }
         }
@@ -2068,6 +2004,119 @@ fn indexed_token<'a>(
     })
 }
 
+/// The themes of a token file by group, each with the token sets it turns on (of those in `tokens`).
+fn token_theme_groups<'a>(value: &'a Value, tokens: &BTreeMap<&str, BTreeMap<String, &Value>>) -> Vec<(String, Vec<TokenTheme<'a>>)> {
+    let mut groups: Vec<(String, Vec<TokenTheme>)> = Vec::new();
+    for theme in list(value, "$themes").take(256) {
+        let Some(name) = string(theme, "name") else { continue };
+        let group = string(theme, "group").filter(|g| !g.trim().is_empty()).unwrap_or("Themes").to_owned();
+        let sets = theme
+            .get("selectedTokenSets")
+            .and_then(Value::as_object)
+            .map(|m| {
+                m.iter()
+                    .filter(|(set, state)| state.as_str().is_some_and(|s| s == "enabled" || s == "source") && tokens.contains_key(set.as_str()))
+                    .map(|(set, _)| set.as_str())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let id = string(theme, "id").unwrap_or(name).chars().take(80).collect();
+        match groups.iter_mut().find(|(g, _)| *g == group) {
+            Some((_, themes)) => themes.push(TokenTheme { id, name, sets }),
+            None => groups.push((group, vec![TokenTheme { id, name, sets }])),
+        }
+    }
+    groups
+}
+
+/// Drops the resolved tokens that alias a variable which isn't being made, until none does; how
+/// many were dropped.
+fn drop_dangling_aliases(
+    resolved: &mut BTreeMap<&str, (usize, VariableType, BTreeMap<String, VariableValue>)>,
+    var_id: &dyn Fn(&str) -> String,
+) -> usize {
+    let mut dropped = 0;
+    loop {
+        let ids: BTreeSet<String> = resolved.keys().map(|p| var_id(p)).collect();
+        let dangling: Vec<&str> = resolved
+            .iter()
+            .filter(|(_, (_, _, values))| values.values().any(|v| matches!(v, VariableValue::Alias(target) if !ids.contains(target))))
+            .map(|(path, _)| *path)
+            .collect();
+        if dangling.is_empty() {
+            return dropped;
+        }
+        dropped += dangling.len();
+        for path in dangling {
+            resolved.remove(path);
+        }
+    }
+}
+
+/// Moves a base token whose expression refers to a themed token into that token's collection, so
+/// it can follow the theme, until nothing moves (64 rounds at most); false when the lookup budget
+/// ran out.
+fn move_referencing_tokens(
+    owner: &mut BTreeMap<String, usize>,
+    base_enabled: &BTreeSet<usize>,
+    path_index: &BTreeMap<&str, Vec<(usize, &Value)>>,
+    resolution_budget: &mut TokenResolutionBudget,
+) -> bool {
+    for _ in 0..owner.len().min(64) {
+        let moves: Vec<(String, usize)> = owner
+            .iter()
+            .filter(|(_, index)| **index == 0)
+            .filter_map(|(path, _)| {
+                resolution_budget.spend(1)?;
+                let token = indexed_token(path, base_enabled, path_index, resolution_budget)?;
+                if token_alias(token).is_some() {
+                    return None;
+                }
+                let text = token.get("$value").or_else(|| token.get("value"))?.as_str()?;
+                resolution_budget.spend(text.len())?;
+                text.split('{')
+                    .skip(1)
+                    .filter_map(|part| part.split_once('}').map(|(r, _)| r.trim()))
+                    .find_map(|r| owner.get(r).copied().filter(|i| *i != 0))
+                    .map(|i| (path.clone(), i))
+            })
+            .collect();
+        if resolution_budget.remaining == 0 {
+            return false;
+        }
+        if moves.is_empty() {
+            break;
+        }
+        owner.extend(moves);
+    }
+    true
+}
+
+/// Each token path's variable type, from its newest set that gives one; `None` when the lookup
+/// budget ran out.
+fn token_kinds<'o>(
+    owner: &'o BTreeMap<String, usize>,
+    path_index: &BTreeMap<&str, Vec<(usize, &Value)>>,
+    resolution_budget: &mut TokenResolutionBudget,
+) -> Option<BTreeMap<&'o str, VariableType>> {
+    let mut kinds = BTreeMap::new();
+    for path in owner.keys() {
+        let kind = path_index.get(path.as_str()).and_then(|occurrences| {
+            occurrences.iter().rev().find_map(|(_, token)| {
+                resolution_budget.spend(1)?;
+                token_kind(token)
+            })
+        });
+        if resolution_budget.remaining == 0 {
+            return None;
+        }
+        if let Some(kind) = kind {
+            kinds.insert(path.as_str(), kind);
+        }
+    }
+    Some(kinds)
+}
+
 /// Import token sets and theme groups as variables, collections and modes.
 fn import_themed_tokens(
     value: &Value,
@@ -2100,26 +2149,7 @@ fn import_themed_tokens(
             path_index.entry(path.as_str()).or_default().push((set_id, *value));
         }
     }
-    let mut groups: Vec<(String, Vec<TokenTheme>)> = Vec::new();
-    for theme in list(value, "$themes").take(256) {
-        let Some(name) = string(theme, "name") else { continue };
-        let group = string(theme, "group").filter(|g| !g.trim().is_empty()).unwrap_or("Themes").to_owned();
-        let sets = theme
-            .get("selectedTokenSets")
-            .and_then(Value::as_object)
-            .map(|m| {
-                m.iter()
-                    .filter(|(set, state)| state.as_str().is_some_and(|s| s == "enabled" || s == "source") && tokens.contains_key(set.as_str()))
-                    .map(|(set, _)| set.as_str())
-                    .collect()
-            })
-            .unwrap_or_default();
-        let id = string(theme, "id").unwrap_or(name).chars().take(80).collect();
-        match groups.iter_mut().find(|(g, _)| *g == group) {
-            Some((_, themes)) => themes.push(TokenTheme { id, name, sets }),
-            None => groups.push((group, vec![TokenTheme { id, name, sets }])),
-        }
-    }
+    let groups = token_theme_groups(value, &tokens);
     let (switching, constant): (Vec<_>, Vec<_>) = groups.into_iter().partition(|(_, themes)| themes.len() > 1);
     let themed_sets: BTreeSet<&str> = switching.iter().flat_map(|(_, t)| t.iter().flat_map(|t| t.sets.iter().copied())).collect();
     let active_sets: Vec<&str> = value.get("$metadata").map(|m| list(m, "activeSets").filter_map(Value::as_str).collect()).unwrap_or_default();
@@ -2175,51 +2205,15 @@ fn import_themed_tokens(
             }
         }
     }
-    for _ in 0..owner.len().min(64) {
-        let moves: Vec<(String, usize)> = owner
-            .iter()
-            .filter(|(_, index)| **index == 0)
-            .filter_map(|(path, _)| {
-                resolution_budget.spend(1)?;
-                let token = indexed_token(path, &base_enabled, &path_index, &mut resolution_budget)?;
-                if token_alias(token).is_some() {
-                    return None;
-                }
-                let text = token.get("$value").or_else(|| token.get("value"))?.as_str()?;
-                resolution_budget.spend(text.len())?;
-                text.split('{')
-                    .skip(1)
-                    .filter_map(|part| part.split_once('}').map(|(r, _)| r.trim()))
-                    .find_map(|r| owner.get(r).copied().filter(|i| *i != 0))
-                    .map(|i| (path.clone(), i))
-            })
-            .collect();
-        if resolution_budget.remaining == 0 {
-            warn(warnings, "Penpot token lookup work budget exhausted; skipped themed tokens".into());
-            return false;
-        }
-        if moves.is_empty() {
-            break;
-        }
-        owner.extend(moves);
+    if !move_referencing_tokens(&mut owner, &base_enabled, &path_index, &mut resolution_budget) {
+        warn(warnings, "Penpot token lookup work budget exhausted; skipped themed tokens".into());
+        return false;
     }
     let var_id = |path: &str| format!("penpot:tokens:{base}:{path}");
-    let mut kinds = BTreeMap::new();
-    for path in owner.keys() {
-        let kind = path_index.get(path.as_str()).and_then(|occurrences| {
-            occurrences.iter().rev().find_map(|(_, token)| {
-                resolution_budget.spend(1)?;
-                token_kind(token)
-            })
-        });
-        if resolution_budget.remaining == 0 {
-            warn(warnings, "Penpot token lookup work budget exhausted; skipped themed tokens".into());
-            return false;
-        }
-        if let Some(kind) = kind {
-            kinds.insert(path.as_str(), kind);
-        }
-    }
+    let Some(kinds) = token_kinds(&owner, &path_index, &mut resolution_budget) else {
+        warn(warnings, "Penpot token lookup work budget exhausted; skipped themed tokens".into());
+        return false;
+    };
     let mut resolved: BTreeMap<&str, (usize, VariableType, BTreeMap<String, VariableValue>)> = BTreeMap::new();
     let mut skipped = 0usize;
     for (path, &index) in &owner {
@@ -2259,21 +2253,7 @@ fn import_themed_tokens(
         }
         resolved.insert(path.as_str(), (index, kind, values));
     }
-    loop {
-        let ids: BTreeSet<String> = resolved.keys().map(|p| var_id(p)).collect();
-        let dangling: Vec<&str> = resolved
-            .iter()
-            .filter(|(_, (_, _, values))| values.values().any(|v| matches!(v, VariableValue::Alias(target) if !ids.contains(target))))
-            .map(|(path, _)| *path)
-            .collect();
-        if dangling.is_empty() {
-            break;
-        }
-        skipped += dangling.len();
-        for path in dangling {
-            resolved.remove(path);
-        }
-    }
+    skipped += drop_dangling_aliases(&mut resolved, &var_id);
     let mut converted = 0usize;
     let mut used_collections = BTreeSet::new();
     for (path, (index, kind, values)) in resolved {
@@ -2960,55 +2940,37 @@ fn svg_paint_ref(text: &str) -> Option<&str> {
     (!id.is_empty() && id.len() <= 200).then_some(id)
 }
 
-/// Convert one shape and its children, interpreting Penpot's absolute x/y relative to the parent.
-#[allow(clippy::too_many_arguments)]
-/// Import one shape and its descendants within hierarchy and asset budgets.
-fn add_layer(
-    z: &mut ZipArchive<Cursor<&[u8]>>,
-    base: &str,
-    shapes: &BTreeMap<String, Value>,
-    children_by_parent: &BTreeMap<String, Vec<String>>,
-    svg_defs: &BTreeMap<String, Gradient>,
-    masters: &BTreeMap<String, String>,
-    id: &str,
-    parent: NodeId,
-    parent_abs: Affine,
-    cell: Option<&Value>,
-    doc: &mut Document,
-    images: &mut BTreeMap<String, String>,
-    image_bytes: &mut usize,
-    inflate_budget: &mut InflateBudget,
-    svg_bytes: &mut usize,
+/// What importing a page's layers shares from layer to layer: the archive and the page's shapes,
+/// and the document, budgets and warnings they add to.
+struct LayerImport<'a, 'b> {
+    z: &'a mut ZipArchive<Cursor<&'b [u8]>>,
+    base: &'a str,
+    shapes: &'a BTreeMap<String, Value>,
+    children_by_parent: &'a BTreeMap<String, Vec<String>>,
+    svg_defs: &'a BTreeMap<String, Gradient>,
+    masters: &'a BTreeMap<String, String>,
+    doc: &'a mut Document,
+    images: &'a mut BTreeMap<String, String>,
+    image_bytes: &'a mut usize,
+    inflate_budget: &'a mut InflateBudget,
+    svg_bytes: &'a mut usize,
+    warnings: &'a mut Vec<String>,
+    seen: &'a mut BTreeSet<String>,
+    count: &'a mut usize,
+}
+
+/// A Penpot layer's kind, with the box and outline of a decoded path (in the layer's own space).
+fn layer_kind(
+    v: &Value,
+    typ: &str,
+    is_master: bool,
+    (x, y, w, h): (f64, f64, f64, f64),
     warnings: &mut Vec<String>,
-    seen: &mut BTreeSet<String>,
-    depth: usize,
-    count: &mut usize,
-) -> Result<(), FormatError> {
-    if depth >= MAX_DEPTH {
-        warn(warnings, "Penpot layer nesting deeper than 128 was omitted".into());
-        return Ok(());
-    }
-    if !seen.insert(id.to_owned()) {
-        return Ok(());
-    }
-    let Some(v) = shapes.get(id) else {
-        warn(warnings, format!("Missing layer {id}"));
-        return Ok(());
-    };
-    *count += 1;
-    if *count > MAX_LAYERS {
-        return Err(corrupt("too many layers"));
-    }
-    let name = string(v, "name").unwrap_or("Layer").chars().take(512).collect::<String>();
-    let x = geometry(v, "x", 0.0);
-    let y = geometry(v, "y", 0.0);
-    let w = geometry(v, "width", 1.0).clamp(0.01, 1_000_000.0);
-    let h = geometry(v, "height", 1.0).clamp(0.01, 1_000_000.0);
-    let typ = string(v, "type").unwrap_or("");
+) -> (NodeKind, Option<figcraft_doc::geom::Rect>, Option<BezPath>) {
     let mut path_box = None;
     let mut vector_source = None;
     let kind = match typ {
-        "frame" if masters.contains_key(id) => NodeKind::Component { description: String::new(), props: BTreeMap::new() },
+        "frame" if is_master => NodeKind::Component { description: String::new(), props: BTreeMap::new() },
         "frame" if v.get("isVariantContainer").and_then(Value::as_bool) == Some(true) => NodeKind::ComponentSet { description: String::new() },
         "frame" => NodeKind::Frame,
         "group" => NodeKind::Group,
@@ -3021,7 +2983,7 @@ fn add_layer(
             },
         },
         "rect" | "image" => NodeKind::Rectangle,
-        // Expanded in the engine using the same native importer as File → Import SVG.
+        // Expanded in the engine using the same native importer as File â†’ Import SVG.
         // This parsing crate must not depend on the higher-level SVG/render crates.
         "svg-raw" => NodeKind::Frame,
         "circle" | "ellipse" => NodeKind::Ellipse { start: 0.0, sweep: std::f64::consts::TAU, inner: 0.0 },
@@ -3052,27 +3014,221 @@ fn add_layer(
             NodeKind::Frame
         }
     };
-    let abs = if kind.bounds_follow_children() { Affine::translate((x, y)) } else { shape_matrix(v, x, y, w, h) };
-    let (abs, w, h) = match path_box {
-        Some(b) => (abs * Affine::translate(b.origin().to_vec2()), b.width().max(0.01), b.height().max(0.01)),
-        None => (abs, w, h),
+    (kind, path_box, vector_source)
+}
+
+/// A layer's stroke settings from its first Penpot stroke.
+fn apply_stroke(node: &mut figcraft_doc::Node, stroke: &Value) {
+    node.stroke.weight = number(stroke, "strokeWidth", 1.0).clamp(0.0, 10000.0);
+    node.stroke.align = match string(stroke, "strokeAlignment") {
+        Some("center") => StrokeAlign::Center,
+        Some("outer") | Some("outside") => StrokeAlign::Outside,
+        _ => StrokeAlign::Inside,
     };
-    let created = doc.create(parent, kind, &name, 0.0, 0.0, w, h).map_err(|e| corrupt(format!("layer '{name}': {e}")))?;
-    let mut fills = paints(z, base, v, "fills", doc, images, image_bytes, inflate_budget, warnings);
-    // Some Penpot versions keep a stand-alone image's reference in `metadata`, not `fills`.
-    if typ == "image"
-        && let Some(metadata) = v.get("metadata")
-    {
-        let mut stretched = metadata.clone();
-        if let Some(obj) = stretched.as_object_mut() {
-            obj.insert("keepAspectRatio".into(), Value::Bool(false));
-        }
-        let mut all = vec![serde_json::json!({"fillImage": stretched, "fillOpacity": 1.0})];
-        all.extend(list(v, "fills").cloned());
-        let temporary = serde_json::json!({ "fills": all });
-        fills = paints(z, base, &temporary, "fills", doc, images, image_bytes, inflate_budget, warnings);
+    node.stroke.join = match string(stroke, "strokeJoin") {
+        Some("round") => StrokeJoin::Round,
+        Some("bevel") => StrokeJoin::Bevel,
+        _ => StrokeJoin::Miter,
+    };
+    let cap = match string(stroke, "strokeCapStart") {
+        Some("round") => StrokeCap::Round,
+        Some("square") => StrokeCap::Square,
+        Some("line-arrow") => StrokeCap::LineArrow,
+        Some("triangle-arrow") => StrokeCap::TriangleArrow,
+        _ => StrokeCap::None,
+    };
+    node.stroke.cap_start = cap;
+    node.stroke.cap_end = match string(stroke, "strokeCapEnd") {
+        Some("round") => StrokeCap::Round,
+        Some("square") => StrokeCap::Square,
+        Some("line-arrow") => StrokeCap::LineArrow,
+        Some("triangle-arrow") => StrokeCap::TriangleArrow,
+        _ => cap,
+    };
+    let w = node.stroke.weight;
+    node.stroke.dashes = match string(stroke, "strokeStyle") {
+        Some("dotted") => vec![0.0, w + 5.0],
+        Some("dashed") => vec![w + 10.0, w + 10.0],
+        Some("mixed") => vec![w + 5.0, w + 5.0, w + 1.0, w + 5.0],
+        _ => Vec::new(),
+    };
+    if string(stroke, "strokeStyle") == Some("dotted") {
+        let dot = |cap: StrokeCap| if matches!(cap, StrokeCap::LineArrow | StrokeCap::TriangleArrow) { cap } else { StrokeCap::Round };
+        (node.stroke.cap_start, node.stroke.cap_end) = (dot(node.stroke.cap_start), dot(node.stroke.cap_end));
     }
-    if matches!(typ, "rect" | "circle" | "path" | "bool") {
+}
+
+/// A layer's visibility, lock, opacity, blend, clip, mask and constraints.
+fn apply_appearance(node: &mut figcraft_doc::Node, v: &Value) {
+    node.visible = v.get("hidden").and_then(Value::as_bool) != Some(true);
+    node.locked = v.get("blocked").and_then(Value::as_bool) == Some(true);
+    node.opacity = number(v, "opacity", 1.0).clamp(0.0, 1.0) as f32;
+    node.blend = string(v, "blendMode").and_then(BlendMode::from_name).unwrap_or(BlendMode::Normal);
+    node.clip = string(v, "type") == Some("frame") && v.get("showContent").and_then(Value::as_bool) != Some(true);
+    node.is_mask = v.get("mask").and_then(Value::as_bool) == Some(true);
+    node.mask_type = match string(v, "maskType") {
+        Some("vector") => MaskType::Vector,
+        Some("luminance") => MaskType::Luminance,
+        _ => MaskType::Alpha,
+    };
+    node.constraints.horizontal = match string(v, "constraintsH") {
+        Some("right") => HConstraint::Right,
+        Some("leftright") | Some("left-right") => HConstraint::LeftRight,
+        Some("center") => HConstraint::Center,
+        Some("scale") => HConstraint::Scale,
+        _ => HConstraint::Left,
+    };
+    node.constraints.vertical = match string(v, "constraintsV") {
+        Some("bottom") => VConstraint::Bottom,
+        Some("topbottom") | Some("top-bottom") => VConstraint::TopBottom,
+        Some("center") => VConstraint::Center,
+        Some("scale") => VConstraint::Scale,
+        _ => VConstraint::Top,
+    };
+}
+
+/// An `svg-raw` layer's source tree and markup, kept for the engine to expand (bounded by
+/// `svg_bytes`, the archive's raw SVG budget).
+fn keep_raw_svg(node: &mut figcraft_doc::Node, v: &Value, name: &str, svg_bytes: &mut usize, warnings: &mut Vec<String>) {
+    // If future SVG support improves, keep the original tree (when small)
+    // alongside the reconstructed markup for faithful re-import.
+    preserve_source(node, v, &["content", "svgAttrs", "svg-attrs"]);
+    if let Some(xml) = raw_svg_xml(v) {
+        // Avoid unbounded retained markup in huge archives or projects.
+        if xml.len() <= (8 * 1024 * 1024usize).saturating_sub(*svg_bytes) {
+            *svg_bytes += xml.len();
+            node.plugin_data.insert("penpot.svgRawXml".into(), xml);
+            node.plugin_data.insert("penpot.svgRawStatus".into(), "pending".into());
+        } else {
+            warn(warnings, format!("SVG layer '{name}' exceeds the 8 MiB raw SVG import budget; kept as frame"));
+        }
+    } else {
+        warn(warnings, format!("SVG layer '{name}' has no safely readable SVG markup; kept as frame"));
+    }
+}
+
+/// A text layer's font references, kept as the source names them.
+fn keep_font_refs(node: &mut figcraft_doc::Node, v: &Value) {
+    let references = referenced_google_fonts(v);
+    if !references.is_empty() {
+        node.plugin_data.insert("penpot.googleFontRefs".into(), serde_json::to_string(&references).unwrap_or_default());
+    }
+    // A `custom-*` identifier refers to Penpot's separately managed
+    // font service. It is not a URL and does not imply that the binary
+    // is contained in this `.penpot` archive. Preserve the exact id so
+    // the desktop importer can report or resolve it without guessing.
+    let custom = referenced_custom_fonts(v);
+    if !custom.is_empty() {
+        node.plugin_data.insert("penpot.customFontRefs".into(), serde_json::to_string(&custom).unwrap_or_default());
+    }
+}
+
+/// The Penpot source fields a layer keeps for a faithful re-export (see [`preserve_source`]).
+const PRESERVED_LAYER_KEYS: &[&str] = &[
+    "layout",
+    "layoutMode",
+    "layoutFlexDir",
+    "layoutWrapType",
+    "layoutGap",
+    "layoutPadding",
+    "layoutJustifyContent",
+    "layoutAlignItems",
+    "layoutAlignContent",
+    "layoutGridColumns",
+    "layoutGridRows",
+    "layoutGridCells",
+    "layoutItemMargin",
+    "layoutItemAlignSelf",
+    "layoutItemAbsolute",
+    "layoutItemHSizing",
+    "layoutItemVSizing",
+    "touched",
+    "appliedTokens",
+    "interactions",
+    "variantProperties",
+    "pluginData",
+    "grids",
+    "guides",
+    "maskType",
+    "svgAttrs",
+    "svgViewbox",
+    "svgDefs",
+    "layoutGapType",
+    "layoutPaddingType",
+    "layoutJustifyItems",
+    "layoutGridDir",
+    "componentRoot",
+    "mainInstance",
+    "layoutItemZIndex",
+    "exports",
+    "hideInViewer",
+    "strokes",
+];
+
+/// The Penpot ids a layer keeps: its own, its file's and its component's.
+fn keep_ids(node: &mut figcraft_doc::Node, v: &Value, id: &str, base: &str, master: Option<&String>) {
+    node.plugin_data.insert("penpot.id".into(), id.to_owned());
+    if let Some(file_id) = base.strip_prefix("files/") {
+        node.plugin_data.insert("penpot.fileId".into(), file_id.to_owned());
+    }
+    if let Some(component) = master {
+        node.plugin_data.insert("penpot.componentMasterId".into(), component.clone());
+    }
+    if v.get("componentId").is_some() && master.is_none() {
+        node.plugin_data.insert("penpot.componentLinkStatus".into(), "not-linked".into());
+    }
+}
+
+/// The Penpot source fields a layer keeps: the layout and other settings FigCraft can't hold, and
+/// its component references.
+fn keep_source(node: &mut figcraft_doc::Node, v: &Value, typ: &str) {
+    // Mark unsupported properties on their exact source nodes. Layout changes may
+    // otherwise silently discard these Penpot-specific rules on subsequent edits.
+    if string(v, "layoutItemAlignSelf")
+        .is_some_and(|a| !matches!(a, "auto" | "start" | "flex-start" | "center" | "end" | "flex-end" | "stretch" | "baseline"))
+    {
+        node.plugin_data.insert("penpot.unsupported.alignSelf".into(), "true".into());
+    }
+    preserve_source(node, v, PRESERVED_LAYER_KEYS);
+    if typ == "text" {
+        preserve_source_within(node, v, &["content", "positionData"], 256 * 1024);
+    }
+    for key in ["componentId", "componentFile", "shapeRef", "variantId"] {
+        if let Some(value) = string(v, key)
+            && value.len() <= 1024
+        {
+            node.plugin_data.insert(format!("penpot.{key}"), value.to_owned());
+        }
+    }
+}
+
+/// A text layer's fills: a paint all its runs share moves to the layer, and a text layer with no
+/// fill gets black.
+fn settle_text_fills(node: &mut figcraft_doc::Node, typ: &str) {
+    if let NodeKind::Text(text) = &mut node.kind
+        && let Some(paints) = uniform_text_fills(text)
+    {
+        node.fills = paints;
+        text.style.fills = None;
+        for run in &mut text.runs {
+            run.style.fills = None;
+        }
+    }
+    if typ == "text" && node.fills.is_empty() {
+        node.fills.push(Paint::solid(Color::BLACK));
+    }
+}
+
+impl LayerImport<'_, '_> {
+    /// Penpot paints of `v`'s `key` (fills or strokes).
+    fn layer_paints(&mut self, v: &Value, key: &str) -> Vec<Paint> {
+        paints(self.z, self.base, v, key, self.doc, self.images, self.image_bytes, self.inflate_budget, self.warnings)
+    }
+
+    /// A shape's fills from its SVG attributes (a style or attribute fill, or one inherited from its
+    /// SVG ancestors), and a paint-server reference resolved to a gradient, when it has no fills of
+    /// its own.
+    fn svg_fills(&mut self, v: &Value, typ: &str, abs: Affine, (x, y, w, h): (f64, f64, f64, f64), mut fills: Vec<Paint>) -> Vec<Paint> {
         let svg = v.get("svgAttrs");
         let style_fill = svg.and_then(|a| a.get("style")).and_then(|s| string(s, "fill"));
         let attr_fill = svg.and_then(|a| string(a, "fill"));
@@ -3082,330 +3238,193 @@ fn add_layer(
             None if list(v, "fills").next().is_some() => None,
             None => Some(match attr_fill {
                 Some(fill) => serde_json::json!({"fills": [{"fillColor": fill}]}),
-                None => inherited_fill(shapes, v),
+                None => inherited_fill(self.shapes, v),
             }),
         };
         if let Some(source) = source {
-            fills = paints(z, base, &source, "fills", doc, images, image_bytes, inflate_budget, warnings);
+            fills = self.layer_paints(&source, "fills");
         }
-        if let Some(reference) = style_fill.or(attr_fill).and_then(svg_paint_ref)
-            && fills.is_empty()
-        {
-            let mut local = BTreeMap::new();
-            if let Some(defs) = v.get("svgDefs") {
-                svg_gradient_nodes(defs, None, 0, &mut local);
-            }
-            let resolved = if local.contains_key(reference) {
-                let to_local = if typ == "path" { abs.inverse() } else { Affine::translate((-x, -y)) };
-                let to_unit = svg_space_matrix(v).map(|m| Affine::scale_non_uniform(1.0 / w, 1.0 / h) * to_local * m);
-                svg_gradient_chain(&local, reference).and_then(|(radial, attrs, stops)| svg_gradient(radial, &attrs, stops, to_unit))
-            } else {
-                svg_defs.get(reference).cloned()
-            };
-            if let Some(g) = resolved {
-                fills = vec![Paint::gradient(g)];
-            } else {
+        let Some(reference) = style_fill.or(attr_fill).and_then(svg_paint_ref).filter(|_| fills.is_empty()) else { return fills };
+        let mut local = BTreeMap::new();
+        if let Some(defs) = v.get("svgDefs") {
+            svg_gradient_nodes(defs, None, 0, &mut local);
+        }
+        let resolved = if local.contains_key(reference) {
+            let to_local = if typ == "path" { abs.inverse() } else { Affine::translate((-x, -y)) };
+            let to_unit = svg_space_matrix(v).map(|m| Affine::scale_non_uniform(1.0 / w, 1.0 / h) * to_local * m);
+            svg_gradient_chain(&local, reference).and_then(|(radial, attrs, stops)| svg_gradient(radial, &attrs, stops, to_unit))
+        } else {
+            self.svg_defs.get(reference).cloned()
+        };
+        match resolved {
+            Some(g) => vec![Paint::gradient(g)],
+            None => {
                 warn(
-                    warnings,
+                    self.warnings,
                     format!("Penpot SVG paint-server url(#{reference}) cannot be represented as a native gradient; original SVG attributes retained"),
                 );
+                fills
             }
         }
     }
-    let mut strokes = paints(z, base, v, "strokes", doc, images, image_bytes, inflate_budget, warnings);
-    // Media metadata and image reads are optional, but exhausting the shared
-    // decompression budget is never optional: abort rather than continue importing.
-    inflate_budget.check()?;
-    if typ == "svg-raw" {
-        fills.clear();
-        strokes.clear();
-    }
-    if !fills.is_empty()
-        && let Some(path) = vector_source
-        && let Some(node) = doc.node_mut(created)
-    {
-        node.kind = NodeKind::Vector { network: filled_network(&path) };
-    }
-    let svg = v.get("svgAttrs");
-    let fill_rule = svg.and_then(|a| a.get("style")).and_then(|s| string(s, "fillRule")).or_else(|| svg.and_then(|a| string(a, "fillRule")));
-    if fill_rule == Some("evenodd")
-        && let Some(NodeKind::Vector { network }) = doc.node_mut(created).map(|n| &mut n.kind)
-    {
-        for region in &mut network.regions {
-            region.winding = figcraft_doc::WindingRule::EvenOdd;
+
+    /// A layer's fills: its own, a stand-alone image's from its metadata, or its SVG attributes'.
+    fn layer_fills(&mut self, v: &Value, typ: &str, abs: Affine, geometry: (f64, f64, f64, f64)) -> Vec<Paint> {
+        let mut fills = self.layer_paints(v, "fills");
+        // Some Penpot versions keep a stand-alone image's reference in `metadata`, not `fills`.
+        if typ == "image"
+            && let Some(metadata) = v.get("metadata")
+        {
+            let mut stretched = metadata.clone();
+            if let Some(obj) = stretched.as_object_mut() {
+                obj.insert("keepAspectRatio".into(), Value::Bool(false));
+            }
+            let mut all = vec![serde_json::json!({"fillImage": stretched, "fillOpacity": 1.0})];
+            all.extend(list(v, "fills").cloned());
+            let temporary = serde_json::json!({ "fills": all });
+            fills = self.layer_paints(&temporary, "fills");
         }
-    }
-    if let Some(node) = doc.node_mut(created) {
-        // Unlike Node::new's design-tool defaults, absence of a Penpot fill means no fill.
-        node.fills = fills;
-        node.strokes = strokes;
-        node.visible = v.get("hidden").and_then(Value::as_bool) != Some(true);
-        node.locked = v.get("blocked").and_then(Value::as_bool) == Some(true);
-        node.opacity = number(v, "opacity", 1.0).clamp(0.0, 1.0) as f32;
-        node.blend = string(v, "blendMode").and_then(BlendMode::from_name).unwrap_or(BlendMode::Normal);
-        node.clip = string(v, "type") == Some("frame") && v.get("showContent").and_then(Value::as_bool) != Some(true);
-        node.is_mask = v.get("mask").and_then(Value::as_bool) == Some(true);
-        node.mask_type = match string(v, "maskType") {
-            Some("vector") => MaskType::Vector,
-            Some("luminance") => MaskType::Luminance,
-            _ => MaskType::Alpha,
-        };
-        node.constraints.horizontal = match string(v, "constraintsH") {
-            Some("right") => HConstraint::Right,
-            Some("leftright") | Some("left-right") => HConstraint::LeftRight,
-            Some("center") => HConstraint::Center,
-            Some("scale") => HConstraint::Scale,
-            _ => HConstraint::Left,
-        };
-        node.constraints.vertical = match string(v, "constraintsV") {
-            Some("bottom") => VConstraint::Bottom,
-            Some("topbottom") | Some("top-bottom") => VConstraint::TopBottom,
-            Some("center") => VConstraint::Center,
-            Some("scale") => VConstraint::Scale,
-            _ => VConstraint::Top,
-        };
-        node.effects = effects(v, warnings);
-        if node.kind.is_frame_like() {
-            node.grids = display_grids(v, warnings);
-            node.guides = penpot_guides(v.get("guides"));
+        if matches!(typ, "rect" | "circle" | "path" | "bool") {
+            fills = self.svg_fills(v, typ, abs, geometry, fills);
         }
+        fills
+    }
+
+    /// Penpot layer `id` and its subtree, under `parent` (whose absolute transform is
+    /// `parent_abs`), in grid `cell` of its parent when it has one.
+    fn add_layer(&mut self, id: &str, parent: NodeId, parent_abs: Affine, cell: Option<&Value>, depth: usize) -> Result<(), FormatError> {
+        if depth >= MAX_DEPTH {
+            warn(self.warnings, "Penpot layer nesting deeper than 128 was omitted".into());
+            return Ok(());
+        }
+        if !self.seen.insert(id.to_owned()) {
+            return Ok(());
+        }
+        let shapes = self.shapes;
+        let Some(v) = shapes.get(id) else {
+            warn(self.warnings, format!("Missing layer {id}"));
+            return Ok(());
+        };
+        *self.count += 1;
+        if *self.count > MAX_LAYERS {
+            return Err(corrupt("too many layers"));
+        }
+        let name = string(v, "name").unwrap_or("Layer").chars().take(512).collect::<String>();
+        let x = geometry(v, "x", 0.0);
+        let y = geometry(v, "y", 0.0);
+        let w = geometry(v, "width", 1.0).clamp(0.01, 1_000_000.0);
+        let h = geometry(v, "height", 1.0).clamp(0.01, 1_000_000.0);
+        let typ = string(v, "type").unwrap_or("");
+        let (kind, path_box, vector_source) = layer_kind(v, typ, self.masters.contains_key(id), (x, y, w, h), self.warnings);
+        let abs = if kind.bounds_follow_children() { Affine::translate((x, y)) } else { shape_matrix(v, x, y, w, h) };
+        let (abs, w, h) = match path_box {
+            Some(b) => (abs * Affine::translate(b.origin().to_vec2()), b.width().max(0.01), b.height().max(0.01)),
+            None => (abs, w, h),
+        };
+        let created = self.doc.create(parent, kind, &name, 0.0, 0.0, w, h).map_err(|e| corrupt(format!("layer '{name}': {e}")))?;
+        let mut fills = self.layer_fills(v, typ, abs, (x, y, w, h));
+        let mut strokes = self.layer_paints(v, "strokes");
+        // Media metadata and image reads are optional, but exhausting the shared
+        // decompression budget is never optional: abort rather than continue importing.
+        self.inflate_budget.check()?;
         if typ == "svg-raw" {
-            // If future SVG support improves, keep the original tree (when small)
-            // alongside the reconstructed markup for faithful re-import.
-            preserve_source(node, v, &["content", "svgAttrs", "svg-attrs"]);
-            if let Some(xml) = raw_svg_xml(v) {
-                // Avoid unbounded retained markup in huge archives or projects.
-                if xml.len() <= (8 * 1024 * 1024usize).saturating_sub(*svg_bytes) {
-                    *svg_bytes += xml.len();
-                    node.plugin_data.insert("penpot.svgRawXml".into(), xml);
-                    node.plugin_data.insert("penpot.svgRawStatus".into(), "pending".into());
+            fills.clear();
+            strokes.clear();
+        }
+        if !fills.is_empty()
+            && let Some(path) = vector_source
+            && let Some(node) = self.doc.node_mut(created)
+        {
+            node.kind = NodeKind::Vector { network: filled_network(&path) };
+        }
+        let svg = v.get("svgAttrs");
+        let fill_rule = svg.and_then(|a| a.get("style")).and_then(|s| string(s, "fillRule")).or_else(|| svg.and_then(|a| string(a, "fillRule")));
+        if fill_rule == Some("evenodd")
+            && let Some(NodeKind::Vector { network }) = self.doc.node_mut(created).map(|n| &mut n.kind)
+        {
+            for region in &mut network.regions {
+                region.winding = figcraft_doc::WindingRule::EvenOdd;
+            }
+        }
+        if let Some(node) = self.doc.node_mut(created) {
+            // Unlike Node::new's design-tool defaults, absence of a Penpot fill means no fill.
+            node.fills = fills;
+            node.strokes = strokes;
+            apply_appearance(node, v);
+            node.effects = effects(v, self.warnings);
+            if node.kind.is_frame_like() {
+                node.grids = display_grids(v, self.warnings);
+                node.guides = penpot_guides(v.get("guides"));
+            }
+            if typ == "svg-raw" {
+                keep_raw_svg(node, v, &name, self.svg_bytes, self.warnings);
+            }
+            if typ == "text" {
+                keep_font_refs(node, v);
+            }
+            keep_ids(node, v, id, self.base, self.masters.get(id));
+            apply_child_layout(v, cell, node);
+            // The prototype links are kept until every page is in the document, when the
+            // Penpot shape ids they name can be resolved to FigCraft node ids.
+            prototype::keep_interaction_source(node, v, self.warnings);
+            keep_source(node, v, typ);
+            node.constrain_proportions = v.get("proportionLock").and_then(Value::as_bool) == Some(true);
+            settle_text_fills(node, typ);
+            let radius = number(v, "rx", 0.0).max(0.0);
+            node.corners.radii = [
+                number(v, "r1", radius).max(0.0),
+                number(v, "r2", radius).max(0.0),
+                number(v, "r3", radius).max(0.0),
+                number(v, "r4", radius).max(0.0),
+            ];
+            node.transform = parent_abs.inverse() * abs;
+            if let Some(stroke) = list(v, "strokes").next() {
+                apply_stroke(node, stroke);
+            }
+        }
+        self.add_children(v, id, created, abs, depth)?;
+        finish_layout(self.doc, created, v, self.warnings);
+        finish_masked_group(self.doc, created, v, self.warnings);
+        Ok(())
+    }
+
+    /// Layer `created`'s auto layout and its children: those `v` lists, in its stacking order, then
+    /// any whose parent id names it but that the list left out.
+    fn add_children(&mut self, v: &Value, id: &str, created: NodeId, abs: Affine, depth: usize) -> Result<(), FormatError> {
+        if v.get("layout").is_some() || v.get("layoutMode").is_some() {
+            let layout = layout_props(v, self.warnings);
+            if let Some(node) = self.doc.node_mut(created) {
+                if !node.kind.is_frame_like() {
+                    warn(self.warnings, "Layout on non-frame-like Penpot layer retained as metadata".into());
                 } else {
-                    warn(warnings, format!("SVG layer '{name}' exceeds the 8 MiB raw SVG import budget; kept as frame"));
+                    node.layout = layout;
                 }
-            } else {
-                warn(warnings, format!("SVG layer '{name}' has no safely readable SVG markup; kept as frame"));
             }
         }
-        if typ == "text" {
-            let references = referenced_google_fonts(v);
-            if !references.is_empty() {
-                node.plugin_data.insert("penpot.googleFontRefs".into(), serde_json::to_string(&references).unwrap_or_default());
-            }
-            // A `custom-*` identifier refers to Penpot's separately managed
-            // font service. It is not a URL and does not imply that the binary
-            // is contained in this `.penpot` archive. Preserve the exact id so
-            // the desktop importer can report or resolve it without guessing.
-            let custom = referenced_custom_fonts(v);
-            if !custom.is_empty() {
-                node.plugin_data.insert("penpot.customFontRefs".into(), serde_json::to_string(&custom).unwrap_or_default());
-            }
-        }
-        node.plugin_data.insert("penpot.id".into(), id.to_owned());
-        if let Some(file_id) = base.strip_prefix("files/") {
-            node.plugin_data.insert("penpot.fileId".into(), file_id.to_owned());
-        }
-        if let Some(component) = masters.get(id) {
-            node.plugin_data.insert("penpot.componentMasterId".into(), component.clone());
-        }
-        if v.get("componentId").is_some() && !masters.contains_key(id) {
-            node.plugin_data.insert("penpot.componentLinkStatus".into(), "not-linked".into());
-        }
-        apply_child_layout(v, cell, node);
-        // The prototype links are kept until every page is in the document, when the
-        // Penpot shape ids they name can be resolved to FigCraft node ids.
-        prototype::keep_interaction_source(node, v, warnings);
-        // Mark unsupported properties on their exact source nodes. Layout changes may
-        // otherwise silently discard these Penpot-specific rules on subsequent edits.
-        if string(v, "layoutItemAlignSelf")
-            .is_some_and(|a| !matches!(a, "auto" | "start" | "flex-start" | "center" | "end" | "flex-end" | "stretch" | "baseline"))
+        let mut children: Vec<String> = list(v, "shapes").filter_map(Value::as_str).map(str::to_owned).collect();
+        if let Some(layout) =
+            self.doc.node_mut(created).and_then(|n| n.layout.as_mut()).filter(|l| matches!(l.mode, LayoutMode::Horizontal | LayoutMode::Vertical))
         {
-            node.plugin_data.insert("penpot.unsupported.alignSelf".into(), "true".into());
+            layout.reverse_z = true;
+            children.reverse();
         }
-        preserve_source(
-            node,
-            v,
-            &[
-                "layout",
-                "layoutMode",
-                "layoutFlexDir",
-                "layoutWrapType",
-                "layoutGap",
-                "layoutPadding",
-                "layoutJustifyContent",
-                "layoutAlignItems",
-                "layoutAlignContent",
-                "layoutGridColumns",
-                "layoutGridRows",
-                "layoutGridCells",
-                "layoutItemMargin",
-                "layoutItemAlignSelf",
-                "layoutItemAbsolute",
-                "layoutItemHSizing",
-                "layoutItemVSizing",
-                "touched",
-                "appliedTokens",
-                "interactions",
-                "variantProperties",
-                "pluginData",
-                "grids",
-                "guides",
-                "maskType",
-                "svgAttrs",
-                "svgViewbox",
-                "svgDefs",
-                "layoutGapType",
-                "layoutPaddingType",
-                "layoutJustifyItems",
-                "layoutGridDir",
-                "componentRoot",
-                "mainInstance",
-                "layoutItemZIndex",
-                "exports",
-                "hideInViewer",
-                "strokes",
-            ],
-        );
-        if typ == "text" {
-            preserve_source_within(node, v, &["content", "positionData"], 256 * 1024);
+        let cells = grid_cells(v);
+        for child in children {
+            self.add_layer(&child, created, abs, cells.get(child.as_str()).copied(), depth + 1)?;
         }
-        for key in ["componentId", "componentFile", "shapeRef", "variantId"] {
-            if let Some(value) = string(v, key)
-                && value.len() <= 1024
-            {
-                node.plugin_data.insert(format!("penpot.{key}"), value.to_owned());
+        // `shapes` may be incomplete in a damaged or partially exported document. Recover
+        // genuine descendants through their declared parent without reordering listed layers.
+        let children_by_parent = self.children_by_parent;
+        if let Some(unlinked) = children_by_parent.get(id) {
+            for child in unlinked {
+                if !self.seen.contains(child) {
+                    warn(self.warnings, "Penpot group omitted a child from its stacking list; recovered it by parentId".into());
+                    self.add_layer(child, created, abs, cells.get(child.as_str()).copied(), depth + 1)?;
+                }
             }
         }
-        node.constrain_proportions = v.get("proportionLock").and_then(Value::as_bool) == Some(true);
-        if let NodeKind::Text(text) = &mut node.kind
-            && let Some(paints) = uniform_text_fills(text)
-        {
-            node.fills = paints;
-            text.style.fills = None;
-            for run in &mut text.runs {
-                run.style.fills = None;
-            }
-        }
-        if typ == "text" && node.fills.is_empty() {
-            node.fills.push(Paint::solid(Color::BLACK));
-        }
-        let radius = number(v, "rx", 0.0).max(0.0);
-        node.corners.radii =
-            [number(v, "r1", radius).max(0.0), number(v, "r2", radius).max(0.0), number(v, "r3", radius).max(0.0), number(v, "r4", radius).max(0.0)];
-        node.transform = parent_abs.inverse() * abs;
-        if let Some(stroke) = list(v, "strokes").next() {
-            node.stroke.weight = number(stroke, "strokeWidth", 1.0).clamp(0.0, 10000.0);
-            node.stroke.align = match string(stroke, "strokeAlignment") {
-                Some("center") => StrokeAlign::Center,
-                Some("outer") | Some("outside") => StrokeAlign::Outside,
-                _ => StrokeAlign::Inside,
-            };
-            node.stroke.join = match string(stroke, "strokeJoin") {
-                Some("round") => StrokeJoin::Round,
-                Some("bevel") => StrokeJoin::Bevel,
-                _ => StrokeJoin::Miter,
-            };
-            let cap = match string(stroke, "strokeCapStart") {
-                Some("round") => StrokeCap::Round,
-                Some("square") => StrokeCap::Square,
-                Some("line-arrow") => StrokeCap::LineArrow,
-                Some("triangle-arrow") => StrokeCap::TriangleArrow,
-                _ => StrokeCap::None,
-            };
-            node.stroke.cap_start = cap;
-            node.stroke.cap_end = match string(stroke, "strokeCapEnd") {
-                Some("round") => StrokeCap::Round,
-                Some("square") => StrokeCap::Square,
-                Some("line-arrow") => StrokeCap::LineArrow,
-                Some("triangle-arrow") => StrokeCap::TriangleArrow,
-                _ => cap,
-            };
-            let w = node.stroke.weight;
-            node.stroke.dashes = match string(stroke, "strokeStyle") {
-                Some("dotted") => vec![0.0, w + 5.0],
-                Some("dashed") => vec![w + 10.0, w + 10.0],
-                Some("mixed") => vec![w + 5.0, w + 5.0, w + 1.0, w + 5.0],
-                _ => Vec::new(),
-            };
-            if string(stroke, "strokeStyle") == Some("dotted") {
-                let dot = |cap: StrokeCap| if matches!(cap, StrokeCap::LineArrow | StrokeCap::TriangleArrow) { cap } else { StrokeCap::Round };
-                (node.stroke.cap_start, node.stroke.cap_end) = (dot(node.stroke.cap_start), dot(node.stroke.cap_end));
-            }
-        }
+        Ok(())
     }
-    if v.get("layout").is_some() || v.get("layoutMode").is_some() {
-        let layout = layout_props(v, warnings);
-        if let Some(node) = doc.node_mut(created) {
-            if !node.kind.is_frame_like() {
-                warn(warnings, "Layout on non-frame-like Penpot layer retained as metadata".into());
-            } else {
-                node.layout = layout;
-            }
-        }
-    }
-    let mut children: Vec<String> = list(v, "shapes").filter_map(Value::as_str).map(str::to_owned).collect();
-    if let Some(layout) =
-        doc.node_mut(created).and_then(|n| n.layout.as_mut()).filter(|l| matches!(l.mode, LayoutMode::Horizontal | LayoutMode::Vertical))
-    {
-        layout.reverse_z = true;
-        children.reverse();
-    }
-    let cells = grid_cells(v);
-    for child in children {
-        add_layer(
-            z,
-            base,
-            shapes,
-            children_by_parent,
-            svg_defs,
-            masters,
-            &child,
-            created,
-            abs,
-            cells.get(child.as_str()).copied(),
-            doc,
-            images,
-            image_bytes,
-            inflate_budget,
-            svg_bytes,
-            warnings,
-            seen,
-            depth + 1,
-            count,
-        )?;
-    }
-    // `shapes` may be incomplete in a damaged or partially exported document. Recover
-    // genuine descendants through their declared parent without reordering listed layers.
-    if let Some(unlinked) = children_by_parent.get(id) {
-        for child in unlinked {
-            if !seen.contains(child) {
-                warn(warnings, "Penpot group omitted a child from its stacking list; recovered it by parentId".into());
-                add_layer(
-                    z,
-                    base,
-                    shapes,
-                    children_by_parent,
-                    svg_defs,
-                    masters,
-                    child,
-                    created,
-                    abs,
-                    cells.get(child.as_str()).copied(),
-                    doc,
-                    images,
-                    image_bytes,
-                    inflate_budget,
-                    svg_bytes,
-                    warnings,
-                    seen,
-                    depth + 1,
-                    count,
-                )?;
-            }
-        }
-    }
-    finish_layout(doc, created, v, warnings);
-    finish_masked_group(doc, created, v, warnings);
-    Ok(())
 }
 
 /// Exact font-provider references supplied by Penpot's text content tree.

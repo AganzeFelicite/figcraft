@@ -746,46 +746,13 @@ impl<'a> Exporter<'a> {
             }
         }
         let parent_node = node.parent.and_then(|p| self.node(p));
-        let parent_layout = parent_node.and_then(|p| p.layout.as_ref());
         let mut fields = Map::new();
         fields.insert("parentId".into(), json!(parent));
         fields.insert("frameId".into(), json!(frame));
         fields.insert("pageId".into(), json!(page_id));
         fields.insert("fills".into(), Value::Array(self.paints(&node.fills, false)));
         fields.insert("strokes".into(), Value::Array(self.strokes(node, typ)));
-        if !node.visible {
-            fields.insert("hidden".into(), json!(true));
-        }
-        if node.locked {
-            fields.insert("blocked".into(), json!(true));
-        }
-        if (node.opacity - 1.0).abs() > 1e-6 {
-            fields.insert("opacity".into(), num(f64::from(node.opacity)));
-        }
-        if let Some(name) = blend_name(node.blend).filter(|n| *n != "normal") {
-            fields.insert("blendMode".into(), json!(name));
-        }
-        fields.insert("proportionLock".into(), json!(node.constrain_proportions));
-        fields.insert(
-            "constraintsH".into(),
-            json!(match node.constraints.horizontal {
-                HConstraint::Left => "left",
-                HConstraint::Right => "right",
-                HConstraint::LeftRight => "leftright",
-                HConstraint::Center => "center",
-                HConstraint::Scale => "scale",
-            }),
-        );
-        fields.insert(
-            "constraintsV".into(),
-            json!(match node.constraints.vertical {
-                VConstraint::Top => "top",
-                VConstraint::Bottom => "bottom",
-                VConstraint::TopBottom => "topbottom",
-                VConstraint::Center => "center",
-                VConstraint::Scale => "scale",
-            }),
-        );
+        appearance_fields(node, &mut fields);
         self.effects(node, &mut fields);
         if matches!(typ, "rect" | "frame") {
             for (i, key) in ["r1", "r2", "r3", "r4"].iter().enumerate() {
@@ -798,15 +765,7 @@ impl<'a> Exporter<'a> {
         if typ == "bool"
             && let NodeKind::BooleanOp { op } = node.kind
         {
-            fields.insert(
-                "boolType".into(),
-                json!(match op {
-                    BoolOp::Union => "union",
-                    BoolOp::Subtract => "difference",
-                    BoolOp::Intersect => "intersection",
-                    BoolOp::Exclude => "exclude",
-                }),
-            );
+            fields.insert("boolType".into(), json!(bool_type(op)));
         }
         if typ == "frame" {
             fields.insert("showContent".into(), json!(!node.clip));
@@ -831,53 +790,11 @@ impl<'a> Exporter<'a> {
                 node.name
             ));
         }
-        if parent_layout.is_some() || node.child_layout != figcraft_doc::ChildLayout::default() {
-            self.child_layout(node, &mut fields);
-        }
-        if let Some(parent) = parent_node
-            && self.unchanged_layouts.contains(&parent.id)
-        {
-            for key in [
-                "layoutItemHSizing",
-                "layoutItemVSizing",
-                "layoutItemAbsolute",
-                "layoutItemMargin",
-                "layoutItemMarginType",
-                "layoutItemAlignSelf",
-                "layoutItemMinW",
-                "layoutItemMaxW",
-                "layoutItemMinH",
-                "layoutItemMaxH",
-            ] {
-                if let Some(value) = source_value(node, key) {
-                    fields.insert(key.into(), value);
-                }
-            }
-        }
+        self.item_fields(node, parent_node, &mut fields);
         if typ == "text"
             && let NodeKind::Text(text) = &node.kind
         {
-            fields.insert("fills".into(), json!([]));
-            let unchanged = matches_fingerprint(node, "text", text_fingerprint(node));
-            match (unchanged, source_value(node, "content")) {
-                (true, Some(content)) => {
-                    fields.insert("content".into(), content);
-                    if let Some(position) = source_value(node, "positionData") {
-                        fields.insert("positionData".into(), position);
-                    }
-                }
-                _ => {
-                    fields.insert("content".into(), self.text_content(node, text));
-                }
-            }
-            fields.insert(
-                "growType".into(),
-                json!(match text.auto_resize {
-                    TextAutoResize::WidthAndHeight => "auto-width",
-                    TextAutoResize::Height => "auto-height",
-                    TextAutoResize::None | TextAutoResize::Truncate => "fixed",
-                }),
-            );
+            self.text_fields(node, text, &mut fields);
         }
         if typ == "svg-raw"
             && let Some(content) = svg_raw_source(node)
@@ -904,6 +821,60 @@ impl<'a> Exporter<'a> {
         }
         objects.push((pid.clone(), shape));
         Some(pid)
+    }
+
+    /// A layer's fields as an auto layout child: its own, and the source's while its parent's layout
+    /// is unchanged.
+    fn item_fields(&mut self, node: &Node, parent_node: Option<&Node>, fields: &mut Map<String, Value>) {
+        if parent_node.and_then(|p| p.layout.as_ref()).is_some() || node.child_layout != figcraft_doc::ChildLayout::default() {
+            self.child_layout(node, fields);
+        }
+        if let Some(parent) = parent_node
+            && self.unchanged_layouts.contains(&parent.id)
+        {
+            for key in [
+                "layoutItemHSizing",
+                "layoutItemVSizing",
+                "layoutItemAbsolute",
+                "layoutItemMargin",
+                "layoutItemMarginType",
+                "layoutItemAlignSelf",
+                "layoutItemMinW",
+                "layoutItemMaxW",
+                "layoutItemMinH",
+                "layoutItemMaxH",
+            ] {
+                if let Some(value) = source_value(node, key) {
+                    fields.insert(key.into(), value);
+                }
+            }
+        }
+    }
+
+    /// A text layer's fields: its content (the source's while its text is unchanged) and how it grows;
+    /// its fills are in the content.
+    fn text_fields(&mut self, node: &Node, text: &figcraft_doc::TextData, fields: &mut Map<String, Value>) {
+        fields.insert("fills".into(), json!([]));
+        let unchanged = matches_fingerprint(node, "text", text_fingerprint(node));
+        match (unchanged, source_value(node, "content")) {
+            (true, Some(content)) => {
+                fields.insert("content".into(), content);
+                if let Some(position) = source_value(node, "positionData") {
+                    fields.insert("positionData".into(), position);
+                }
+            }
+            _ => {
+                fields.insert("content".into(), self.text_content(node, text));
+            }
+        }
+        fields.insert(
+            "growType".into(),
+            json!(match text.auto_resize {
+                TextAutoResize::WidthAndHeight => "auto-width",
+                TextAutoResize::Height => "auto-height",
+                TextAutoResize::None | TextAutoResize::Truncate => "fixed",
+            }),
+        );
     }
 
     fn svg_attrs(&self, node: &Node, typ: &str) -> Option<Value> {
@@ -1804,5 +1775,52 @@ impl<'a> Exporter<'a> {
         root.insert("$themes".into(), Value::Array(themes));
         root.insert("$metadata".into(), json!({"tokenSetOrder": order, "activeThemes": active_themes, "activeSets": active_sets}));
         serde_json::to_string_pretty(&Value::Object(root)).ok()
+    }
+}
+
+/// A layer's visibility, lock, opacity, blend, proportion lock and constraints as Penpot fields.
+fn appearance_fields(node: &Node, fields: &mut Map<String, Value>) {
+    if !node.visible {
+        fields.insert("hidden".into(), json!(true));
+    }
+    if node.locked {
+        fields.insert("blocked".into(), json!(true));
+    }
+    if (node.opacity - 1.0).abs() > 1e-6 {
+        fields.insert("opacity".into(), num(f64::from(node.opacity)));
+    }
+    if let Some(name) = blend_name(node.blend).filter(|n| *n != "normal") {
+        fields.insert("blendMode".into(), json!(name));
+    }
+    fields.insert("proportionLock".into(), json!(node.constrain_proportions));
+    fields.insert(
+        "constraintsH".into(),
+        json!(match node.constraints.horizontal {
+            HConstraint::Left => "left",
+            HConstraint::Right => "right",
+            HConstraint::LeftRight => "leftright",
+            HConstraint::Center => "center",
+            HConstraint::Scale => "scale",
+        }),
+    );
+    fields.insert(
+        "constraintsV".into(),
+        json!(match node.constraints.vertical {
+            VConstraint::Top => "top",
+            VConstraint::Bottom => "bottom",
+            VConstraint::TopBottom => "topbottom",
+            VConstraint::Center => "center",
+            VConstraint::Scale => "scale",
+        }),
+    );
+}
+
+/// A boolean operation's Penpot `boolType`.
+fn bool_type(op: BoolOp) -> &'static str {
+    match op {
+        BoolOp::Union => "union",
+        BoolOp::Subtract => "difference",
+        BoolOp::Intersect => "intersection",
+        BoolOp::Exclude => "exclude",
     }
 }
