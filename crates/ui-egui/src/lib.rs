@@ -297,7 +297,10 @@ mod state;
 pub(crate) use clock::repaint_in;
 pub use clock::{AUTO_SAVE_SECS, AUTOSAVE_SECS, FrameClock, ToastClock};
 pub(crate) use open::{drop_overlay, dropped_bytes, is_document, opens};
-pub use services::{ContentsFuture, DialogFuture, NoServices, ReadFuture, Services, browser_can_read, egui_copy_png, egui_copy_text, unreadable};
+pub use services::{
+    ContentsFuture, DialogFuture, MAX_CLIPBOARD_PNG_BYTES, NoServices, ReadFuture, Services, browser_can_read, egui_copy_png, egui_copy_text,
+    unreadable,
+};
 use services::{DialogDone, PickFuture, Picked, RepaintWaker};
 pub use state::{
     AutoSaveEncoding, CANVAS_MIN, LEFT_PANEL, LeftTab, MobilePanel, NARROW_WIDTH, PANEL_DEFAULT, RIGHT_PANEL, RightTab, TitleBar, fit_panels,
