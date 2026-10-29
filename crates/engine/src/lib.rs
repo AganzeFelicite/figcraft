@@ -295,6 +295,8 @@ mod gesture_preview_tests;
 #[cfg(test)]
 mod gradient_shorthand_tests;
 #[cfg(test)]
+mod guide_snap_tests;
+#[cfg(test)]
 mod hide_publishing_tests;
 #[cfg(test)]
 mod history_behaviour_tests;
