@@ -306,11 +306,14 @@ fn page_section(app: &mut FigApp, ui: &mut Ui, doc: &Document) {
     };
     widgets::section_header(ui, tr("Page"), &[], false);
     let mut open_picker = false;
+    let mut swatch_top = None;
     let mut new_hex = None;
     row(ui, 32.0, |ui| {
         let p = Paint::solid(bg);
-        if widgets::swatch(ui, &p, 16.0).clicked() {
+        let sw = widgets::swatch(ui, &p, 16.0);
+        if sw.clicked() {
             open_picker = true;
+            swatch_top = Some(sw.rect.min.y);
         }
         if let Some(h) = widgets::text_field(ui, Id::unique("pagebg"), &bg.to_hex(), 96.0, "") {
             new_hex = Some(h);
@@ -318,7 +321,7 @@ fn page_section(app: &mut FigApp, ui: &mut Ui, doc: &Document) {
         widgets::label(ui, "100 %", t.text);
     });
     if open_picker {
-        app.ui.picker = Some(crate::colorpicker::PickerTarget::PageBackground);
+        app.toggle_picker(crate::colorpicker::PickerTarget::PageBackground, swatch_top);
     }
     if let Some(h) = new_hex
         && let Some(c) = figcraft_color::Color::from_hex_or_name(&h)
