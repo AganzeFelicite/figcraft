@@ -86,7 +86,7 @@ pub const PROMPTS: &[PromptDef] = &[
         ],
         template: r#"Fix the open comment threads in this FigCraft document.
 
-1. Read them: run_command {"command": "comment.list", "params": {"page": "{page}", "filter": "open"}}. Each thread has an id, text, pageName, frameName, anchor (a node id; null if the comment is only pinned to a page point), x/y, author, replies and link.
+1. Read them: run_command {"command": "comment.list", "params": {"page": "{page}", "filter": "open"}}. Each thread has an id, text, pageName, frameName, anchor (a node id; null if the comment is only pinned to a page point), x/y, author, mentions (the names a message @mentions: {name, known, you}), replies and link.
 2. For each thread, in list order:
    a. Inspect the anchor with get_node {"id": <anchor>, "depth": 2} (or get_node on frame if anchor is null), and look at the frame: screenshot {"ids": [<frame>]}.
    b. Make the smallest change that answers the comment with set_properties, create_node or run_command. Put the edits for one thread in one batch so the user can undo them in one step. Do not edit layers the comment does not mention.
@@ -104,7 +104,7 @@ pub const PROMPTS: &[PromptDef] = &[
         template: r#"Watch for new feedback in this FigCraft document for {minutes} minutes.
 
 1. Start the watcher: wait_for_changes {"after": 0, "timeoutMs": 0, "topics": ["comments"]}. Keep its `cursor` and note `reset`; if the returned cursor is 0, remember that the initial cursor was zero.
-2. Handle what is already open: run_command {"command": "comment.list", "params": {"page": "all", "filter": "open"}}. For each thread: inspect the anchor and frame, make the smallest change (one batch per thread), comment.reply with what changed (author "AI"), verify, then comment.resolve. Leave ambiguous threads open with a question.
+2. Handle what is already open: run_command {"command": "comment.list", "params": {"page": "all", "filter": "open"}}. For each thread: inspect the anchor and frame, make the smallest change (one batch per thread), comment.reply with what changed (it is signed with your own agent name), verify, then comment.resolve. Leave ambiguous threads open with a question.
 3. Then loop until the budget ends: wait_for_changes {"after": <cursor>, "timeoutMs": 20000, "topics": ["comments"]}. Set cursor to the result's cursor. For each comment.added or comment.replied event, read the thread with comment.list. If its latest message is your own reply, skip it (comment.reply emits comment.replied too); otherwise fix it the same way. If reset is true, dropped is greater than 0, or the cursor was 0 before this poll and the returned cursor is greater than 0, re-read every open thread and continue with the returned cursor.
 4. Stop after {minutes} minutes; summarize the threads you fixed and the ones still open (and why)."#,
         defaults: &[("minutes", "5")],

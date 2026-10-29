@@ -383,33 +383,24 @@ fn shape_text(text: &TextData) -> ShapedText {
         let Some(Some(primary)) = faces.get(st_idx) else { continue };
         let size = sanitize_size(style.font_size);
         let spacing = style.letter_spacing.resolve(size);
+        let span_fallbacks = style_fallbacks.get(st_idx).unwrap_or(&fallbacks);
+        // The face for the grapheme cluster starting at `i` (clipped to the span).
+        let face_at = |i: usize| {
+            let to = (i + 1..*end).find(|&j| cluster_start.get(j).copied().unwrap_or(true)).unwrap_or(*end);
+            cluster_face(chars.get(i..to).unwrap_or(&[]), primary, &emoji, span_fallbacks)
+        };
         // Segment by face.
         let mut seg_start = *start;
         while seg_start < *end {
-            let face_for = |c: char| -> Arc<Face> {
-                // Emoji take a colour face before a face without colour glyphs (the style's own or a
-                // symbol font), which would draw them in one colour.
-                if is_emoji(c)
-                    && !primary.has_color()
-                    && let Some(f) = emoji.iter().find(|f| f.has_char(c))
-                {
-                    return f.clone();
-                }
-                if is_line_break(c) || primary.has_char(c) {
-                    return primary.clone();
-                }
-                let fallbacks = style_fallbacks.get(st_idx).unwrap_or(&fallbacks);
-                fallbacks.iter().find(|f| f.has_char(c)).cloned().unwrap_or_else(|| primary.clone())
-            };
             let first = chars.get(seg_start).copied().unwrap_or(' ');
-            let face = face_for(first);
+            let face = face_at(seg_start);
             let level = level_at(seg_start);
             let mut seg_end = seg_start + 1;
             while seg_end < *end
                 && chars.get(seg_end).is_some_and(|c| {
                     !is_line_break(*c)
                         && !is_line_break(first)
-                        && (!cluster_start.get(seg_end).copied().unwrap_or(true) || face_for(*c).id == face.id)
+                        && (!cluster_start.get(seg_end).copied().unwrap_or(true) || face_at(seg_end).id == face.id)
                 })
                 && level_at(seg_end) == level
             {
@@ -442,6 +433,44 @@ fn shape_text(text: &TextData) -> ShapedText {
     ShapedText { chars, styles, faces, fallbacks, items, bidi, cluster_start }
 }
 
+/// The face a grapheme cluster `cl` is shaped with. A letter and its marks come from one face that
+/// has them all: a mark the letter's face lacks would draw as a missing glyph beside it, and a mark
+/// from another face would sit apart from it (#1478).
+fn cluster_face(cl: &[char], primary: &Arc<Face>, emoji: &[Arc<Face>], fallbacks: &[Arc<Face>]) -> Arc<Face> {
+    pick_cluster_face(cl, primary, emoji, fallbacks, |f, c| f.has_char(c), |f| f.has_color()).clone()
+}
+
+/// [`cluster_face`]'s rule over any kind of face (`has`: whether a face has a char's glyph,
+/// `color`: whether it has colour glyphs), so it can be checked without fonts.
+pub(crate) fn pick_cluster_face<'a, F>(
+    cl: &[char],
+    primary: &'a F,
+    emoji: &'a [F],
+    fallbacks: &'a [F],
+    has: impl Fn(&F, char) -> bool,
+    color: impl Fn(&F) -> bool,
+) -> &'a F {
+    let c = cl.first().copied().unwrap_or(' ');
+    // Emoji take a colour face before a face without colour glyphs (the style's own or a symbol
+    // font), which would draw them in one colour.
+    if is_emoji(c)
+        && !color(primary)
+        && let Some(f) = emoji.iter().find(|f| has(f, c))
+    {
+        return f;
+    }
+    // Joiners and variation selectors need no glyph: shaping hides them.
+    let covers = |f: &F| {
+        cl.iter().all(|&m| has(f, m) || matches!(m, '\u{034F}' | '\u{200C}' | '\u{200D}' | '\u{FE00}'..='\u{FE0F}' | '\u{E0100}'..='\u{E01EF}'))
+    };
+    if is_line_break(c) || covers(primary) {
+        return primary;
+    }
+    // No face has the whole cluster: the letter's own face, as for a lone letter.
+    let own = || if has(primary, c) { Some(primary) } else { fallbacks.iter().find(|f| has(f, c)) };
+    fallbacks.iter().find(|f| covers(f)).or_else(own).unwrap_or(primary)
+}
+
 fn line_break_after(items: &[Item], end: usize) -> bool {
     end.checked_sub(1).and_then(|i| items.get(i)).is_some_and(|item| is_line_break(item.ch))
 }
@@ -470,6 +499,30 @@ fn safe_break_index(items: &[Item], chars: &[char], cluster_start: &[bool], line
     (line_start + 1..brk).rev().find(|&k| safe(k)).or(carry).unwrap_or(brk)
 }
 
+/// How much wider than its box a saved line may come out in the fonts at hand before the saved
+/// breaks are given up: past that the font isn't the one the file was laid out with (a stand-in),
+/// and the text wraps by its own measure.
+const SAVED_LINE_SLACK: f64 = 1.03;
+
+/// Saved line starts being followed ([`TextData::saved_breaks_for`]).
+struct SavedStarts<'a> {
+    starts: &'a [usize],
+    next: usize,
+}
+
+impl SavedStarts<'_> {
+    /// Whether a line starting at char `from` breaks before char `at`: a saved start lies in
+    /// `(from, at]` (one inside a cluster or a run of spaces breaks at the next glyph after it).
+    fn due(&mut self, from: usize, at: usize) -> bool {
+        while self.starts.get(self.next).is_some_and(|s| *s <= from) {
+            self.next += 1;
+        }
+        self.starts.get(self.next).is_some_and(|s| *s <= at)
+    }
+}
+
+/// The lines (item range, paragraph end, paragraph), wrapped by measure or at `saved` line starts;
+/// None when a saved line would overflow its box by more than [`SAVED_LINE_SLACK`].
 fn break_lines(
     items: &[Item],
     chars: &[char],
@@ -479,7 +532,8 @@ fn break_lines(
     rtl_para_at: &impl Fn(usize) -> bool,
     hang_start: bool,
     hang_end: bool,
-) -> Vec<(usize, usize, bool, usize)> {
+    mut saved: Option<SavedStarts>,
+) -> Option<Vec<(usize, usize, bool, usize)>> {
     let mut lines: Vec<(usize, usize, bool, usize)> = Vec::new(); // item range, paragraph end, paragraph
     let mut line_start = 0;
     let mut i = 0;
@@ -517,18 +571,28 @@ fn break_lines(
         let hung = items.get(line_start).filter(|f| hang_start && ltr && opens(f.ch)).map_or(0.0, |f| f.adv)
             + if hang_end && ltr && closes(it.ch) { w } else { 0.0 };
         if let Some(maxw) = wrap
-            && x + w - it.spacing > maxw - line_indent + hung + 1e-6
             && i > line_start
             && !it.is_space()
         {
-            let brk = safe_break_index(items, chars, cluster_start, line_start, last_break.filter(|b| *b >= line_start).map(|b| b + 1).unwrap_or(i));
-            lines.push((line_start, brk, false, para));
-            line_start = brk;
-            i = brk;
-            x = 0.0;
-            last_break = None;
-            para_first_line = false;
-            continue;
+            let (width, room) = (x + w - it.spacing, maxw - line_indent + hung);
+            let line_char = items.get(line_start).map_or(0, |f| f.char_start);
+            let brk = match saved.as_mut().map(|s| s.due(line_char, it.char_start)) {
+                Some(true) => Some(i),
+                Some(false) if width > room * SAVED_LINE_SLACK + 1.0 => return None,
+                Some(false) => None,
+                None => (width > room + 1e-6).then(|| {
+                    safe_break_index(items, chars, cluster_start, line_start, last_break.filter(|b| *b >= line_start).map(|b| b + 1).unwrap_or(i))
+                }),
+            };
+            if let Some(brk) = brk {
+                lines.push((line_start, brk, false, para));
+                line_start = brk;
+                i = brk;
+                x = 0.0;
+                last_break = None;
+                para_first_line = false;
+                continue;
+            }
         }
         x += w;
         if items.get(i + 1).is_some_and(|next| crate::breaks::break_between(it.ch, next.ch)) {
@@ -540,7 +604,7 @@ fn break_lines(
         lines.push((line_start, items.len(), true, para));
     }
 
-    lines
+    Some(lines)
 }
 
 #[derive(Clone, Copy)]
@@ -788,7 +852,10 @@ pub fn layout(text: &TextData, box_width: Option<f64>, box_height: Option<f64>) 
         TextAutoResize::WidthAndHeight => None,
         _ => box_width.filter(|w| w.is_finite() && *w > 0.0),
     };
-    let lines = break_lines(&items, &chars, &cluster_start, wrap, &line_indent_of, &rtl_para_at, hang_start, hang_end);
+    let breaks = |saved| break_lines(&items, &chars, &cluster_start, wrap, &line_indent_of, &rtl_para_at, hang_start, hang_end, saved);
+    // Where the file saved its line breaks, they win while the text and box are as saved.
+    let saved = wrap.and_then(|w| text.saved_breaks_for(w)).map(|starts| SavedStarts { starts, next: 0 });
+    let lines = saved.and_then(|s| breaks(Some(s))).or_else(|| breaks(None)).unwrap_or_default();
     // Line metrics and positions.
     let default_style = styles.first().cloned().unwrap_or_default();
     let default_face = faces.first().cloned().flatten();
