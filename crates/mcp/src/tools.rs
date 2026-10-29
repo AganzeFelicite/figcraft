@@ -155,6 +155,9 @@ pub fn tool_definitions() -> Vec<Value> {
                     "name": string("Layer name"),
                     "text": string("Characters, for type text"),
                     "path": string("SVG path data, for type vector (e.g. \"M0 0 L100 0 L50 80 Z\")"),
+                    "points": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}, "description": "For type vector, instead of path: the points [[x, y], ...]"},
+                    "closed": boolean("For type vector: close the path"),
+                    "select": boolean("Select the new layer (default true)"),
                     "props": {"type": "object", "description": "Any set_properties keys applied at creation, e.g. {\"fill\":\"#3366FF\",\"cornerRadius\":12,\"fontSize\":24,\"layout\":\"vertical\",\"gap\":8,\"padding\":16}"},
                 }),
                 &["type"],
@@ -289,6 +292,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "shift": boolean("Shift held"),
                     "alt": boolean("Alt/Option held"),
                     "cmd": boolean("Cmd (macOS) / Ctrl held"),
+                    "ctrl": boolean("Ctrl held (the Control key on macOS)"),
                     "pressure": num("Pen pressure 0-1 (the Pencil records it as the stroke's width profile; a drag starts with it)"),
                     "pressureTo": num("Pen pressure 0-1 at a drag's end (interpolated along it)"),
                 }),
@@ -301,7 +305,7 @@ pub fn tool_definitions() -> Vec<Value> {
             "Press key",
             "Press a key or shortcut as if typed on the canvas: a menu shortcut (e.g. {\"key\":\"G\",\"cmd\":true} groups, {\"key\":\"A\",\"alt\":true,\"shift\":false} …), a tool key (R, O, T, F, V…), Escape, Delete, Enter, arrows (nudge; shift = big nudge). While editing text, keys go to the text editor (Backspace, Delete, Left, Right, Home, End, Enter, Escape, SelectAll).",
             obj(
-                json!({"key": string("Key name: a letter/digit, Escape, Delete, Backspace, Enter, ArrowLeft…"), "shift": boolean("Shift"), "alt": boolean("Alt/Option"), "cmd": boolean("Cmd/Ctrl")}),
+                json!({"key": string("Key name: a letter/digit, Escape, Delete, Backspace, Enter, ArrowLeft…"), "shift": boolean("Shift"), "alt": boolean("Alt/Option"), "cmd": boolean("Cmd/Ctrl"), "ctrl": boolean("Ctrl (the Control key on macOS)")}),
                 &["key"],
             ),
             false,
@@ -434,12 +438,45 @@ fn friendly_params(p: &mut Value) {
 
 // ---------- dispatch ----------
 
+/// Refuse argument names `schema` doesn't list, at the top and in the objects it describes inside
+/// (a batch's steps); objects it leaves open (`params`) take any. `path` leads the names in the
+/// error (`commands[0].`).
+fn refuse_unknown_args(schema: &Value, args: &Value, path: &str) -> Result<(), String> {
+    if let (Some(props), Some(given)) = (schema.get("properties").and_then(Value::as_object), args.as_object()) {
+        let unknown: Vec<String> = given.keys().filter(|k| !props.contains_key(*k)).map(|k| format!("`{path}{k}`")).collect();
+        if !unknown.is_empty() {
+            let s = if unknown.len() == 1 { "" } else { "s" };
+            let takes: Vec<&str> = props.keys().map(String::as_str).collect();
+            let takes = if takes.is_empty() { "none".to_string() } else { takes.join(", ") };
+            return Err(format!("unknown argument{s} {} (it takes {takes})", unknown.join(", ")));
+        }
+        for (k, v) in given {
+            if let Some(inner) = props.get(k) {
+                refuse_unknown_args(inner, v, &format!("{path}{k}."))?;
+            }
+        }
+    }
+    if let (Some(items), Some(list)) = (schema.get("items"), args.as_array()) {
+        for (i, v) in list.iter().enumerate() {
+            refuse_unknown_args(items, v, &format!("{}[{i}].", path.trim_end_matches('.')))?;
+        }
+    }
+    Ok(())
+}
+
 /// Run one tool. Every failure becomes an `isError` result (never a panic).
 pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> ToolResult {
     let a = match args_obj(args) {
         Ok(a) => a,
         Err(e) => return ToolResult::error(e),
     };
+    // Built once: the catalogue is the same on every call.
+    static TOOLS: std::sync::LazyLock<Vec<Value>> = std::sync::LazyLock::new(tool_definitions);
+    if let Some(schema) = TOOLS.iter().find(|t| t.get("name").and_then(Value::as_str) == Some(name)).and_then(|t| t.get("inputSchema"))
+        && let Err(e) = refuse_unknown_args(schema, &Value::Object(a.clone()), "")
+    {
+        return ToolResult::error(e);
+    }
     let r = match name {
         "list_commands" => list_commands(b, &a),
         "run_command" => run_command(b, &a),
