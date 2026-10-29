@@ -8,6 +8,13 @@ use super::{import, import_within_nodes};
 
 const BLACK: [f64; 4] = [0.0, 0.0, 0.0, 1.0];
 
+/// A 1×1 PNG whose red channel is `n`: images the importer can decode, one per `n`.
+fn png(n: u8) -> Vec<u8> {
+    let mut out = Vec::new();
+    image::RgbaImage::from_pixel(1, 1, image::Rgba([n, 0, 0, 255])).write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png).unwrap();
+    out
+}
+
 /// One page with `layers`, one "Symbols" page with `masters`, and `document` changes.
 fn open_doc(doc_json: Value, layers: Vec<Value>, masters: Vec<Value>) -> (Document, Vec<String>) {
     let z = sketch_zip("50.2", 103, doc_json, &[page("P", "Page", layers), page("S", "Symbols", masters)], &[]);
@@ -325,7 +332,6 @@ fn image_overrides_on_shapes() {
     };
     let avatar = styled(rect("Avatar", 0.0, 0.0, 20.0, 20.0), "fills", json!([pattern("images/a.png"), pattern("images/b.png")]));
     let over = json!({"_class": "MSJSONFileReference", "_ref_class": "MSImageData", "_ref": "images/c.png"});
-    let png = |n: u8| -> Vec<u8> { vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, n] };
     let (a, b, c) = (png(1), png(2), png(3));
     let z = sketch_zip(
         "2026.3.1",
@@ -368,7 +374,6 @@ fn image_overrides_survive_layer_style_overrides() {
         "value": {"_class": "style", "fills": [pattern("images/a.png")], "borders": []}}]);
     let avatar = styled(rect("Avatar", 0.0, 0.0, 20.0, 20.0), "fills", json!([pattern("images/a.png")]));
     let over = json!({"_class": "MSJSONFileReference", "_ref_class": "MSImageData", "_ref": "images/c.png"});
-    let png = |n: u8| -> Vec<u8> { vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, n] };
     let (a, c) = (png(1), png(3));
     let z = sketch_zip(
         "2026.3.1",
