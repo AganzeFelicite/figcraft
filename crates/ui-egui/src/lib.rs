@@ -78,6 +78,8 @@ mod export_preview_tests;
 #[cfg(test)]
 mod field_tests;
 #[cfg(test)]
+mod font_menu_regrow_tests;
+#[cfg(test)]
 mod frame_label_tests;
 #[cfg(test)]
 mod gap_handle_tests;
@@ -184,6 +186,8 @@ mod select_all_tests;
 mod shortcut_keys_tests;
 #[cfg(test)]
 mod shortcuts_tests;
+#[cfg(test)]
+mod stroke_row_tests;
 #[cfg(test)]
 mod style_folder_rename_tests;
 #[cfg(test)]
