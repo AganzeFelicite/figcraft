@@ -7,10 +7,10 @@ media control, every transition and easing exist; key/gamepad triggers take cont
 read from controllers on Windows and in the browser. Every rule of the public
 documentation on triggers, actions, overlays, animations, easing, scrolling and interactive
 components is a test case with what it implies (`crates/engine/src/proto_behaviour_tests.rs`, 7
-tests on the model, and `crates/ui-egui/src/present_behaviour_tests.rs`, 14 tests driving the
+tests on the model, and `crates/ui-egui/src/present/behaviour_tests.rs`, 14 tests driving the
 player, 21 gestures among them; presentation tabs: `crates/ui-egui/src/present_tab_tests.rs`, 6
 tests; the tail: `crates/engine/src/proto_tail_tests.rs`, 4 tests, and
-`crates/ui-egui/src/present_tail_tests.rs`, 5 tests), and all pass. Not yet checked against
+`crates/ui-egui/src/present/tail_tests.rs`, 5 tests), and all pass. Not yet checked against
 larger real prototypes. Remaining: 2–5 h.
 
 | Group | Figma | FigCraft | Missing |
@@ -105,7 +105,7 @@ tool; opt-in), **silent** (the documentation doesn't say; the case pins the curr
 
 | Date | Change | Summary |
 |---|---|---|
-| 2026-10-24 | patch | The Triggers row's Missing column no longer lists delays on mouse enter, leave, down and up, which landed on 2026-10-13 (`crates/engine/src/proto_delay_tests.rs`, `crates/ui-egui/src/present_delay_tests.rs`). Numbers unchanged |
+| 2026-10-24 | patch | The Triggers row's Missing column no longer lists delays on mouse enter, leave, down and up, which landed on 2026-10-13 (`crates/engine/src/proto_delay_tests.rs`, `crates/ui-egui/src/present/delay_tests.rs`). Numbers unchanged |
 | 2026-10-24 | patch | Open link to a website first shows a notice that it leaves the prototype, with the link, Open link, Cancel and "Don't show this again", which the desktop app saves with its preferences and the web build keeps until the page reloads (`proto.linkNotice` turns the notice back on); a second link to a website that fires while the notice shows is dropped, and a mail link still opens. Before, the player opened the link at once, also from an After delay trigger. Numbers unchanged |
 | 2026-10-23 | patch | A top-level frame taller (or wider) than the device's screen scrolls with no overflow setting, as Figma's documentation says; before, "No scrolling" frames such as the landing page template's Phone frame only clipped. Content past a frame's own edges still scrolls only as its overflow allows. Checked in the app on macOS. Numbers unchanged |
 | 2026-10-22 | minor | Change to, set variable and set variable mode lay out what they change in the player as the canvas does: text sizes to what it shows and hugging frames follow (an instance with a longer label changed to the main's width; a bound text kept its old size). Two player tests. Breadth and ready unchanged. |

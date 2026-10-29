@@ -131,7 +131,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 - **Missing:** a corpus of real documents (design systems, app screens, prototypes) imported and
   compared with Figma's own PNG/SVG/PDF exports.
 - **Evidence:** every corpus in the repo is synthetic (`crates/svg/tests/corpus`, the synthetic
-  design system in `crates/engine/src/synthetic_ds.rs`). Scores were self-graded by the agents that
+  design system in `crates/engine/src/content/synthetic_ds.rs`). Scores were self-graded by the agents that
   built the features.
 - **Impact:** unknown fidelity in auto layout sizing, text metrics, effects and component
   resolution on real files; the numbers in this repo can't be trusted beyond "estimated" until it
@@ -362,7 +362,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   API) and takes `ui.input {gamepad}` on the control channel; widgets react to clicks in a
   presented prototype, on the prototype's own copy; `proto.evaluate` computes expressions (mode
   lookups included) where a layer's interaction would run (`crates/engine/src/proto_tail_tests.rs`,
-  `crates/ui-egui/src/present_tail_tests.rs`, `crates/format/src/rest/gamepad_tests.rs`).
+  `crates/ui-egui/src/present/tail_tests.rs`, `crates/format/src/rest/gamepad_tests.rs`).
 - **Missing:** video triggers (on media hit/end) and play/pause/mute/seek actions (the REST
   importer warns and skips them, `crates/format/src/rest/proto.rs`); controllers on macOS, Linux
   and FreeBSD (the usual Rust controller library links libudev on Linux; a pure-Rust reader per

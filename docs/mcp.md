@@ -60,7 +60,7 @@ Each may be given more than once, as `--flag DIR` or `--flag=DIR`:
 - The roots must be existing folders: a missing one, or a file, stops the server at startup.
   `initialize`'s `instructions` name the folders, so the agent knows where it may work.
 - **What is covered:** everything a call does, because the engine reaches the file system through
-  one module (`crates/engine/src/file_access.rs`), and `crates/engine/clippy.toml` refuses `std::fs`
+  one module (`crates/engine/src/automation/file_access.rs`), and `crates/engine/clippy.toml` refuses `std::fs`
   anywhere else in the engine, so a command added later is covered too. That is `open_file` (and the
   `variables` file it may name), `save_file`, `export {path}`, and through `run_command` / `batch`
   every command that names a file: `file.open`, `file.openRecent` (recent files outside the roots
