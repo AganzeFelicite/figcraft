@@ -96,7 +96,7 @@ pub(crate) fn network(cx: &mut Cx, l: &Value, w: f64, h: f64, fill_open: bool) -
         })
         .collect();
     let winding = winding(l);
-    let regions = if closed { vec![Region { loops: vec![(0..segments.len()).collect()], winding }] } else { Vec::new() };
+    let regions = if closed { vec![Region { loops: vec![(0..segments.len()).collect()], winding, ..Default::default() }] } else { Vec::new() };
     Some(VectorNetwork { vertices, segments, regions })
 }
 
@@ -375,7 +375,7 @@ fn compound(cx: &mut Cx, run: &[&Value], winding: WindingRule) -> Option<VectorN
         return None;
     }
     if !loops.is_empty() {
-        out.regions.push(Region { loops, winding });
+        out.regions.push(Region { loops, winding, ..Default::default() });
     }
     Some(out)
 }
