@@ -329,6 +329,8 @@ struct ShapedText {
     fallbacks: Vec<Arc<Face>>,
     items: Vec<Item>,
     bidi: Option<Bidi>,
+    /// For each char, whether it starts a grapheme cluster.
+    cluster_start: Vec<bool>,
 }
 
 fn shape_text(text: &TextData) -> ShapedText {
@@ -437,15 +439,41 @@ fn shape_text(text: &TextData) -> ShapedText {
         }
     }
 
-    ShapedText { chars, styles, faces, fallbacks, items, bidi }
+    ShapedText { chars, styles, faces, fallbacks, items, bidi, cluster_start }
 }
 
 fn line_break_after(items: &[Item], end: usize) -> bool {
     end.checked_sub(1).and_then(|i| items.get(i)).is_some_and(|item| is_line_break(item.ch))
 }
 
+/// Where a line breaking before item `brk` may break: even an emergency break inside a word keeps a
+/// letter with its trailing mark and a leading vowel with the consonant after it (#1219). Backs up
+/// to such a boundary after `line_start`, or, when the line's first character is in one, carries it
+/// over to the next line with it.
+fn safe_break_index(items: &[Item], chars: &[char], cluster_start: &[bool], line_start: usize, brk: usize) -> usize {
+    let safe = |k: usize| -> bool {
+        let (Some(a), Some(b)) = (items.get(k.wrapping_sub(1)), items.get(k)) else { return true };
+        let at = b.char_start;
+        let Some(&before) = at.checked_sub(1).and_then(|c| chars.get(c)) else { return true };
+        // A break can only fall between two glyphs that are not the same cluster.
+        a.char_end <= at
+            && cluster_start.get(at).copied().unwrap_or(true)
+            && crate::breaks::safe_emergency_break(before, chars.get(at).copied().unwrap_or(before))
+    };
+    if safe(brk) {
+        return brk;
+    }
+    // Capped: a malformed run of thousands of marks must not make layout quadratic.
+    let carry = (brk + 1..items.len().min(brk + 257))
+        .take_while(|&k| items.get(k).is_some_and(|it| it.ch != '\n' && it.ch != LINE_SEPARATOR))
+        .find(|&k| safe(k));
+    (line_start + 1..brk).rev().find(|&k| safe(k)).or(carry).unwrap_or(brk)
+}
+
 fn break_lines(
     items: &[Item],
+    chars: &[char],
+    cluster_start: &[bool],
     wrap: Option<f64>,
     line_indent_of: &impl Fn(usize, bool, usize) -> f64,
     rtl_para_at: &impl Fn(usize) -> bool,
@@ -493,7 +521,7 @@ fn break_lines(
             && i > line_start
             && !it.is_space()
         {
-            let brk = last_break.filter(|b| *b >= line_start).map(|b| b + 1).unwrap_or(i);
+            let brk = safe_break_index(items, chars, cluster_start, line_start, last_break.filter(|b| *b >= line_start).map(|b| b + 1).unwrap_or(i));
             lines.push((line_start, brk, false, para));
             line_start = brk;
             i = brk;
@@ -724,7 +752,7 @@ fn finish_layout(out: &mut TextLayout, finish: LayoutFinish<'_>) {
 /// Lay out `text` for a box of `box_width` (used when the text wraps or aligns; for auto width
 /// pass `None`). `box_height` is used for truncation only.
 pub fn layout(text: &TextData, box_width: Option<f64>, box_height: Option<f64>) -> TextLayout {
-    let ShapedText { chars, styles, faces, fallbacks, items, bidi } = shape_text(text);
+    let ShapedText { chars, styles, faces, fallbacks, items, bidi, cluster_start } = shape_text(text);
     let rtl_para_at = |i: usize| bidi.as_ref().and_then(|b| b.rtl_para.get(i)).copied().unwrap_or(false);
 
     // List markers sit in a gutter (one more per nesting level) and wrapped lines hang at the
@@ -760,7 +788,7 @@ pub fn layout(text: &TextData, box_width: Option<f64>, box_height: Option<f64>) 
         TextAutoResize::WidthAndHeight => None,
         _ => box_width.filter(|w| w.is_finite() && *w > 0.0),
     };
-    let lines = break_lines(&items, wrap, &line_indent_of, &rtl_para_at, hang_start, hang_end);
+    let lines = break_lines(&items, &chars, &cluster_start, wrap, &line_indent_of, &rtl_para_at, hang_start, hang_end);
     // Line metrics and positions.
     let default_style = styles.first().cloned().unwrap_or_default();
     let default_face = faces.first().cloned().flatten();

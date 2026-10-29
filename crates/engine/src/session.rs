@@ -3,8 +3,8 @@ use super::doc_state::{DocState, ENDS_PREVIEW, HistoryEntry, Interaction, PREVIE
 use super::error::{EngineError, Result, bad};
 use super::prefs::{Clipboard, Prefs, UiRequest};
 use super::{
-    Arc, BatchScope, BatchStep, CommandSpec, Document, Node, NodeId, Session, Value, background, board, branches, cmd, components, figcraft_collab,
-    find_command, guard, json, library, live, params, plugins, textpreview, tools,
+    Arc, BatchScope, BatchStep, CommandSpec, Document, Node, NodeId, Session, Value, background, board, branches, cmd, components, events,
+    figcraft_collab, find_command, guard, json, library, live, params, plugins, textpreview, tools,
 };
 
 mod access;
