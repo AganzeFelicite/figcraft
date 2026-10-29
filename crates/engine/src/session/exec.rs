@@ -1,6 +1,6 @@
 use super::{
     Arc, CommandSpec, Document, ENDS_PREVIEW, EngineError, Node, NodeId, PREVIEW_READ_ONLY, Result, Session, Value, bad, board, branches, cmd,
-    components, find_command, guard, library, normalize, params, textpreview,
+    components, events, find_command, guard, library, normalize, params, textpreview,
 };
 
 /// Whether a command, or a batch wrapping one, imports a file passed as Base64 `data`.
@@ -17,6 +17,34 @@ fn command_carries_import_bytes(id: &str, params: &Value) -> bool {
 }
 
 impl Session {
+    /// Append a live event with the active document's identity (nothing without one). Inside a
+    /// [`Session::grouped`] call the event is buffered and committed only when the group succeeds.
+    fn record_event(&mut self, kind: &str, data: Value) {
+        let (document, path) = match self.ds() {
+            Ok(d) => (d.doc.name.clone(), d.path.clone()),
+            Err(_) => (String::new(), None),
+        };
+        if self.group_depth > 0 {
+            self.pending_events.push((kind.to_string(), document, path, data));
+        } else {
+            self.events.push(kind, &document, path.as_deref(), data);
+        }
+    }
+
+    /// Restore the batch context an inner command had at entry when it panicked.
+    pub(crate) fn restore_after_internal_error(&mut self, group_depth: usize, pending_events: usize) {
+        self.group_depth = group_depth;
+        self.pending_events.truncate(pending_events);
+    }
+
+    /// Commit events buffered by a successful group.
+    pub(super) fn flush_pending_events(&mut self) {
+        let pending = std::mem::take(&mut self.pending_events);
+        for (kind, document, path, data) in pending {
+            self.events.push(&kind, &document, path.as_deref(), data);
+        }
+    }
+
     /// Run a command by id. Mutations become one undo step; a failure or panic leaves the document
     /// as it was.
     pub fn execute(&mut self, id: &str, params: &Value) -> Result<Value> {
@@ -47,6 +75,10 @@ impl Session {
         let before = self.ds().ok().map(|d| (d.doc.clone(), d.selection.clone(), d.page, d.uid));
         // Cut and copy write the clipboard before a later check can refuse the command.
         let clipboard_before = self.clipboard.clone();
+        // An inner command of a batch can panic while the outer group is still open; remember the
+        // context so the panic does not clear the group's buffered events.
+        let group_depth_before = self.group_depth;
+        let pending_events_before = self.pending_events.len();
         let result = guard::run(id, || (spec.run)(self, params))
             .and_then(|v| self.check_instance_structure(id, &before).map(|()| v))
             .and_then(|v| self.check_preview(id, &before).map(|()| v))
@@ -89,7 +121,27 @@ impl Session {
                 self.clipboard = clipboard_before;
             }
         }
+        self.after_comment_command(id, params, &result, group_depth_before, pending_events_before);
         result
+    }
+
+    /// Record the live event a successful mutating `comment.*` command makes. A panic caught by the
+    /// guard can leave a group's event buffer open: restore the depth and buffer it had when the
+    /// command started (`group_depth`, `pending_events`), not the whole session's.
+    fn after_comment_command(&mut self, id: &str, params: &Value, result: &Result<Value>, group_depth: usize, pending_events: usize) {
+        match result {
+            Ok(v) => {
+                if let Some(kind) = events::comment_event_kind(id) {
+                    let comment_id = v.get("id").and_then(Value::as_u64).or_else(|| params.get("id").and_then(params::id_of).map(|n| n.0));
+                    self.record_event(
+                        kind,
+                        serde_json::json!({"command": id, "commentId": comment_id, "reply": v.get("reply").cloned().unwrap_or(Value::Null)}),
+                    );
+                }
+            }
+            Err(EngineError::Internal { .. }) => self.restore_after_internal_error(group_depth, pending_events),
+            Err(_) => {}
+        }
     }
 
     /// A version shown in place of the document is read-only: refuse an edit (it is rolled back).
