@@ -256,6 +256,8 @@ mod effects_tests;
 #[cfg(test)]
 mod export_behaviour_tests;
 #[cfg(test)]
+mod export_bench_tests;
+#[cfg(test)]
 mod export_depth_tests;
 #[cfg(test)]
 mod extended_chain_tests;
@@ -344,6 +346,8 @@ mod nested_override_tests;
 #[cfg(test)]
 mod node_set_refusals_tests;
 #[cfg(test)]
+mod normalize_guard_tests;
+#[cfg(test)]
 mod online_tests;
 #[cfg(test)]
 mod open_issues_tests;
@@ -421,6 +425,8 @@ mod save_disk_changes_tests;
 mod save_format_tests;
 #[cfg(test)]
 mod scale_tool_tests;
+#[cfg(test)]
+mod scaled_instance_tests;
 #[cfg(test)]
 mod section_contents_tests;
 #[cfg(test)]
