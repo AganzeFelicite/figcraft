@@ -247,16 +247,21 @@ fn send(app: &mut FigApp, kind: PointerKind, pos: Pos2, m: &egui::Modifiers) {
 }
 
 /// Right-click at screen `pos`: select what's under the pointer (`deep`: the nested layer), then
-/// open the context menu there.
+/// open the context menu there. A frame's name label counts as the frame, as on a press, so a
+/// label drawn over its section picks the frame, not the section behind it. A layer that is
+/// already selected keeps the whole selection.
 pub fn open_context_menu(app: &mut FigApp, pos: Pos2, deep: bool) {
     let p = app.to_page(pos);
     if let Ok(ds) = app.session.ds() {
         let (doc, page, sel, zoom) = (ds.doc.clone(), ds.page, ds.selection.clone(), ds.view.zoom.max(1e-6));
-        if let Some(leaf) = app.session.hit(&doc, page, p, 2.0 / zoom) {
-            let target = figcraft_doc::geometry::select_target(&doc, leaf, &sel, deep);
-            if !sel.contains(&target) {
-                app.session.set_selection(vec![target]);
-            }
+        // A frame's name label is the frame, as on a press, even where it sits over a section.
+        let label = figcraft_engine::tools::label_at(&doc, page, &app.session.tool.labels, p);
+        let hit = app.session.hit(&doc, page, p, 2.0 / zoom);
+        let target = label.or_else(|| hit.map(|leaf| figcraft_doc::geometry::select_target(&doc, leaf, &sel, deep)));
+        if let Some(target) = target
+            && !sel.contains(&target)
+        {
+            app.session.set_selection(vec![target]);
         }
     }
     app.ui.context_menu = Some((pos, app.session.selection()));
