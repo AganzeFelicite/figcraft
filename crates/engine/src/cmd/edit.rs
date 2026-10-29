@@ -460,7 +460,14 @@ pub fn specs() -> Vec<CommandSpec> {
             }
             ok()
         }),
-        spec!("command.batch", "Run several commands", "{label?, commands: [{command, params, as?}]} (one undo step)", false, |s, p| {
+        spec!("command.batch", "Run several commands", "{label?, onError?, commands: [{command, params, as?}]} (one undo step)", false, |s, p| {
+            // `continue` rolls back only the failed steps and returns one outcome per step.
+            let continue_on_error = match get(p, "onError") {
+                None => false,
+                Some(Value::String(mode)) if mode == "abort" => false,
+                Some(Value::String(mode)) if mode == "continue" => true,
+                Some(_) => return Err(bad("command.batch", "`onError` must be \"abort\" or \"continue\"")),
+            };
             let label = string(p, "label").unwrap_or_else(|| "Batch".into());
             let cmds: Vec<BatchStep> = match get(p, "commands") {
                 Some(Value::Array(a)) => {
@@ -476,7 +483,7 @@ pub fn specs() -> Vec<CommandSpec> {
                 }
                 _ => return Err(bad("command.batch", "`commands` must be an array")),
             };
-            Ok(Value::Array(s.batch(&label, &cmds)?))
+            Ok(Value::Array(if continue_on_error { s.batch_continue(&label, &cmds)? } else { s.batch(&label, &cmds)? }))
         }),
         spec!("edit.repeat", "Repeat last command", "{}", true, |s, _| {
             let Some((id, p)) = s.last_command.clone().filter(|(id, _)| id != "edit.repeat") else {

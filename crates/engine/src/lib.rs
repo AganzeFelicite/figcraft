@@ -179,6 +179,8 @@ mod arc_handles_tests;
 #[cfg(test)]
 mod autosave_tests;
 #[cfg(test)]
+mod batch_continue_events_tests;
+#[cfg(test)]
 mod batch_rollback_tests;
 #[cfg(test)]
 mod batch_step_ref_tests;
