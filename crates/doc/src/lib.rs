@@ -407,13 +407,8 @@ impl Document {
     /// Add a page at the end.
     pub fn add_page(&mut self, name: &str) -> NodeId {
         let id = self.alloc_id();
-        let node = Node::new(
-            id,
-            NodeKind::Page { background: Color::DEFAULT_PAGE, flows: Vec::new(), prototype: Default::default(), guides: Vec::new() },
-            name,
-            0.0,
-            0.0,
-        );
+        let node =
+            Node::new(id, NodeKind::Page { background: Color::DEFAULT_PAGE, flows: Vec::new(), prototype: Default::default() }, name, 0.0, 0.0);
         self.nodes.insert(id, Arc::new(node));
         self.dirty.touch(id);
         self.pages.push(id);
@@ -1143,8 +1138,10 @@ impl Document {
             Arc::make_mut(&mut self.libraries).store = store;
         }
         self.pages.retain(|p| self.nodes.get(p).is_some_and(|n| n.is_page()) && Some(*p) != store);
+        // Unlisted pages join the list; a set keeps many pages from making this quadratic (#1078).
+        let mut listed: std::collections::BTreeSet<NodeId> = self.pages.iter().copied().collect();
         for (k, n) in self.nodes.iter() {
-            if n.is_page() && !self.pages.contains(k) && Some(*k) != store {
+            if n.is_page() && Some(*k) != store && listed.insert(*k) {
                 self.pages.push(*k);
             }
         }
@@ -1257,6 +1254,8 @@ mod colors_tests;
 mod diff_tests;
 #[cfg(test)]
 mod effects_tests;
+#[cfg(test)]
+mod guides_tests;
 #[cfg(test)]
 mod handoff_tests;
 #[cfg(test)]

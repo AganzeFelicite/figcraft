@@ -161,7 +161,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "proto.linkNotice",
             "Notice before leaving for a link",
-            "{show? (default true; false skips it)}  whether a presented prototype's Open link to a website first says that it leaves the prototype, with Open link and Cancel; kept with the preferences → {shown}",
+            "{show? (default true; false skips it)}  whether a presented prototype's Open link the viewer clicked (or fired by a key) first says that it leaves the prototype, with Open link and Cancel (a link a delay or hover fired always does); kept with the preferences → {shown}",
             false,
             |s, p| {
                 let show = boolean(p, "show").unwrap_or(true);
