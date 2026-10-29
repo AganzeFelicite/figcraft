@@ -161,6 +161,10 @@ mod onpath_tests;
 #[cfg(test)]
 mod rtl_list_tests;
 #[cfg(test)]
+mod saved_breaks_tests;
+#[cfg(test)]
 mod tail_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod vietnamese_tests;

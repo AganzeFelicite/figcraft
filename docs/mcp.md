@@ -244,6 +244,9 @@ Or in a project's `.mcp.json`:
   `fade`, `reset`) or one saved in the file, with any `filters` values on top.
   `image.savePreset {name, filters?}` saves the current (or given) adjustments in the file,
   `image.deletePreset {name}` removes one and `image.presets` lists both kinds.
+  `image.crop {ids?, index?}` (one layer) switches its top visible image fill (or fill `index`) to
+  Crop, keeping the picture where it was, and returns `{id, index}`; the app also enters crop mode
+  on the canvas. The crop itself is the paint's `crop` transform (`fill.set`).
 - Text props (`fontFamily`, `fontStyle`, `fontSize`, `lineHeight`, `letterSpacing`, `textDecoration`,
   `textCase`, `textFills`, `fontVariations`…) apply to the whole layer, or to chars `start`..`end`
   when given (`text.style {id, start, end, …}` does the same). Styled ranges come back as
@@ -252,7 +255,14 @@ Or in a project's `.mcp.json`:
   `text.setVariations {variations, replace?}` merges instead. `text.fonts {family, style?, axes: true}`
   lists a font's axes and named instances (named instances are also valid `fontStyle` values).
   `text.missingFonts` lists the families the document names that aren't installed
-  (`{families: [{family, layers}]}`); their text draws in a fallback font. Fonts are indexed once
+  (`{families: [{family, layers, source}]}`); their text draws in a fallback font. On the desktop,
+  `font.download {family}` installs a family whose `source` isn't null (Google Fonts, Noto) from
+  the font store, in the background: pinned, checksum-verified files into the Craft apps' shared
+  font folder. It works only while the user has allowed downloading fonts, which only the user can
+  do, in the app's Missing fonts window; otherwise it is refused. Call it again for its progress
+  (`{state: downloading, done, total}`); once installed, the call fits the open document's text to
+  the font (`{state: installed, refitted}`). `font.downloads` lists the downloads and whether
+  downloading is allowed (`{allowed, downloads: [{family, state, error?}]}`). Fonts are indexed once
   per process: after installing one, `text.rescanFonts` picks it up (`{added: [families]}`), and
   `text.loadFont {path | data (base64)}` adds a font file without installing it (`{families}`).
   Text boxes keep the size they were measured at: both refit the open document's auto-sizing text
@@ -287,7 +297,13 @@ Or in a project's `.mcp.json`:
   `null`), so a later `style.update` doesn't overwrite the edit; `style.apply` replaces variables
   bound to what the style sets; a text style goes on text layers only. In one call, a style link
   (`fillStyle`, `textStyle`…) wins over values it sets; set a deviation in a later call, which
-  unlinks it. Names are trimmed per `/` folder part. `style.move {styles, before?, folder?}`
+  unlinks it. Names are trimmed per `/` folder part. A `fill` or `stroke` can also bind a variable:
+  `node.create {type: "rectangle", props: {fill: {"$var": "Theme/surface"}}}` creates and binds in
+  one undo step, and `node.set` takes the same wrapper. `$var` takes an exact variable id first,
+  else an unambiguous exact name or `Collection/name` (names can contain `/`); unknown or ambiguous
+  names are errors. The wrapper is applied after literal values and style links, and clears that
+  paint's style link even when the colour is unchanged. Only `fill` and `stroke` take variables in
+  props; use `variable.bind` for other fields. `style.move {styles, before?, folder?}`
   reorders (and with `folder`, renames into it), `style.duplicate {style}` adds "<name> copy" right
   below, `style.renameFolder {folder, name}`.
 - **Variables**: `variable.bind` refuses a variable of a type the field doesn't take (a colour on
@@ -329,7 +345,7 @@ a later step can use `{"$step": 0, "field": "ids/0"}` to target the first match.
 | `batch {commands: [{command, params}], label?}` | Several commands as one undo step (`command.batch`); all-or-nothing for open documents and their document state. Failed inner commands are removed from the journal; preferences, clipboard, tool state and UI requests are not rolled back. A step can use what an earlier step returned: name it with `"as": "card"` and `{"$ref": "card"}` anywhere in a later step's params becomes the `id` in its result (`{"$step": n}` does the same by zero-based position); `"field"` takes another key or a slash path such as `ids/0` (see Step references below). |
 | `create_node {type, x, y, width, height, parent, index, name, text, path, props}` | Create a frame, rectangle, ellipse, polygon, star, line, arrow, text, vector, section, component or slice; returns `{id, node}`. |
 | `set_properties {ids, props}` | `node.set` on layers (geometry, fills, strokes, effects, corner radius, auto layout, sizing, constraints, masks (`isMask`, `maskType: alpha\|vector\|luminance`), handoff status (`devStatus: none\|readyForDev\|completed`; marking again clears "Changed"), a section's `sectionContentsHidden`, text…); returns the updated layers. |
-| `inspect_document {depth, allPages}` | The document as JSON (layer tree, styles, selection, history). |
+| `inspect_document {depth, allPages}` | The document as JSON (its `id`, layer tree, styles, selection, history). The tools that act on a document also take `document` (see Naming the document below). |
 | `get_node {id, depth}` | One layer as JSON; `pluginData` (`{key: value}`, values as strings) when the layer or page has layer data written with `set_properties {props: {pluginData}}`. |
 | `select {ids}` | Replace the selection (`[]` deselects). |
 | `export {ids, format, scale \| size, path?, bleed?, cropMarks?, bleedMarks?, cmyk?, contentsOnly?, includeBoundingBox?, svgOutlineText?, svgIdAttribute?, svgSimplifyStroke?, vdCompat?}` | png, jpg, svg, webp, pdf, xml (an Android Vector Drawable: `svgIdAttribute` writes `android:name`, `vdCompat` is `bestEffort` (default: approximated with a warning), `exact` (left out with a warning) or `ignore` (no warnings: overlapping layer opacity dropped, even-odd fills kept as `fillType="evenOdd"`, diamond gradients left out), and the result lists `warnings` for what was changed or left out), or `fig`: the whole file as `.fig`, experimental (see Exporting `.fig` files below); `size` is `2x`, `512w` or `512h`. The image covers what the layers paint (shadows towards their offset, strokes, unclipped children, a mask group's mask; hidden layers take no room; a slice is its area with everything under it, or only the frame or group it sits in while `contentsOnly` is on); `contentsOnly: false` also draws every other layer showing in that area, `includeBoundingBox` exports the layers' own boxes; SVG: `svgOutlineText: false` keeps `<text>`, `svgIdAttribute` writes unique ids from layer names, `svgSimplifyStroke: false` writes every stroke as an outline. The same options go in export settings (`export.add` / `export.update`). PDF: frames one page each (sized in points), anything else together on one page; print options: `bleed` (points or a length like `"3mm"`, `"0.125in"`), crop and bleed marks, CMYK colour (see Exports below), also taken by `file.export`, `file.exportLayers`, `file.exportFramesPdf` and stored per export setting by `export.add` / `export.update`; `run_command` `file.exportFramesPdf {page?, path?}` writes every top-level frame of a page. Without `path`, images come back as MCP image content, SVG as text, XML as text followed by `{format, bytes, warnings}`. Layers' own export settings: `run_command` with `export.add` / `export.update {index, size?, suffix?, format?}` / `export.remove` and `file.exportLayers {ids?, dir?, assets?}` (every layer once per setting, named `<layer><suffix>.<format>`, a slash in a layer name making a folder; `assets: true` exports the Inspect tab's assets instead: icons as SVG, images as PNG). |
@@ -1147,15 +1163,26 @@ pin stays where it was, on the nearest surviving parent. Driven with `run_comman
 first one, or `reply`: an index into its replies; deleting the first message deletes the thread),
 `comment.react {id, emoji, reply?, on?}` (toggles your reaction), `comment.resolve {id, resolved?}`,
 `comment.move {id, x, y, anchor?}` (pins it to the frame under the new point unless `anchor: false`).
-Everyone acts as the name from Preferences (`pref.userName {name}`, default "You") unless `author`
-says otherwise; only a message's author can edit or delete it. `@Name` in a message mentions
-someone (`comment.people` lists the names used in the file).
+An agent comments under its own name, never the user's: every command an MCP client runs acts as
+that client's name from `initialize` (`clientInfo.title`, else `clientInfo.name`) with " (agent)"
+after it, e.g. "Claude (agent)", or "AI agent" when the client gave none. Its messages, reactions
+and read state are its own, it can edit and delete only its own messages, and its messages carry
+`"agent": true` in `comment.list` (the app shows an **Agent** label by the name); the user's name in
+Preferences is unchanged. It is set once per connection, so no command needs `author`; an `author`
+param still wins. In the app, comments act as the name from Preferences (`pref.userName {name}`,
+default "You"); only a message's author can edit or delete it. `@Name` in a message mentions
+someone (`comment.people` lists the names used in the file and, as `you`, who is acting).
 
 Read state is kept per name: a new message is unread for everyone but its author;
 `comment.markRead {id? | link?, read?}` marks one thread (or, without `id`, all of them) read or
 unread (not an undo step). `comment.list {page? | "all", filter? (all|open|resolved|mine|unread),
 sort? (date|page), query?, frame?}` returns the threads with their position, `frame`/`frameName`,
-`pageName`, `unread`, `link` and replies (with `edited` times and `reactions`). Links are
+`pageName`, `unread`, `link` and replies (with `edited` times and `reactions`). Each message, the
+first and every reply, has `mentions`: the names it @mentions by the rule the app highlights them
+with, `{name, known, you}` each. `known` means the file's people (`comment.people`, or you) have
+the name, spelt as they spell it; `you` means it names you (or `author`). `@Name` counts at the
+start of the text or after a character that isn't a letter or digit, so `a@b.com` mentions nobody;
+an unknown name is the letters and digits after the `@`. Links are
 `figcraft://comment/<id>`: `comment.link {id}` returns one, `comment.open {id | link, view?}` goes
 to its page, zooms to its frame (`fit`, the default; `center` keeps the zoom; `keep` doesn't move)
 and opens it in the app, and `comment.next {id?, dir?, …list params}` steps to the next or previous
@@ -1277,6 +1304,20 @@ opens one (a new file, the file at `path`, or open file `index` moved out of its
 `title`, `files`, `active`, `focused`). Tools act on the window in front (the last one opened, focused or clicked):
 focus a window before working on its files, and pass its id to `screenshot {window}` to see it.
 Headless (one session, no windows) and in the browser the two commands do nothing.
+
+### Naming the document
+
+Tools act on the file in front, so with an attached app a tab the user clicks mid-task would
+change where the next edit lands. `run_command`, `batch`, `create_node`, `set_properties`,
+`inspect_document`, `get_node`, `select`, `export`, `screenshot`, `save_file`, `undo` and `redo`
+take an optional `document`: the file's `id` (in `run_command {command: "doc.list"}`, and the `id`
+of the `document` outline `open_file` and `inspect_document` return) or the path of an open file.
+The call acts on that file and the tab in front stays in front, unless the command itself opens or
+switches to another file (`file.open`, `file.new`, `doc.switch`), as it would without `document`. A
+file that isn't open is an error. `screenshot {window}` captures what the window shows, so it
+needs the file in front. Over the control channel, `engine.execute`, `document.inspect`,
+`node.get` and `ui.render` take the same `document`; other methods refuse one naming a file behind
+the tab in front. Headless sessions take it too.
 
 ### Live sessions
 
@@ -1977,6 +2018,26 @@ Align and distribute as one undo step:
   {"command":"distribute.horizontal","params":{"ids":[3,4,5]}}]}}}
 ```
 
+By default (`"onError": "abort"`) the first failure rolls back the whole batch, and success
+returns the raw results in order. With `"onError": "continue"` next to `commands`, a failed step's
+document edits are rolled back on their own, the later steps still run, and the result is instead
+one object per step:
+
+```json
+[
+  {"step": 0, "command": "text.set", "ok": true, "result": {"ok": true}},
+  {"step": 1, "command": "text.set", "ok": false, "error": "invalid parameters for `text.set`: step 1: node 2 is not text"},
+  {"step": 2, "command": "page.rename", "ok": true, "result": {"ok": true}}
+]
+```
+
+The tool call is not an error (`isError` is false) even when some steps fail. Successful document
+edits form one undo step; if every step fails, none is added. Unknown commands, bad params and bad
+references fail only their step, but a malformed `commands` list, an invalid `onError` or two steps
+with the same `as` still reject the whole batch before any step runs. A step that has to wait for
+background work makes the whole call wait, as without `onError`. A nested batch has its own
+`onError`.
+
 ### Step references
 
 A step in a `batch` can use what an earlier step returned. Give the step a name with `"as"` (next to
@@ -2006,6 +2067,20 @@ the two can be mixed. Names are any non-empty string and must be unique within t
   {"command":"node.set","params":{"ids":[{"$ref":"copy","field":"ids/0"}],"props":{"name":"Card copy"}}}]}}}
 ```
 
+To edit inside a copy, pass `"map": true`: `edit.duplicate` then also returns `map`, each original
+layer's id (as a string, since JSON keys are strings), descendants included, paired with its copy's
+id, e.g. `{"ids": [8], "map": {"5": 8, "6": 9, "7": 10}}`. Nested frames, groups and instances (and
+their sublayers) are in it; a main component's copy is an instance of it, so its sublayers pair with
+the instance's. So `"field": "map/6"` is the copy of layer 6:
+
+```json
+{"jsonrpc":"2.0","id":11,"method":"tools/call","params":{"name":"batch","arguments":{"label":"Copy","commands":[
+  {"command":"edit.duplicate","as":"copy","params":{"ids":[5],"map":true}},
+  {"command":"node.set","params":{"ids":[{"$ref":"copy","field":"map/6"}],"props":{"text":"Copy title"}}}]}}}
+```
+
+Without `map` the result is `{"ids": [...]}` as before.
+
 A path may start with `/`, as in JSON Pointer (`/ids/0`). A key that itself holds `/` is matched as
 written before it is read as a path. A path ends at whatever value it reaches, so `"field": "ids"` is
 the whole list.
@@ -2014,7 +2089,10 @@ These fail the whole batch, which is rolled back, with an error naming the step:
 same `as` (before any step runs); a `$ref` to a name no step has (the error lists the names there
 are) or to the same or a later step; a `$step` to the same or a later step, or that is negative or
 not an integer; a `field` the result doesn't have (the error names the full path and, for a list,
-how many items it has); any key next to `$ref` or `$step` other than `field`. Only an object holding
+how many items it has); any key next to `$ref` or `$step` other than `field`. With `"onError":
+"continue"` all but the duplicate names fail only their step, and so does a reference to a step that
+failed (the error names both). Steps keep their positions, and references read the raw results. Only
+an object holding
 a `$ref` or `$step` key is a reference: text such as `"$ref card"` is left as written. Both keys are
 reserved in step params: an object holding either anywhere (in plugin data or a variable value too)
 is read as a reference. A step that is itself a `command.batch` is passed on as written, so the

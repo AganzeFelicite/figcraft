@@ -63,9 +63,13 @@ mod component_props_reorder_tests;
 #[cfg(test)]
 mod component_swap_default_tests;
 #[cfg(test)]
+mod component_swap_search_tests;
+#[cfg(test)]
 mod context_menu_tests;
 #[cfg(test)]
 mod corner_individual_tests;
+#[cfg(test)]
+mod crop_image_tests;
 #[cfg(test)]
 mod cursors_tests;
 #[cfg(test)]
@@ -412,6 +416,9 @@ pub struct UiState {
     /// The prototype preview pane floating over the canvas, when open.
     pub preview: Option<present::Pane>,
     pub picker: Option<colorpicker::PickerTarget>,
+    /// Crop mode (`image.crop`): the layer and the index of the image fill whose crop handles
+    /// show on the canvas until Enter, Escape or a click outside the image.
+    pub crop: Option<(NodeId, usize)>,
     /// The colour picker's popover while it is open (its place survives a drag).
     pub picker_popover: Option<popover::Popover>,
     /// The control that opened the picker, refreshed every frame it is drawn (the panel scrolls):
@@ -595,6 +602,7 @@ impl Default for UiState {
             present_view: present::PresentView::default(),
             preview: None,
             picker: None,
+            crop: None,
             picker_popover: None,
             picker_button: None,
             context_menu: None,
