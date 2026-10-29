@@ -79,9 +79,12 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   `.figcraft` path. Layers copied from another design app paste (`edit.pasteDesignLayers`, and
   Cmd/Ctrl+V when the clipboard's HTML holds a `.fig` canvas): read like a `.fig` file, with its
   warnings, size-checked (256 MB) before decoding.
+- **Landed (2026-10-26):** `.fig` import reads vector-region fill stacks; vector editing and path
+  operations retain them with their source paint coordinates. `.fig` export still warns and drops
+  region fills. Evidence: `crates/format/src/fig/tail_tests.rs`, `crates/engine/src/shapebuilder_region_paints_tests.rs`.
 - **Missing:** elbowed or curved connectors without a saved path (drawn straight), labels of
-  connectors without a saved snapshot, table cells beyond their own layers, filled areas of a
-  vector with their own fills (#634, held for an owner decision on the document model), variables
+  connectors without a saved snapshot, table cells beyond their own layers, live region
+  style/variable links, variables
   bound to fields the editor can't bind and video fills aren't read; text lays out again with
   local fonts. Nothing has been checked against real-world files yet (gap 3): the 2026-10-17
   changes were tested on files built in code, and paste from another design app on clipboard HTML
