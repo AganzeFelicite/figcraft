@@ -1,12 +1,12 @@
 //! Arrange: align, distribute, tidy, z-order, flips, rotations and numeric transforms.
 
-use figcraft_doc::*;
+use figcraft_doc::{Document, EffectKind, LetterSpacing, LineHeight, Node, NodeId, NodeKind, Sizing, TextAutoResize, TextStyle};
 use figcraft_geom::{Affine, Point, Rect};
 use serde_json::{Value, json};
 
 use super::edit::{roots, z_sorted};
 use super::{CommandSpec, ok};
-use crate::params::*;
+use crate::params::{boolean, get, num, num_or, req_id, req_num, req_targets, string};
 use crate::{Result, Session, bad, spec};
 
 pub fn specs() -> Vec<CommandSpec> {

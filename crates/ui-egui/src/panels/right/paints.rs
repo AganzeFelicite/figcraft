@@ -1,6 +1,10 @@
 use super::menu::{blend_menu, context_popup, menu_check, menu_item, menu_popup, row, row_context_menu, row_rect};
 use super::stroke::stroke_settings;
-use super::*;
+use super::{
+    Align2, BlendMode, CornerRadius, Document, FIELD_H, FieldEdit, FigApp, Icon, Id, Lead, ListDrag, MaskType, Node, NodeId, NodeKind, PAD, Paint,
+    PaintKind, Rect, Sense, Stroke, StrokeAlign, StyleSlot, Tip, Tokens, Ui, Value, VariableType, common, icons, json, moved_index, pos2, regular,
+    removed_index, style_picker, tr, trf, vec2, widgets,
+};
 
 /// Draw visibility/blend/mask, opacity, uniform or per-corner radius, corner smoothing and
 /// the blend-mode row.

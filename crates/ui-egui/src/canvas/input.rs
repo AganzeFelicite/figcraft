@@ -1,4 +1,4 @@
-use super::*;
+use super::{FigApp, Point, PointerKind, Pos2, Rect, Ui, json, pointer_event};
 
 /// The zoom tool while Z is held (Alt: zoom out): a click zooms a step about the pointer, a drag
 /// zooms to the dragged area. Takes the pointer from the other tools while it's active.
@@ -25,30 +25,7 @@ fn zoom_tool(app: &mut FigApp, ui: &Ui, resp: &egui::Response, pos: Pos2, mods: 
     true
 }
 
-/// The pointer and keys on the canvas. False when something on it with a cursor of its own has
-/// the pointer (a comment pin, a ruler guide, a gradient or padding handle): the tool's cursor
-/// then doesn't show.
-pub(super) fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
-    if crate::proto_canvas::input(app, ui, resp) {
-        // A prototype gesture is a press on the canvas too: the Pages list gives up the keyboard.
-        app.ui.pages_focus = None;
-        return true;
-    }
-    let ctx = ui.ctx().clone();
-    // Two fingers pan as well as pinch (a touch screen has no scroll wheel).
-    let (mods, scroll, zoom_delta, hover_pos, space) = ctx.input(|i| {
-        let pan = i.multi_touch().map_or(egui::Vec2::ZERO, |m| m.translation_delta);
-        (i.modifiers, i.smooth_scroll_delta + pan, i.zoom_delta(), i.pointer.hover_pos(), i.key_down(egui::Key::Space))
-    });
-    let editing_text = app.session.ds().map(|d| d.text_edit.is_some()).unwrap_or(false);
-    let typing_elsewhere = crate::a11y::field_focused(&ctx);
-    app.canvas.space_pan = space && !editing_text && !typing_elsewhere;
-    if !app.canvas.dragging && crate::selection_spacing::input(app, &ctx, hover_pos, resp.hovered(), app.canvas.space_pan) {
-        return false;
-    }
-    // Dropped files import onto the canvas, behind a card while they do ([`crate::pending_open`]);
-    // a dropped document opens as a file of its own, as on the home screen. Dev Mode imports
-    // nothing into the design, and says so once for the whole drop.
+fn import_dropped(app: &mut FigApp, ctx: &egui::Context, hover_pos: Option<egui::Pos2>) {
     let dropped = ctx.input(|i| i.raw.dropped_files.clone());
     let mut refused = false;
     for f in dropped {
@@ -75,6 +52,33 @@ pub(super) fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> boo
         };
         app.ui.pending_opens.push(crate::pending_open::PendingOpen { label: name, params, command: "file.import", target: Some(target), read });
     }
+}
+
+/// The pointer and keys on the canvas. False when something on it with a cursor of its own has
+/// the pointer (a comment pin, a ruler guide, a gradient or padding handle): the tool's cursor
+/// then doesn't show.
+pub(super) fn input(app: &mut FigApp, ui: &mut Ui, resp: &egui::Response) -> bool {
+    if crate::proto_canvas::input(app, ui, resp) {
+        // A prototype gesture is a press on the canvas too: the Pages list gives up the keyboard.
+        app.ui.pages_focus = None;
+        return true;
+    }
+    let ctx = ui.ctx().clone();
+    // Two fingers pan as well as pinch (a touch screen has no scroll wheel).
+    let (mods, scroll, zoom_delta, hover_pos, space) = ctx.input(|i| {
+        let pan = i.multi_touch().map_or(egui::Vec2::ZERO, |m| m.translation_delta);
+        (i.modifiers, i.smooth_scroll_delta + pan, i.zoom_delta(), i.pointer.hover_pos(), i.key_down(egui::Key::Space))
+    });
+    let editing_text = app.session.ds().map(|d| d.text_edit.is_some()).unwrap_or(false);
+    let typing_elsewhere = crate::a11y::field_focused(&ctx);
+    app.canvas.space_pan = space && !editing_text && !typing_elsewhere;
+    if !app.canvas.dragging && crate::selection_spacing::input(app, &ctx, hover_pos, resp.hovered(), app.canvas.space_pan) {
+        return false;
+    }
+    // Dropped files import onto the canvas, behind a card while they do ([`crate::pending_open`]);
+    // a dropped document opens as a file of its own, as on the home screen. Dev Mode imports
+    // nothing into the design, and says so once for the whole drop.
+    import_dropped(app, &ctx, hover_pos);
     let Some(pos) = hover_pos.filter(|p| app.canvas.rect.contains(*p)) else {
         // A drag released off the canvas, or off the window, ends where the pointer was last seen.
         if app.canvas.dragging && !ctx.input(|i| i.pointer.primary_down()) {
