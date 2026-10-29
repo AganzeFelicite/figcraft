@@ -777,6 +777,23 @@ fn a_data_blob_past_the_blobs_stays_a_placeholder() {
     assert!(warnings.iter().any(|w| w.contains("isn't in the file")), "{warnings:?}");
 }
 
+/// A file can point any number of image hashes at one large blob; each used to get its own copy
+/// of it (#1059).
+#[test]
+fn hashes_naming_one_blob_share_one_copy_of_it() {
+    let image = |hash: u8, blob: u64| o(vec![("image", o(vec![("hash", Kv::Bytes(vec![hash; 20])), ("dataBlob", u(blob))]))]);
+    let msg = o(vec![
+        ("blobs", Kv::Array(vec![o(vec![("bytes", Kv::Bytes(png()))]), o(vec![("bytes", Kv::Bytes(vec![7; 16]))])])),
+        ("nodeChanges", Kv::Array((1..=50).map(|h| image(h, 0)).chain([image(99, 1), image(98, 2)]).collect())),
+    ]);
+    let copies = embedded_copies(&msg);
+    assert_eq!(copies.len(), 51, "the hash naming no blob is left out");
+    let first = &copies[&"01".repeat(20)];
+    assert_eq!(**first, *png());
+    assert_eq!(copies.values().filter(|c| Arc::ptr_eq(c, first)).count(), 50);
+    assert_eq!(*copies[&"63".repeat(20)], [7; 16]);
+}
+
 #[test]
 fn other_files_are_not_fig() {
     assert!(try_import(b"{\"document\": {}}", "x").is_none());

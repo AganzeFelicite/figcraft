@@ -351,7 +351,7 @@ fn link_instances(doc: &mut Document) {
 
 /// Largest image file read for a REST API file JSON import.
 #[cfg(not(target_arch = "wasm32"))]
-const MAX_IMAGE_FILE: u64 = 256 * 1024 * 1024;
+const MAX_IMAGE_FILE: u64 = figcraft_doc::ImageData::MAX_BYTES;
 
 /// Image bytes for a REST API file JSON's `imageRef`: `images/<imageRef>[.png|.jpg|…]` next to
 /// the file.
