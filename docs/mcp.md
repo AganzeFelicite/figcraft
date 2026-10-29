@@ -287,7 +287,13 @@ Or in a project's `.mcp.json`:
   `null`), so a later `style.update` doesn't overwrite the edit; `style.apply` replaces variables
   bound to what the style sets; a text style goes on text layers only. In one call, a style link
   (`fillStyle`, `textStyle`…) wins over values it sets; set a deviation in a later call, which
-  unlinks it. Names are trimmed per `/` folder part. `style.move {styles, before?, folder?}`
+  unlinks it. Names are trimmed per `/` folder part. A `fill` or `stroke` can also bind a variable:
+  `node.create {type: "rectangle", props: {fill: {"$var": "Theme/surface"}}}` creates and binds in
+  one undo step, and `node.set` takes the same wrapper. `$var` takes an exact variable id first,
+  else an unambiguous exact name or `Collection/name` (names can contain `/`); unknown or ambiguous
+  names are errors. The wrapper is applied after literal values and style links, and clears that
+  paint's style link even when the colour is unchanged. Only `fill` and `stroke` take variables in
+  props; use `variable.bind` for other fields. `style.move {styles, before?, folder?}`
   reorders (and with `folder`, renames into it), `style.duplicate {style}` adds "<name> copy" right
   below, `style.renameFolder {folder, name}`.
 - **Variables**: `variable.bind` refuses a variable of a type the field doesn't take (a colour on
