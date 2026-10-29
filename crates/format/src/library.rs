@@ -38,18 +38,13 @@ pub fn is_valid_library_id(id: &str) -> bool {
     (1..=MAX_ID).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
 }
 
-/// Image hashes become archive member names: only plain hex-like names are looked up.
-pub(crate) fn is_valid_hash(h: &str) -> bool {
-    (1..=128).contains(&h.len()) && h.bytes().all(|b| b.is_ascii_alphanumeric())
-}
-
 /// Write the published library's entries. `written` are the images already in `images/`.
 pub(crate) fn write<W: Write + Seek>(z: &mut zip::ZipWriter<W>, lib: &PublishedLibrary, written: &BTreeSet<&String>) -> Result<(), FormatError> {
     let stored = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
     put(z, MANIFEST, json_options(), &serde_json::to_vec(&lib.manifest).map_err(io_err)?)?;
     put_json(z, SNAPSHOT, &lib.doc)?;
     for (hash, img) in &lib.doc.images {
-        if !written.contains(hash) && is_valid_hash(hash) {
+        if !written.contains(hash) && ImageData::is_valid_key(hash) {
             put(z, &format!("{IMAGES}{hash}"), stored, &img.bytes)?;
         }
     }
@@ -75,7 +70,7 @@ pub(crate) fn read<R: Read + Seek>(
     let mut budget = budget.saturating_sub(text.len() as u64).min(MAX_IMAGE_BYTES);
     let (mut doc, _) = from_json(&text)?;
     for hash in used_images(&doc) {
-        if !is_valid_hash(&hash) {
+        if !ImageData::is_valid_key(&hash) {
             continue;
         }
         if let Some(img) = own.get(&hash) {

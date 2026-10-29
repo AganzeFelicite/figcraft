@@ -60,7 +60,7 @@ use kiwi::{Kv, Schema};
 const MAX_CANVAS: u64 = 256 * 1024 * 1024;
 const MAX_CHUNK: u64 = 512 * 1024 * 1024;
 /// Largest image member read.
-const MAX_IMAGE: u64 = 256 * 1024 * 1024;
+const MAX_IMAGE: u64 = figcraft_doc::ImageData::MAX_BYTES;
 /// Most chunks read from `canvas.fig`.
 const MAX_CHUNKS: usize = 16;
 /// Most layers imported from a `.fig` file: one per [`PACKED_BYTES_PER_LAYER`] bytes of its
