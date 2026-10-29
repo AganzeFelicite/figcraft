@@ -113,7 +113,7 @@ pub(super) fn appearance(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[N
                 }
             });
         }
-        let sm = common(doc, sel, |n| (n.corners.smoothing * 100.0).round());
+        let sm = common(doc, sel, |n| n.corners.smoothing * 100.0);
         widgets::sublabels(ui, tr("Corner smoothing"), None);
         row(ui, 32.0, |ui| {
             let e = widgets::number_field(ui, Id::unique("smoothing"), Lead::Icon(Icon::CornerSmoothing, tr("Corner smoothing")), sm, "%", col, 1.0);

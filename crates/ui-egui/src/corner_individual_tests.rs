@@ -107,6 +107,38 @@ fn corner_smoothing_icon_scrubs_with_modifiers_and_one_undo_step() {
     }
 }
 
+/// Fine drags keep their fractional baseline across gestures, including a later plain drag.
+#[test]
+fn consecutive_smoothing_drags_preserve_fractional_percentages() {
+    let (mut u, r) = scene();
+    u.app.run("node.set", json!({"ids": [r], "props": {"cornerSmoothing": 0.5}}));
+    let toggle = named_button(&mut u, "Individual corners");
+    click(&mut u, toggle);
+    let history = u.app.session.undo_depth().0;
+    let smoothing = |u: &Ui| u.app.session.doc().unwrap().node(r).unwrap().corners.smoothing;
+    for (step, (dx, modifiers, want)) in
+        [(16.0, Modifiers::ALT, 0.516), (16.0, Modifiers::ALT, 0.532), (8.0, Modifiers::NONE, 0.612)].into_iter().enumerate()
+    {
+        let from = u.ctx.read_response(Id::unique("smoothing").with("lead")).unwrap().rect.center();
+        u.frame_with(vec![Event::PointerMoved(from)], modifiers);
+        u.frame_with(vec![Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers }], modifiers);
+        for k in 1..=4 {
+            u.frame_with(vec![Event::PointerMoved(pos2(from.x + dx * k as f32 / 4.0, from.y))], modifiers);
+        }
+        u.frame_with(
+            vec![Event::PointerButton { pos: pos2(from.x + dx, from.y), button: egui::PointerButton::Primary, pressed: false, modifiers }],
+            modifiers,
+        );
+        u.frame(vec![]);
+        assert!((smoothing(&u) - want).abs() < 1e-9, "gesture {step}: expected {want}, got {}", smoothing(&u));
+        assert_eq!(u.app.session.undo_depth().0, history + step + 1);
+    }
+    for want in [0.532, 0.516, 0.5] {
+        u.app.session.undo().unwrap();
+        assert!((smoothing(&u) - want).abs() < 1e-9, "undo restores the precise value");
+    }
+}
+
 /// The fields sit at their corners, and typing in the bottom right one sets only that corner in a
 /// single undo step (#1002: the bottom row showed bottom right on the left).
 #[test]
