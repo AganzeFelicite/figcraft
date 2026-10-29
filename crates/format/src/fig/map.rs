@@ -248,6 +248,9 @@ struct Mapper<'a> {
     networks: Vec<Option<VectorNetwork>>,
     /// Index in `networks` by what a network is made from: its blob, its scale and its style table.
     network_ids: HashMap<(usize, u64, u64, usize), usize>,
+    /// Region paint elements (paints and gradient stops) read so far: one budget for the whole
+    /// file, since layers with region paints don't share their network.
+    region_paint_elements: usize,
 }
 
 impl<'a> Mapper<'a> {
@@ -322,6 +325,7 @@ impl<'a> Mapper<'a> {
             reserved: 0,
             networks: Vec::new(),
             network_ids: HashMap::new(),
+            region_paint_elements: 0,
         }
     }
 

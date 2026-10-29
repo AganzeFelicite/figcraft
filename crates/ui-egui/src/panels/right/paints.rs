@@ -253,8 +253,9 @@ fn range_fill(app: &mut FigApp, ui: &mut Ui, doc: &Document, id: NodeId, start: 
         match fills.as_ref().and_then(|f| f.first()) {
             Some(p) => {
                 widgets::paint_swatch(ui.painter(), sw, p);
-                if ui.interact(sw.expand(2.0), Id::unique("range_swatch"), Sense::click()).clicked() {
-                    app.ui.picker = Some(crate::colorpicker::PickerTarget::TextRange { id, start, end });
+                let range_swatch = ui.interact(sw.expand(2.0), Id::unique("range_swatch"), Sense::click());
+                if range_swatch.clicked() {
+                    app.toggle_picker(crate::colorpicker::PickerTarget::TextRange { id, start, end }, Some(range_swatch.rect.min.y));
                 }
                 if let Some(c) = p.solid_color() {
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(text_r));
@@ -453,8 +454,17 @@ fn paint_row(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, p: &Paint,
         let sw = Rect::from_min_size(pos2(r.min.x + 4.0, r.center().y - 8.0), vec2(16.0, 16.0));
         widgets::paint_swatch(ui.painter(), sw, p);
         let sresp = ui.interact(sw.expand(2.0), Id::unique(("swatch", fills, i)), Sense::click());
+        // While this paint is the one the picker edits, its swatch is held out of the popover's
+        // closing, so a press on it again reaches the toggle below.
+        let editing = matches!(
+            &app.ui.picker,
+            Some(crate::colorpicker::PickerTarget::Paint { fills: f, index: k, ids: held }) if *f == fills && *k == i && *held == ids
+        );
+        if editing {
+            app.ui.picker_button = Some(sresp.rect);
+        }
         if sresp.clicked() {
-            app.ui.picker = Some(crate::colorpicker::PickerTarget::Paint { fills, index: i, ids: ids.clone() });
+            app.toggle_picker(crate::colorpicker::PickerTarget::Paint { fills, index: i, ids: ids.clone() }, Some(sresp.rect.min.y));
         }
         let text_r = Rect::from_min_max(pos2(sw.max.x + 8.0, r.min.y), pos2(r.max.x - 52.0, r.max.y));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(text_r));

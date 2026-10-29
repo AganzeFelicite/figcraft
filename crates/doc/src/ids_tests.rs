@@ -103,6 +103,10 @@ fn the_highest_space_counts_every_kind_of_id() {
     assert_eq!(d.highest_id_space(), 9);
     d.comments.push(comment(11u64 << 32, d.first_page().unwrap()));
     assert_eq!(d.highest_id_space(), 11);
+    // Numbers past every client's space (they saturate to `u32::MAX`) are no session's.
+    d.styles.push(style(&format!("S:{}", u64::MAX)));
+    d.comments.push(comment(u64::from(u32::MAX) << 32, d.first_page().unwrap()));
+    assert_eq!(d.highest_id_space(), 11);
     // Other forms are space 0.
     assert_eq!(id_space("lib:S:99999999999", "S:"), 0);
     assert_eq!(id_space("S:+5", "S:"), 0);
