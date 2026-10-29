@@ -313,6 +313,13 @@ impl DocProp {
     }
 }
 
+impl Change {
+    /// Whether this puts or removes an image entry.
+    pub(crate) fn is_image(&self) -> bool {
+        matches!(self, Change::Put { entry: Entry::Image(_), .. } | Change::Remove { entry: Entry::Image(_) })
+    }
+}
+
 impl Entry {
     /// The client id space the entry's id lies in ([`figcraft_doc::ids`]): ids made during a live
     /// session carry their creator's client id, ids from before and ids of other forms are in

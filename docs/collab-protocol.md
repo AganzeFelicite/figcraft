@@ -156,11 +156,12 @@ As built:
   with the shape of a content hash (64 hex chars) must be exactly the lowercase sha256 hex of
   those bytes (as the app writes them); a side is at most 65 535 px and the decoded bytes at
   most 256 MiB (`ImageData::MAX_BYTES`, what the importers read), base64 that can't decode is
-  refused, and a key that already holds an image can't be given other bytes; a snapshot or a
-  server log written before these checks opens without the images they refuse — judged against
-  the state they apply to, so a logged replacement is left out too — rather than failing, and a
-  file published to a server is kept without them; a restarted server whose saved log puts
-  images catches resuming clients up with its snapshot instead of that log); a
+  refused, a key that already holds an image can't be given other bytes, and an image a layer or
+  style still shows can't be removed; a snapshot or a server log written before these checks
+  opens without the image entries they refuse — judged against the state they apply to, so a
+  logged replacement or removal is left out too — rather than failing, and a file published to a
+  server is kept without them; a restarted server that left image entries out, or whose saved log
+  puts images, catches every resuming client up with its snapshot instead of that log); a
   board's timer and vote (whole values, `DocProp::Timer` and
   `DocProp::Vote`) and the vote's ballots (`Entry::Ballot(voter)`, one per voter, so people voting
   at once write different entries). The timer travels as its end time (or, paused, the time left),

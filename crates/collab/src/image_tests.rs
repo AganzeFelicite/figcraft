@@ -213,3 +213,46 @@ fn a_restart_replays_past_a_logged_image_replacement() {
     assert_eq!(r.document().images.get("img1").map(|i| i.bytes.as_slice()), Some(b"the first bytes".as_slice()), "the replacement is left out");
     assert!(r.document().images.contains_key(&sha256_hex(good)), "the edit after it is kept");
 }
+
+/// A document whose rectangle shows `img1` (the first bytes), and that rectangle.
+fn in_use() -> (Document, figcraft_doc::NodeId) {
+    let mut doc = Document::new("t");
+    let page = doc.first_page().unwrap();
+    let id = doc.create(page, figcraft_doc::NodeKind::Rectangle, "R", 0.0, 0.0, 10.0, 10.0).unwrap();
+    doc.get_mut(id).unwrap().fills = vec![figcraft_color::Paint::image("img1", figcraft_color::ImageScaleMode::Fill)];
+    apply_doc(&mut doc, &put("img1", 2, 1, b"the first bytes")).unwrap();
+    (doc, id)
+}
+
+/// An image a layer or style still shows can't be removed: removing it and putting other bytes
+/// under its key would swap the picture that layer shows, which giving the key other bytes
+/// directly can't do (#1086).
+#[test]
+fn an_image_in_use_cannot_be_removed() {
+    let (mut doc, _) = in_use();
+    let remove = Change::Remove { entry: Entry::Image("img1".into()) };
+    assert!(apply_doc(&mut doc, &remove).is_err(), "removed while a layer shows it");
+    assert!(apply_doc(&mut doc, &put("img1", 2, 1, b"other bytes")).is_err());
+    assert_eq!(doc.images.get("img1").map(|i| i.bytes.as_slice()), Some(b"the first bytes".as_slice()));
+}
+
+/// A batch that first stops using an image, then removes it (the order a diff makes), applies.
+#[test]
+fn an_image_no_longer_in_use_can_be_removed() {
+    let (doc, id) = in_use();
+    let mut r = crate::Replica::new(doc);
+    let batch = [Change::Delete { id }, Change::Remove { entry: Entry::Image("img1".into()) }];
+    r.apply(&batch, crate::Mode::Strict).expect("the layer goes first, then its image");
+    assert!(r.document().images.is_empty());
+}
+
+/// Only image entries are left out of saved history: a snapshot whose other changes don't apply
+/// is still an error, not a document missing them.
+#[test]
+fn a_snapshot_with_a_broken_layer_change_still_fails_to_open() {
+    let mut snapshot = crate::Replica::new(crate::sim_tests::base()).snapshot().unwrap();
+    // A property of a layer that isn't there: an error when applied (unlike deleting it).
+    let missing = figcraft_doc::NodeId(u64::MAX);
+    snapshot.push(Change::Set { id: missing, prop: crate::change::Prop::Name, value: Json(json!("x")) });
+    assert!(crate::Replica::from_snapshot(&snapshot).is_err());
+}

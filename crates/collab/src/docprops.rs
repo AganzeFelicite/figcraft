@@ -176,34 +176,6 @@ fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// `changes` without the image entries applying them to `doc` would refuse ([`image_for`]): an
-/// invalid image, or other bytes under a key `doc` or an earlier change of the batch already
-/// holds. For history written before those checks (a saved snapshot, a server's log): the rest of
-/// it still applies, where refusing the whole would leave a document that can't open or drop
-/// every edit after the image.
-pub(crate) fn without_refused_images(doc: &Document, changes: &[Change]) -> Vec<Change> {
-    // What each image key holds as the batch goes: the document's image, then the batch's own.
-    let mut held: BTreeMap<&str, Option<ImageData>> = BTreeMap::new();
-    let mut out = Vec::with_capacity(changes.len());
-    for c in changes {
-        match c {
-            Change::Put { entry: Entry::Image(k), value } => {
-                let now = held.get(k.as_str()).cloned().unwrap_or_else(|| doc.images.get(k).cloned());
-                if let Ok(img) = image_for(now.as_ref(), k, value) {
-                    held.insert(k, Some(img));
-                    out.push(c.clone());
-                }
-            }
-            Change::Remove { entry: Entry::Image(k) } => {
-                held.insert(k, None);
-                out.push(c.clone());
-            }
-            _ => out.push(c.clone()),
-        }
-    }
-    out
-}
-
 /// The image an entry puts under `key`, which now holds `held`: [`image_of`], and a key that
 /// already holds an image can't be given other bytes. A key always names the same bytes
 /// (producers key images by their bytes; the REST importer's placeholder keys always hold the
@@ -386,6 +358,11 @@ pub(crate) fn apply(doc: &mut Document, change: &Change) -> Result<bool, Error> 
                 doc.dev_snapshots.remove(k);
             }
             Entry::Image(k) => {
+                // An image a layer or style shows stays: removing it would let other bytes go
+                // under its key, swapping the picture that layer shows ([`image_for`]).
+                if figcraft_doc::used_images(doc).contains(k) {
+                    return Err(Error::Invalid(format!("image: {k} is still in use")));
+                }
                 doc.images.remove(k);
             }
             Entry::Ballot(k) => {
