@@ -117,9 +117,14 @@ fn files_on_disk_by_kind() {
     let folder = d.join("folder.figcraft");
     std::fs::create_dir_all(&folder).unwrap();
     assert_eq!(file_thumbnail(&folder, 640), None);
-    let kinds: Vec<FileKind> =
-        ["a.figcraft", "a.FIG", "a.svg", "a.jpeg", "a.webp", "a.txt", "noext"].iter().map(|p| FileKind::of(std::path::Path::new(p))).collect();
-    assert_eq!(kinds, [FileKind::FigCraft, FileKind::Fig, FileKind::Svg, FileKind::Image, FileKind::Image, FileKind::Other, FileKind::Other]);
+    let kinds: Vec<FileKind> = ["a.figcraft", "a.FIG", "a.Sketch", "a.svg", "a.jpeg", "a.webp", "a.txt", "noext"]
+        .iter()
+        .map(|p| FileKind::of(std::path::Path::new(p)))
+        .collect();
+    assert_eq!(
+        kinds,
+        [FileKind::FigCraft, FileKind::Fig, FileKind::Sketch, FileKind::Svg, FileKind::Image, FileKind::Image, FileKind::Other, FileKind::Other]
+    );
 }
 
 /// A document whose first page is `rgb`.
@@ -180,4 +185,22 @@ fn previews_carry_the_first_pages_colour() {
     std::fs::write(&image, png(5, 5)).unwrap();
     let p = file_preview(&image, 640);
     assert!(p.page.is_none() && p.picture.is_some());
+}
+
+#[test]
+fn sketch_files_show_their_preview_png() {
+    use crate::thumbnail::{Preview, file_preview};
+    let d = dir("sketch");
+    let sketch = d.join("screens.sketch");
+    std::fs::write(&sketch, zip(&[("document.json", b"{}"), ("previews/preview.png", &png(8, 4))])).unwrap();
+    assert_eq!(file_thumbnail(&sketch, 640).map(|t| (t.width, t.height)), Some((8, 4)));
+    let p = file_preview(&sketch, 640);
+    assert_eq!((p.page, p.picture.map(|t| (t.width, t.height)), p.kind), (None, Some((8, 4)), figcraft_doc::FileKind::Design));
+    // Only `previews/preview.png` counts; a damaged file has no picture.
+    let other = d.join("other.sketch");
+    std::fs::write(&other, zip(&[("thumbnail.png", &png(8, 4))])).unwrap();
+    assert_eq!(file_thumbnail(&other, 640), None);
+    let junk = d.join("junk.sketch");
+    std::fs::write(&junk, [0xFFu8; 64]).unwrap();
+    assert_eq!(file_preview(&junk, 640), Preview::default());
 }

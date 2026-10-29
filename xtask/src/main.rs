@@ -108,30 +108,31 @@ fn wasm() -> bool {
 
 /// The example plugins in `plugins/examples` (each folder's name is its package; its module is
 /// `<name with _>.wasm`).
-const EXAMPLE_PLUGINS: &[&str] = &["tidy-names", "swatch-grid", "counter"];
+const EXAMPLE_PLUGINS: &[&str] = &["tidy-names", "swatch-grid", "counter", "export-names"];
 
 /// The plugin workspace: fmt, clippy and build for wasm32, host tests, then each example's manifest
 /// and module side by side in `<target>/plugins/dist/<example>/`.
 fn plugins() -> bool {
     let root = root();
     let manifest = root.join("plugins").join("Cargo.toml");
-    let target = std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| root.join("target")).join("plugins");
+    let target = std::env::var_os("CARGO_TARGET_DIR").map(std::path::PathBuf::from).unwrap_or_else(|| root.join("target"));
     let ws = |args: &[&str]| {
         let mut c = cargo();
-        c.args(args).arg("--manifest-path").arg(&manifest);
+        // Keep the caller's target; Cargo separates host and wasm artifacts itself.
+        c.args(args).arg("--manifest-path").arg(&manifest).env("CARGO_TARGET_DIR", &target);
         c
     };
     let wasm = ["--target", "wasm32-unknown-unknown", "--locked"];
     let ok = run(&mut ws(&["fmt", "--all", "--check"]))
-        && run(ws(&["clippy", "--workspace", "--release"]).args(wasm).arg("--target-dir").arg(&target).args(["--", "-D", "warnings"]))
-        && run(ws(&["test", "--workspace", "--locked"]).arg("--target-dir").arg(&target))
-        && run(ws(&["build", "--workspace", "--release"]).args(wasm).arg("--target-dir").arg(&target));
+        && run(ws(&["clippy", "--workspace", "--release"]).args(wasm).args(["--", "-D", "warnings"]))
+        && run(&mut ws(&["test", "--workspace", "--locked"]))
+        && run(ws(&["build", "--workspace", "--release"]).args(wasm));
     if !ok {
         return false;
     }
     for name in EXAMPLE_PLUGINS {
         let module = format!("{}.wasm", name.replace('-', "_"));
-        let dist = target.join("dist").join(name);
+        let dist = target.join("plugins/dist").join(name);
         let copied = std::fs::create_dir_all(&dist)
             .and_then(|()| std::fs::copy(root.join("plugins/examples").join(name).join("figcraft-plugin.json"), dist.join("figcraft-plugin.json")))
             .and_then(|_| std::fs::copy(target.join("wasm32-unknown-unknown/release").join(&module), dist.join(&module)));

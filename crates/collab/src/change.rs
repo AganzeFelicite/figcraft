@@ -223,6 +223,10 @@ pub enum DocProp {
     VariableOrder,
     /// A design file or a board.
     Kind,
+    /// A board's countdown (`null`: none).
+    Timer,
+    /// A board's vote (`null`: none); the ballots are [`Entry::Ballot`]s.
+    Vote,
 }
 
 /// A document-level entry, by id.
@@ -241,7 +245,13 @@ pub enum Entry {
     /// [`DevSnapshot`](figcraft_doc::DevSnapshot)).
     DevSnapshot(NodeId),
     /// An image by content hash (value: `{width, height, bytes}` with the encoded bytes in base64).
+    /// A key with the shape of a content hash (64 hex chars) must be exactly the lowercase sha256
+    /// hex `figcraft_format::image_hash` produces for the bytes; every key must be a plain
+    /// archive member name ([`figcraft_doc::ImageData::is_valid_key`]), and dimensions and byte
+    /// size are bounded as the entry applies (`image_of` in `docprops.rs`).
     Image(String),
+    /// A voter's ballot in a board's vote (value: the layer ids voted on).
+    Ballot(String),
 }
 
 /// One synced value a change writes: a node property, a document-level property or a
@@ -303,6 +313,13 @@ impl DocProp {
     }
 }
 
+impl Change {
+    /// Whether this puts or removes an image entry.
+    pub(crate) fn is_image(&self) -> bool {
+        matches!(self, Change::Put { entry: Entry::Image(_), .. } | Change::Remove { entry: Entry::Image(_) })
+    }
+}
+
 impl Entry {
     /// The client id space the entry's id lies in ([`figcraft_doc::ids`]): ids made during a live
     /// session carry their creator's client id, ids from before and ids of other forms are in
@@ -315,7 +332,7 @@ impl Entry {
             Entry::Variable(id) => Some(id_space(id, VARIABLE_ID_PREFIX)),
             Entry::Collection(id) => Some(id_space(id, COLLECTION_ID_PREFIX)),
             Entry::Comment(id) => Some(space_of(*id)),
-            Entry::DevSnapshot(_) | Entry::Image(_) => None,
+            Entry::DevSnapshot(_) | Entry::Image(_) | Entry::Ballot(_) => None,
         }
     }
 
@@ -328,6 +345,7 @@ impl Entry {
             Entry::Variable(id) => format!("variable {id}"),
             Entry::DevSnapshot(id) => format!("ready-for-dev snapshot of {id}"),
             Entry::Image(hash) => format!("image {hash}"),
+            Entry::Ballot(voter) => format!("ballot of {voter}"),
         }
     }
 
@@ -338,7 +356,7 @@ impl Entry {
             Entry::Comment(_) => Some(Family::Comments),
             Entry::Collection(_) => Some(Family::Collections),
             Entry::Variable(_) => Some(Family::Variables),
-            Entry::DevSnapshot(_) | Entry::Image(_) => None,
+            Entry::DevSnapshot(_) | Entry::Image(_) | Entry::Ballot(_) => None,
         }
     }
 }

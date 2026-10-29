@@ -236,6 +236,10 @@ fn task_export_png_and_svg() {
     c.ok("save_file", json!({"path": file.to_string_lossy()}));
     let opened = c.ok("open_file", json!({"path": file.to_string_lossy()}));
     assert!(opened["document"]["pages"][0]["children"].to_string().contains("Banner"));
+    // The tab is that file: `reload` reads it again from disk (#997).
+    let reread = c.ok("open_file", json!({"path": file.to_string_lossy(), "reload": true}));
+    assert_eq!(reread["opened"]["reloaded"], true, "{reread}");
+    assert!(reread["document"]["pages"][0]["children"].to_string().contains("Banner"));
     std::fs::remove_dir_all(&dir).ok();
 }
 
@@ -307,6 +311,32 @@ fn task_vector_edit_keys() {
     assert!(c.call("run_command", json!({"command": "vector.edit.state", "params": {}}))["isError"] == true, "Enter left edit mode");
 }
 
+#[test]
+fn task_node_find_without_selecting_then_use_ids_in_batch() {
+    let mut c = Client::new();
+    let card = c.create(json!({"type": "frame", "name": "Card"}));
+    let title = c.create(json!({"type": "text", "parent": card, "name": "Title", "text": "Hello"}));
+    c.ok("select", json!({"ids": [card]}));
+    let before = c.doc();
+    assert_eq!(c.run("node.find", json!({"root": card, "type": "text", "text": "HELLO"})), json!({"ids": [title], "total": 1}));
+    let after = c.doc();
+    for key in ["selection", "currentPage", "history"] {
+        assert_eq!(after[key], before[key], "{key}");
+    }
+    let out = c.ok(
+        "batch",
+        json!({"commands": [
+            {"command": "node.find", "params": {"root": card, "name": "title"}},
+            {"command": "node.set", "params": {"ids": [{"$step": 0, "field": "ids/0"}], "props": {"name": "Found title"}}}
+        ]}),
+    );
+    assert_eq!(out[0], json!({"ids": [title], "total": 1}));
+    assert_eq!(c.node(&title)["name"], "Found title");
+    assert_eq!(c.doc()["selection"], before["selection"]);
+    c.run("edit.undo", json!({}));
+    assert_eq!(c.node(&title)["name"], "Title");
+}
+
 /// A whole card in one `batch` call: later steps reach the frames earlier steps created through
 /// `{"$step": n}`, so the tree is built in one round-trip and one undo step.
 #[test]
@@ -342,4 +372,33 @@ fn task_card_in_one_batch() {
         ]}),
     );
     assert!(e.contains("step 0") && e.contains("earlier step"), "{e}");
+}
+
+/// Named steps and a path into a list result: duplicate a frame, then rename the copy through
+/// `{"$ref": "copy", "field": "ids/0"}` instead of counting steps.
+#[test]
+fn task_named_steps_and_a_duplicate_in_one_batch() {
+    let mut c = Client::new();
+    let out = c.ok(
+        "batch",
+        json!({"label": "Copy", "commands": [
+            {"command": "node.create", "as": "card", "params": {"type": "frame", "name": "Card", "width": 100, "height": 50}},
+            {"command": "edit.duplicate", "as": "copy", "params": {"ids": [{"$ref": "card"}]}},
+            {"command": "node.set", "params": {"ids": [{"$ref": "copy", "field": "ids/0"}], "props": {"name": "Card copy"}}},
+        ]}),
+    );
+    let results = ids(&out);
+    let copy = results[1]["ids"][0].clone();
+    assert_eq!(c.node(&copy)["name"], "Card copy");
+    assert_eq!(c.node(&results[0]["id"])["name"], "Card", "the original keeps its name");
+    assert_eq!(c.doc()["history"]["undo"][0], "Copy", "one undo step");
+    // An unknown name fails the whole batch, names the step and lists the names there are.
+    let e = c.err(
+        "batch",
+        json!({"commands": [
+            {"command": "node.create", "as": "card", "params": {"type": "frame"}},
+            {"command": "node.set", "params": {"ids": [{"$ref": "crad"}], "props": {"name": "x"}}},
+        ]}),
+    );
+    assert!(e.contains("step 1") && e.contains("\"crad\" names no step") && e.contains("\"card\" is step 0"), "{e}");
 }

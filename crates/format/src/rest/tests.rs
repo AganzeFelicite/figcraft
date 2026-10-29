@@ -366,6 +366,17 @@ fn text_styles_and_runs() {
 }
 
 #[test]
+fn max_lines_apply_only_while_truncating() {
+    let (doc, _) = one(json!([
+        {"id": "1", "name": "Auto", "type": "TEXT", "relativeTransform": at(0.0, 0.0), "size": {"x": 100, "y": 20}, "characters": "a",
+         "style": {"textAutoResize": "HEIGHT", "textTruncation": "DISABLED", "maxLines": 2}}
+    ]));
+    let NodeKind::Text(td) = &named(&doc, "Auto").kind else { panic!() };
+    assert_eq!((td.auto_resize, td.max_lines), (TextAutoResize::Height, 0));
+    assert!(!td.truncates());
+}
+
+#[test]
 fn auto_layout_constraints_and_grids() {
     let (doc, _) = one(json!([
         {"id": "1", "name": "Stack", "type": "FRAME", "relativeTransform": at(0.0, 0.0), "size": {"x": 100, "y": 300},

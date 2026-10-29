@@ -99,6 +99,15 @@ fit FigCraft's architecture:
   collide with what a connected client makes, because a client's numbers continue above every id of
   its space already in the document. Removed entries are part of the saved session state
   (`SessionState::removed`).
+- **Branches** of a file in a session stay with the person who made them; nothing about them goes
+  over the wire until a merge, which is an ordinary batch from that person (no message or format
+  change). So that the server takes the layers a branch made, a branch made in the session makes
+  its ids in its author's own client space, 2^24 above every id made there on the main file and the
+  author's other branches. Layers of the branch's base that main deleted during the session come
+  back with their ids (the server accepts re-creating deleted ids). Merging a branch whose new
+  layers, styles, variables or comments lie in another id space (one made offline or in an earlier
+  session) is refused by the app before anything is sent, since the server would refuse it (see
+  `crates/engine/src/sharing/branches.rs`).
 - Objects inside an entry are not separate objects: modes are part of their collection, a
   variable's values per mode part of the variable and replies part of their comment thread. Two
   people adding a mode to the same collection, editing different modes of one variable, or replying
@@ -142,7 +151,22 @@ As built:
   colour profile, image presets, annotation categories and library data (whole values); styles,
   comment threads, variable collections and variables (one entry per id plus the order of ids;
   the whole list when ids aren't unique); dev-mode snapshots (per layer); images (per content
-  hash, the encoded bytes as base64). The page order is the pages' positions.
+  hash, the encoded bytes as base64; as an entry applies the claim is checked: every key is
+  1–128 ASCII letters, digits, `-` or `_` (a saved file names the image `images/<key>`), a key
+  with the shape of a content hash (64 hex chars) must be exactly the lowercase sha256 hex of
+  those bytes (as the app writes them); a side is at most 65 535 px and the decoded bytes at
+  most 256 MiB (`ImageData::MAX_BYTES`, what the importers read), base64 that can't decode is
+  refused, a key that already holds an image can't be given other bytes, and an image a layer or
+  style still shows can't be removed; a snapshot or a server log written before these checks
+  opens without the image entries they refuse — judged against the state they apply to, so a
+  logged replacement or removal is left out too — rather than failing, and a file published to a
+  server is kept without them; a restarted server that left image entries out, or whose saved log
+  puts images, catches every resuming client up with its snapshot instead of that log); a
+  board's timer and vote (whole values, `DocProp::Timer` and
+  `DocProp::Vote`) and the vote's ballots (`Entry::Ballot(voter)`, one per voter, so people voting
+  at once write different entries). The timer travels as its end time (or, paused, the time left),
+  never as ticks: each client counts down on its own clock. The page order is the pages'
+  positions.
 - **Next**: this file's published library (it embeds a snapshot document; it moves with an asset
   channel, together with images, which then stop travelling inside batches); the version history
   (kept beside the document, not in it) on the standalone server; finer entries for modes,
@@ -837,9 +861,10 @@ Decisions, as built:
   welcomed as new after all (the server restarted without its state) starts over from the
   snapshot and is told how many unsent changes couldn't be kept.
 - **Catch-up.** The server keeps a log of accepted batches (`Limits::max_log_batches`, default
-  10 000, and `max_log_changes`, default 1 000 000). If every batch after the client's sequence
-  number is still in it, the welcome carries them (`CatchUp::Delta`); otherwise the whole document
-  (`CatchUp::Snapshot`).
+  10 000, `max_log_changes`, default 1 000 000, and `max_log_bytes`, default 64 MiB, which a
+  desktop host uses as they are and `figcraft-server` takes from its `max_log_mb`). If every batch
+  after the client's sequence number is still in it, the welcome carries them (`CatchUp::Delta`);
+  otherwise the whole document (`CatchUp::Snapshot`).
 - **What happened to the batches in flight.** The server remembers per client the last batch id it
   processed and the latest refused ids (at most 1 024). Batches up to that id that the catch-up
   doesn't confirm were refused (the user is told); the others are sent again, in order, keeping

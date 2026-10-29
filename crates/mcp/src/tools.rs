@@ -102,10 +102,42 @@ pub const TOOL_NAMES: &[&str] = &[
     "key",
     "type_text",
     "inspect_ui",
+    "wait_for_changes",
+];
+
+/// The tools that take `document`: they act on the file it names instead of the one in front.
+const DOCUMENT_TOOLS: &[&str] = &[
+    "run_command",
+    "batch",
+    "create_node",
+    "set_properties",
+    "inspect_document",
+    "get_node",
+    "select",
+    "export",
+    "screenshot",
+    "save_file",
+    "undo",
+    "redo",
 ];
 
 /// All tools, in `tools/list` order.
 pub fn tool_definitions() -> Vec<Value> {
+    let mut tools = tools();
+    let document = id_schema(
+        "The open file to act on: its `id` (from run_command doc.list, or the `document` open_file and inspect_document return) or its path. Default: the file in front. The tab in front stays in front; with an attached app, a screenshot of the window needs the file in front",
+    );
+    for t in &mut tools {
+        if t.get("name").and_then(Value::as_str).is_some_and(|n| DOCUMENT_TOOLS.contains(&n))
+            && let Some(props) = t.pointer_mut("/inputSchema/properties").and_then(Value::as_object_mut)
+        {
+            props.insert("document".into(), document.clone());
+        }
+    }
+    tools
+}
+
+fn tools() -> Vec<Value> {
     let empty = || obj(json!({}), &[]);
     vec![
         tool(
@@ -128,11 +160,12 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "batch",
             "Run commands as one step",
-            "Run several commands in order as ONE undo step (engine `command.batch`). If any command fails, everything is rolled back and the error names the failing step. Returns an array of the results in order. A later step can use a layer an earlier step created: anywhere in its params, {\"$step\": n} stands for the `id` in step n's result (zero-based; {\"$step\": n, \"field\": \"…\"} picks another field). Example: [{\"command\":\"node.create\",\"params\":{\"type\":\"frame\"}}, {\"command\":\"node.create\",\"params\":{\"type\":\"text\",\"text\":\"Hi\",\"parent\":{\"$step\":0}}}] builds a frame and a text inside it in one call.",
+            "Run several commands in order as ONE undo step (engine `command.batch`). By default (onError: \"abort\"), if any command fails, everything is rolled back and the error names the failing step; success returns an array of the results in order. With onError: \"continue\", a failed step is rolled back on its own, the later steps still run, the call is not an error, and the array instead holds one {step, command, ok, result} or {step, command, ok, error} object per step; a reference to a failed step fails that step too. A later step can use what an earlier step returned: name a step with \"as\": \"card\", then anywhere in a later step's params {\"$ref\": \"card\"} stands for the `id` in its result ({\"$step\": n} does the same by zero-based position). Add \"field\" for another part of the result: a key or a slash path, e.g. {\"$ref\": \"copy\", \"field\": \"ids/0\"} for the first id edit.duplicate returned (with \"map\": true it also returns `map`, each original id → its copy, so \"field\": \"map/3\" is the copy of layer 3). Any object with a `$ref` or `$step` key is a reference. Example: [{\"command\":\"node.create\",\"as\":\"card\",\"params\":{\"type\":\"frame\"}}, {\"command\":\"node.create\",\"params\":{\"type\":\"text\",\"text\":\"Hi\",\"parent\":{\"$ref\":\"card\"}}}] builds a frame and a text inside it in one call.",
             obj(
                 json!({
-                    "commands": {"type": "array", "minItems": 1, "description": "Steps to run", "items": obj(json!({"command": string("Command id"), "params": {"type": "object"}}), &["command"])},
+                    "commands": {"type": "array", "minItems": 1, "description": "Steps to run", "items": obj(json!({"command": string("Command id"), "params": {"type": "object"}, "as": string("Name for this step, unique in the batch; later steps use its result with {\"$ref\": name}")}), &["command"])},
                     "label": string("Undo history label (default \"Batch\")"),
+                    "onError": {"type": "string", "enum": ["abort", "continue"], "description": "abort (default) rolls back the whole batch on the first failure; continue rolls back only the failed step, runs the rest and returns one {step, command, ok, result|error} object per step"},
                 }),
                 &["commands"],
             ),
@@ -154,6 +187,9 @@ pub fn tool_definitions() -> Vec<Value> {
                     "name": string("Layer name"),
                     "text": string("Characters, for type text"),
                     "path": string("SVG path data, for type vector (e.g. \"M0 0 L100 0 L50 80 Z\")"),
+                    "points": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}, "description": "For type vector, instead of path: the points [[x, y], ...]"},
+                    "closed": boolean("For type vector: close the path"),
+                    "select": boolean("Select the new layer (default true)"),
                     "props": {"type": "object", "description": "Any set_properties keys applied at creation, e.g. {\"fill\":\"#3366FF\",\"cornerRadius\":12,\"fontSize\":24,\"layout\":\"vertical\",\"gap\":8,\"padding\":16}"},
                 }),
                 &["type"],
@@ -213,11 +249,11 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "export",
             "Export",
-            "Export layers (default: the selection, else every top-level layer of the current page) as png, jpg, svg, webp or pdf at `scale`, or the whole file as `fig` (experimental: written from public format knowledge, with `warnings` for what was left out; other apps may not open every file) (PDF: with `bleed`, `cropMarks`, `bleedMarks` and `cmyk` for print; options `contentsOnly`, `includeBoundingBox`, and for SVG `svgOutlineText`, `svgIdAttribute`, `svgSimplifyStroke`). With `path` the file is written there (absolute path recommended) and the result says where. Without `path`: png/jpg/webp come back as an image content block, svg as text, other formats as base64 `data`.",
+            "Export layers (default: the selection, else every top-level layer of the current page) as png, jpg, svg, webp, pdf or xml (an Android Vector Drawable, with `warnings` for what it changed or left out, per `vdCompat`) at `scale`, or the whole file as `fig` (experimental: written from public format knowledge, with `warnings` for what was left out; other apps may not open every file) (PDF: with `bleed`, `cropMarks`, `bleedMarks` and `cmyk` for print; options `contentsOnly`, `includeBoundingBox`, and for SVG `svgOutlineText`, `svgIdAttribute`, `svgSimplifyStroke`; for XML `svgIdAttribute` and `vdCompat`). With `path` the file is written there (absolute path recommended) and the result says where. Without `path`: png/jpg/webp come back as an image content block, svg as text, xml as text followed by `{format, warnings}`, other formats as base64 `data`.",
             obj(
                 json!({
                     "ids": ids_schema("Layers to export (several are composited into one image)"),
-                    "format": {"type": "string", "enum": ["png", "jpg", "svg", "webp", "pdf", "fig"], "description": "Format (default png, or from the path's extension)"},
+                    "format": {"type": "string", "enum": ["png", "jpg", "svg", "webp", "pdf", "xml", "fig"], "description": "Format (default png, or from the path's extension)"},
                     "scale": num("Pixel scale for raster formats (default 1, max 64)"),
                     "size": string("Instead of `scale`: `2x`, or a width or height in pixels like `512w` / `512h`"),
                     "path": string("Output file path"),
@@ -230,6 +266,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "svgOutlineText": boolean("SVG: text as outlines (default true); false keeps `<text>` elements"),
                     "svgIdAttribute": boolean("SVG: layer names as unique `id` attributes (default false)"),
                     "svgSimplifyStroke": boolean("SVG: strokes as `stroke` attributes where exact (default true); false writes outlines"),
+                    "vdCompat": {"type": "string", "enum": ["bestEffort", "exact", "ignore"], "description": "XML: what a Vector Drawable can't draw exactly is approximated with a warning (bestEffort, default), left out with a warning (exact), or written as far as it maps without warnings (ignore: overlapping layer opacity dropped, even-odd fills kept as fillType=evenOdd, diamond gradients left out)"},
                 }),
                 &[],
             ),
@@ -253,11 +290,12 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "open_file",
             "Open file",
-            "Open a .figcraft or .json document (FigCraft or REST API file JSON), a .fig file (best effort, with `warnings` for what wasn't imported), an .svg (becomes vectors) or an image (becomes an image layer) as the active document. Returns the new document's summary.",
+            "Open a .figcraft or .json document (FigCraft or REST API file JSON), a .fig or .sketch file (best effort, with `warnings` for what wasn't imported; .sketch from Sketch 48 or newer), an .svg (becomes vectors) or an image (becomes an image layer) as the active document. Returns the new document's summary.",
             obj(
                 json!({
                     "path": string("File path"),
                     "variables": {"description": "REST API file JSON only: the local variables JSON (`GET /v1/files/:key/variables/local`) as a path or the JSON object. Default: `<name>.variables.json` or `variables.json` next to the file."},
+                    "reload": boolean("A file that is already open: read it again from disk into its tab (refused while the tab has unsaved changes). Without it, the result says `stale: true` when the file changed on disk since the tab read or saved it"),
                 }),
                 &["path"],
             ),
@@ -287,6 +325,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "shift": boolean("Shift held"),
                     "alt": boolean("Alt/Option held"),
                     "cmd": boolean("Cmd (macOS) / Ctrl held"),
+                    "ctrl": boolean("Ctrl held (the Control key on macOS)"),
                     "pressure": num("Pen pressure 0-1 (the Pencil records it as the stroke's width profile; a drag starts with it)"),
                     "pressureTo": num("Pen pressure 0-1 at a drag's end (interpolated along it)"),
                 }),
@@ -299,7 +338,7 @@ pub fn tool_definitions() -> Vec<Value> {
             "Press key",
             "Press a key or shortcut as if typed on the canvas: a menu shortcut (e.g. {\"key\":\"G\",\"cmd\":true} groups, {\"key\":\"A\",\"alt\":true,\"shift\":false} …), a tool key (R, O, T, F, V…), Escape, Delete, Enter, arrows (nudge; shift = big nudge). While editing text, keys go to the text editor (Backspace, Delete, Left, Right, Home, End, Enter, Escape, SelectAll).",
             obj(
-                json!({"key": string("Key name: a letter/digit, Escape, Delete, Backspace, Enter, ArrowLeft…"), "shift": boolean("Shift"), "alt": boolean("Alt/Option"), "cmd": boolean("Cmd/Ctrl")}),
+                json!({"key": string("Key name: a letter/digit, Escape, Delete, Backspace, Enter, ArrowLeft…"), "shift": boolean("Shift"), "alt": boolean("Alt/Option"), "cmd": boolean("Cmd/Ctrl"), "ctrl": boolean("Ctrl (the Control key on macOS)")}),
                 &["key"],
             ),
             false,
@@ -318,13 +357,55 @@ pub fn tool_definitions() -> Vec<Value> {
             empty(),
             true,
         ),
+        tool(
+            "wait_for_changes",
+            "Wait for changes",
+            "Wait for new comment events in the attached FigCraft app. Returns pending events immediately; otherwise waits up to `timeoutMs` (default 20000, max 25000). Call it again with the returned `cursor` to keep watching. Headless returns immediately (no other writer). Events carry a sequence number, kind, document and a small payload (for comments, the thread id).",
+            obj(
+                json!({
+                    "after": int("Return events after this cursor (default 0)"),
+                    "timeoutMs": int("Longest wait in milliseconds (default 20000, max 25000)"),
+                    "topics": {"type": "array", "items": {"type": "string", "enum": ["comments", "document", "all"]}, "description": "Event topics (default [\"comments\"]; document events are not emitted yet)"},
+                    "limit": int("Most events to return (default 100, max 1000)")
+                }),
+                &[],
+            ),
+            true,
+        ),
     ]
 }
 
 // ---------- helpers ----------
 
+/// A backend whose every call names `document` (a tool's `document` argument).
+struct InDocument<'a> {
+    inner: &'a mut dyn Backend,
+    document: Value,
+}
+
+impl Backend for InDocument<'_> {
+    fn call(&mut self, method: &str, mut params: Value) -> Result<Value, String> {
+        if let Some(o) = params.as_object_mut() {
+            o.insert("document".into(), self.document.clone());
+        }
+        self.inner.call(method, params)
+    }
+
+    fn has_ui(&self) -> bool {
+        self.inner.has_ui()
+    }
+
+    fn describe(&self) -> String {
+        self.inner.describe()
+    }
+}
+
 fn exec(b: &mut dyn Backend, cmd: &str, params: Value) -> Result<Value, String> {
     b.call("engine.execute", json!({"command": cmd, "params": params}))
+}
+
+fn wait_for_changes(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, String> {
+    b.call("events.poll", Value::Object(a.clone())).map(|v| ToolResult::json(&v))
 }
 
 fn args_obj(args: &Value) -> Result<Map<String, Value>, String> {
@@ -413,11 +494,52 @@ fn friendly_params(p: &mut Value) {
 
 // ---------- dispatch ----------
 
+/// Refuse argument names `schema` doesn't list, at the top and in the objects it describes inside
+/// (a batch's steps); objects it leaves open (`params`) take any. `path` leads the names in the
+/// error (`commands[0].`).
+fn refuse_unknown_args(schema: &Value, args: &Value, path: &str) -> Result<(), String> {
+    if let (Some(props), Some(given)) = (schema.get("properties").and_then(Value::as_object), args.as_object()) {
+        let unknown: Vec<String> = given.keys().filter(|k| !props.contains_key(*k)).map(|k| format!("`{path}{k}`")).collect();
+        if !unknown.is_empty() {
+            let s = if unknown.len() == 1 { "" } else { "s" };
+            let takes: Vec<&str> = props.keys().map(String::as_str).collect();
+            let takes = if takes.is_empty() { "none".to_string() } else { takes.join(", ") };
+            return Err(format!("unknown argument{s} {} (it takes {takes})", unknown.join(", ")));
+        }
+        for (k, v) in given {
+            if let Some(inner) = props.get(k) {
+                refuse_unknown_args(inner, v, &format!("{path}{k}."))?;
+            }
+        }
+    }
+    if let (Some(items), Some(list)) = (schema.get("items"), args.as_array()) {
+        for (i, v) in list.iter().enumerate() {
+            refuse_unknown_args(items, v, &format!("{}[{i}].", path.trim_end_matches('.')))?;
+        }
+    }
+    Ok(())
+}
+
 /// Run one tool. Every failure becomes an `isError` result (never a panic).
 pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> ToolResult {
-    let a = match args_obj(args) {
+    let mut a = match args_obj(args) {
         Ok(a) => a,
         Err(e) => return ToolResult::error(e),
+    };
+    // Built once: the catalogue is the same on every call.
+    static TOOLS: std::sync::LazyLock<Vec<Value>> = std::sync::LazyLock::new(tool_definitions);
+    if let Some(schema) = TOOLS.iter().find(|t| t.get("name").and_then(Value::as_str) == Some(name)).and_then(|t| t.get("inputSchema"))
+        && let Err(e) = refuse_unknown_args(schema, &Value::Object(a.clone()), "")
+    {
+        return ToolResult::error(e);
+    }
+    let mut targeted;
+    let b: &mut dyn Backend = match a.remove("document").filter(|d| !d.is_null()) {
+        Some(document) => {
+            targeted = InDocument { inner: b, document };
+            &mut targeted
+        }
+        None => b,
     };
     let r = match name {
         "list_commands" => list_commands(b, &a),
@@ -438,6 +560,7 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> ToolResult {
         "key" => key(b, &a),
         "type_text" => type_text(b, &a),
         "inspect_ui" => b.call("ui.inspect", json!({})).map(|v| ToolResult::json(&v)),
+        "wait_for_changes" => wait_for_changes(b, &a),
         other => Err(format!("unknown tool `{other}` (tools/list has: {})", TOOL_NAMES.join(", "))),
     };
     r.unwrap_or_else(ToolResult::error)
@@ -513,10 +636,18 @@ fn batch(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, Stri
         };
         let mut params = params;
         friendly_params(&mut params);
-        steps.push(json!({"command": cmd, "params": params}));
+        let mut step = json!({"command": cmd, "params": params});
+        if let (Some(name), Some(o)) = (c.get("as"), step.as_object_mut()) {
+            o.insert("as".into(), name.clone());
+        }
+        steps.push(step);
     }
     let label = s_arg(a, "label")?.unwrap_or("Batch");
-    exec(b, "command.batch", json!({"label": label, "commands": steps})).map(|v| ToolResult::json(&v))
+    let mut params = json!({"label": label, "commands": steps});
+    if let Some(mode) = a.get("onError") {
+        params["onError"] = mode.clone();
+    }
+    exec(b, "command.batch", params).map(|v| ToolResult::json(&v))
 }
 
 fn create_node(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, String> {
@@ -742,7 +873,7 @@ fn get_node(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, S
             }
         }
         if used_wire + MARKER_RESERVE <= budget {
-            return Ok(ToolResult::json(&with_marker(value, depth, used, wire, used_wire, max_bytes, true, None)));
+            return Ok(ToolResult::json(&with_marker(value, Cut { asked: depth, used, asked_wire: wire, used_wire }, max_bytes, true, None)));
         }
     }
 
@@ -767,10 +898,7 @@ fn get_node(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, S
     let over = wire > budget || next.is_some();
     let mut out = with_marker(
         value,
-        depth,
-        used,
-        wire,
-        used_wire,
+        Cut { asked: depth, used, asked_wire: wire, used_wire },
         max_bytes,
         over,
         Some(json!({
@@ -812,19 +940,19 @@ fn children_window(value: &mut Value, offset: usize, budget: usize) -> bool {
     true
 }
 
-/// `value` with the `truncated` object saying how it was cut. `over`: the subtree asked for passed
-/// the limit (else the window is only the `offset` asked for). `children`: the window, when the
-/// children were cut as well as (or instead of) the depth.
-fn with_marker(
-    mut value: Value,
+/// How a subtree was cut: the depth asked for and the depth reported, with their sizes on the wire.
+struct Cut {
     asked: u64,
     used: u64,
     asked_wire: usize,
     used_wire: usize,
-    max_bytes: usize,
-    over: bool,
-    children: Option<Value>,
-) -> Value {
+}
+
+/// `value` with the `truncated` object saying how it was cut. `over`: the subtree asked for passed
+/// the limit (else the window is only the `offset` asked for). `children`: the window, when the
+/// children were cut as well as (or instead of) the depth.
+fn with_marker(mut value: Value, cut: Cut, max_bytes: usize, over: bool, children: Option<Value>) -> Value {
+    let Cut { asked, used, asked_wire, used_wire } = cut;
     if let Some(obj) = value.as_object_mut() {
         let mut marker = json!({
             "requestedDepth": asked,
@@ -878,8 +1006,8 @@ fn export(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, Str
     }
     let format = s_arg(a, "format")?.map(str::to_ascii_lowercase);
     if let Some(f) = &format {
-        if !["png", "jpg", "jpeg", "svg", "webp", "pdf", "fig"].contains(&f.as_str()) {
-            return Err(format!("unknown format `{f}` (png|jpg|svg|webp|pdf|fig)"));
+        if !["png", "jpg", "jpeg", "svg", "webp", "pdf", "xml", "fig"].contains(&f.as_str()) {
+            return Err(format!("unknown format `{f}` (png|jpg|svg|webp|pdf|xml|fig)"));
         }
         params.insert("format".into(), json!(f));
     }
@@ -893,9 +1021,18 @@ fn export(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, Str
         params.insert("size".into(), json!(s));
     }
     // PDF print options and the export options, checked by the command.
-    for k in
-        ["bleed", "cropMarks", "bleedMarks", "cmyk", "contentsOnly", "includeBoundingBox", "svgOutlineText", "svgIdAttribute", "svgSimplifyStroke"]
-    {
+    for k in [
+        "bleed",
+        "cropMarks",
+        "bleedMarks",
+        "cmyk",
+        "contentsOnly",
+        "includeBoundingBox",
+        "svgOutlineText",
+        "svgIdAttribute",
+        "svgSimplifyStroke",
+        "vdCompat",
+    ] {
         if let Some(v) = a.get(k).filter(|v| !v.is_null()) {
             params.insert(k.into(), v.clone());
         }
@@ -915,6 +1052,12 @@ fn export(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, Str
         "jpg" | "jpeg" => Ok(ToolResult::image(&bytes, "image/jpeg", &json!({"format": "jpg", "bytes": bytes.len()}))),
         "webp" => Ok(ToolResult::image(&bytes, "image/webp", &json!({"format": "webp", "bytes": bytes.len()}))),
         "svg" => Ok(ToolResult::text(String::from_utf8_lossy(&bytes).into_owned())),
+        "xml" => {
+            let info = json!({"format": "xml", "bytes": bytes.len(), "warnings": r.get("warnings").cloned().unwrap_or_else(|| json!([]))});
+            let mut out = ToolResult::text(String::from_utf8_lossy(&bytes).into_owned());
+            out.content.extend(ToolResult::json(&info).content);
+            Ok(out)
+        }
         other => {
             let mut out = json!({"format": other, "bytes": bytes.len(), "data": base64::engine::general_purpose::STANDARD.encode(&bytes)});
             if let Some(w) = r.get("warnings") {
@@ -974,6 +1117,9 @@ fn open_file(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, 
         None | Some(Value::Null) => {}
         Some(v @ (Value::String(_) | Value::Object(_))) => params["variables"] = v.clone(),
         Some(_) => return Err("`variables` must be a path or the local variables JSON object".into()),
+    }
+    if let Some(reload) = a.get("reload").filter(|v| !v.is_null()) {
+        params["reload"] = reload.clone();
     }
     let r = exec(b, "file.open", params)?;
     let doc = b.call("document.inspect", json!({"depth": 1}))?;

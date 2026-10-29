@@ -195,17 +195,25 @@ impl Duplex {
 
 impl Read for Duplex {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if let Some(d) = self.deadline {
-            let left = d.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(io::ErrorKind::TimedOut.into());
+        let n = loop {
+            if let Some(d) = self.deadline {
+                let left = d.saturating_duration_since(Instant::now());
+                if left.is_zero() {
+                    return Err(io::ErrorKind::TimedOut.into());
+                }
+                self.read.set_read_timeout(Some(left))?;
             }
-            self.read.set_read_timeout(Some(left))?;
-        }
-        let n = match &self.tls {
-            Some(t) => tls::read(t, &mut self.read, &self.write, buf),
-            None => self.read.read(buf),
-        }?;
+            let read = match &self.tls {
+                Some(t) => tls::read(t, &mut self.read, &self.write, buf),
+                None => self.read.read(buf),
+            };
+            match read {
+                // The socket's timeout can run out a moment before the deadline (it counts whole
+                // milliseconds): wait out the rest, so a read times out only once it has passed.
+                Err(e) if self.deadline.is_some() && matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => {}
+                read => break read?,
+            }
+        };
         if let Some(m) = self.meter.as_mut() {
             m.add(n)?;
         }

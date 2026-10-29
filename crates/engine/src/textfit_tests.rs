@@ -8,6 +8,7 @@ use serde_json::json;
 
 /// A fixed-width (auto-height) headline of `width` px at 64px. Returns its id.
 fn headline(s: &mut Session, text: &str, width: f64) -> NodeId {
+    figcraft_text::scan_system_fonts();
     let t = idv(&ex(s, "text.create", json!({"text": text, "x": 0, "y": 0, "props": {"name": "Headline", "fontSize": 64}})));
     ex(s, "node.set", json!({"id": t, "props": {"width": width, "textAutoResize": "height"}}));
     t
@@ -63,8 +64,11 @@ fn a_one_word_last_line_is_avoided() {
     assert!(l.lines.len() == 1 || words.split_whitespace().count() > 1 || words.contains('\u{a0}'), "{words:?}");
 }
 
+/// Asserts `data.fill` keeps a short copy's font size, shrinks a long copy, and leaves the
+/// source text layer untouched.
 #[test]
 fn data_fill_sizes_each_copys_text() {
+    figcraft_text::scan_system_fonts();
     let mut s = Session::new();
     let f = idv(&ex(&mut s, "frame.create", json!({"x": 0, "y": 0, "width": 1080, "height": 1350, "name": "Post"})));
     let t = idv(&ex(&mut s, "text.create", json!({"text": "Curto", "x": 80, "y": 80, "parent": f, "props": {"name": "Headline", "fontSize": 96}})));

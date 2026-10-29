@@ -23,12 +23,13 @@ enum Class {
     Glue,
 }
 
-/// Opening brackets and quotes (line-end prohibited).
-const OPEN: &str = "([{‘“〈《「『【〔〖〘〚〝（［｛｢";
-/// Closing brackets, quotes and punctuation, iteration marks, small kana and the prolonged sound
-/// mark (line-start prohibited; the small katakana extensions U+31F0..U+31FF are a range below).
-const CLOSE: &str =
-    ")]},.:;!?’”‥…‼⁇⁈⁉、。々〉》」』】〕〗〙〛〜〞〟〻ぁぃぅぇぉっゃゅょゎゕゖゝゞ゠ァィゥェォッャュョヮヵヶ・ーヽヾ！），．：；？］｝｡｣､･ｰ";
+/// Opening brackets and quotes (line-end prohibited, JIS X 4051's 行末禁則).
+const OPEN: &str = "([{‘“〈《「『【〔〖〘〚〝（［｛｢｟";
+/// Closing brackets, quotes and punctuation, iteration marks, small kana, the prolonged sound mark
+/// and the (semi-)voiced sound marks (line-start prohibited, JIS X 4051's 行頭禁則). Two blocks
+/// are ranges in [`class`] instead: the small katakana extensions U+31F0..U+31FF and the halfwidth
+/// small kana U+FF67..U+FF6F plus the halfwidth voicing marks U+FF9E/U+FF9F.
+const CLOSE: &str = ")]},.:;!?’”‥…‼⁇⁈⁉、。々〉》」』】〕〗〙〛〜〞〟〻ぁぃぅぇぉっゃゅょゎゕゖゝゞ゠ァィゥェォッャュョヮヵヶ・ーヽヾ！），．：；？］｝｡｣､･ｰ｠゛゜〱〲〳〴〵";
 
 fn class(c: char) -> Class {
     if c.is_ascii_alphanumeric() {
@@ -37,7 +38,7 @@ fn class(c: char) -> Class {
     if OPEN.contains(c) {
         return Class::Open;
     }
-    if CLOSE.contains(c) || ('\u{31F0}'..='\u{31FF}').contains(&c) {
+    if CLOSE.contains(c) || ('\u{31F0}'..='\u{31FF}').contains(&c) || ('\u{FF67}'..='\u{FF6F}').contains(&c) || matches!(c, '\u{FF9E}' | '\u{FF9F}') {
         return Class::Close;
     }
     match c {
@@ -75,6 +76,14 @@ pub(crate) fn is_space(c: char) -> bool {
     class(c) == Class::Space
 }
 
+/// Whether a line may break between `a` and the `b` after it when the text offers no break
+/// opportunity and has to break inside a word (Thai, Lao, Khmer and Burmese write no spaces):
+/// never before a letter's trailing mark, which belongs to the letter before it, and never after a
+/// leading vowel, which is written before the consonant it is read with (#1219).
+pub(crate) fn safe_emergency_break(a: char, b: char) -> bool {
+    !is_trailing_mark(b) && !matches!(a, '\u{0E40}'..='\u{0E44}' | '\u{0EC0}'..='\u{0EC4}')
+}
+
 /// For each char of `text`, whether it starts a grapheme cluster (a user-perceived character:
 /// an emoji sequence, a letter with its combining marks).
 pub(crate) fn grapheme_starts(text: &str) -> Vec<bool> {
@@ -89,7 +98,7 @@ pub(crate) fn grapheme_starts(text: &str) -> Vec<bool> {
 }
 
 /// The char index of the grapheme cluster boundary after (`forward`) or before char `index` in
-/// `text`: where an arrow key, Delete or Backspace moves the caret to.
+/// `text`: where an arrow key or Delete moves the caret to.
 pub fn grapheme_step(text: &str, index: usize, forward: bool) -> usize {
     let mut at = 0;
     for g in text.graphemes(true) {
@@ -102,6 +111,29 @@ pub fn grapheme_step(text: &str, index: usize, forward: bool) -> usize {
     at.min(index)
 }
 
+/// The start of the text deleted by Backspace at char `index`.
+///
+/// A letter's trailing mark (Grapheme_Cluster_Break Extend or SpacingMark, such as Thai MAI THO or
+/// SARA AM) is deleted on its own; other grapheme clusters remain atomic, so emoji sequences, flags,
+/// keycaps and Hangul syllables written as conjoining jamo stay intact.
+pub fn backspace_step(text: &str, index: usize) -> usize {
+    let end = text.chars().count().min(index);
+    let start = grapheme_step(text, end, false);
+    if start == end {
+        return end;
+    }
+
+    let cluster = text.chars().skip(start).take(end - start).collect::<Vec<_>>();
+    let letter_cluster = cluster.len() > 1 && cluster.first().is_some_and(|c| c.is_alphabetic());
+    if letter_cluster && cluster.last().is_some_and(|&c| is_trailing_mark(c)) { end - 1 } else { start }
+}
+
+/// Whether `c` is Extend or SpacingMark: it joins a plain letter's cluster. ZWJ also joins one but
+/// is a joiner, not a mark.
+fn is_trailing_mark(c: char) -> bool {
+    c != '\u{200D}' && format!("a{c}").graphemes(true).count() == 1
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -112,5 +144,16 @@ mod tests {
         assert!(!break_between('1', '\u{2007}'));
         assert!(!break_between('日', '\u{2007}') && !break_between('\u{2007}', '日'), "nor beside ideographs");
         assert!(!is_space('\u{2007}'));
+    }
+
+    #[test]
+    fn emergency_breaks_keep_marks_and_leading_vowels_with_their_letter() {
+        // #1219: Thai and Lao write no spaces, so these are where a line has to be forced to break.
+        assert!(!safe_emergency_break('\u{0E01}', '\u{0E49}'), "never before a tone mark");
+        assert!(!safe_emergency_break('\u{0E01}', '\u{0E33}'), "nor before SARA AM");
+        assert!(!safe_emergency_break('\u{0E40}', '\u{0E2B}'), "never after a leading vowel");
+        assert!(!safe_emergency_break('\u{0EC0}', '\u{0EAB}'), "nor in Lao");
+        assert!(safe_emergency_break('\u{0E01}', '\u{0E02}'), "between two letters is fine");
+        assert!(safe_emergency_break('\u{0E2B}', '\u{0E40}'), "before a leading vowel is fine");
     }
 }

@@ -20,6 +20,10 @@ impl Args {
         let mut bad: Option<CliError> = None;
         let mut it = argv.iter();
         while let Some(arg) = it.next() {
+            if arg == "--" {
+                a.positional.extend(it.cloned());
+                break;
+            }
             let name = if let Some(n) = arg.strip_prefix("--") {
                 n
             } else if let Some(n) = arg.strip_prefix('-').filter(|n| n.len() == 1 && !n.starts_with(|c: char| c.is_ascii_digit())) {
@@ -85,6 +89,15 @@ impl Args {
                 .ok_or_else(|| CliError::Usage(format!("--bleed takes points or a length like 3mm or 0.125in (up to 2in), got `{s}`")))?,
         };
         Ok(figcraft_doc::PrintSettings { bleed, crop_marks: self.flag("crop-marks"), bleed_marks: self.flag("bleed-marks"), cmyk: self.flag("cmyk") })
+    }
+
+    /// `--vd-compat bestEffort|exact|ignore` (Android Vector Drawable exports; default bestEffort).
+    pub fn vd_compat(&self) -> CliResult<figcraft_doc::VdCompat> {
+        match self.value("vd-compat") {
+            None => Ok(figcraft_doc::VdCompat::default()),
+            Some(s) => figcraft_doc::VdCompat::from_key(&s)
+                .ok_or_else(|| CliError::Usage(format!("--vd-compat takes bestEffort, exact or ignore, got `{s}`"))),
+        }
     }
 
     pub fn scale(&self) -> CliResult<f64> {

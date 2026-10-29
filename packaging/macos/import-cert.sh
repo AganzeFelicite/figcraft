@@ -19,7 +19,9 @@ fi
 
 TMP_BASE="${RUNNER_TEMP:-${TMPDIR:-/tmp}}"
 TMP="$(mktemp -d "${TMP_BASE}/figcraft-signing.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+# Remove only the decoded certificate: the keychain lives in the same directory and codesign
+# needs it until the workflow's "Remove temporary keychain" step deletes it.
+trap 'rm -f "${CERT:-}"' EXIT
 KEYCHAIN="$TMP/figcraft-signing.keychain-db"
 CERT="$TMP/figcraft-signing.p12"
 KC_PASS="${KEYCHAIN_PASSWORD:-$(openssl rand -hex 24)}"

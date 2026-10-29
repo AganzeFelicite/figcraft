@@ -18,7 +18,7 @@ fn widths(language: &str) -> Vec<f32> {
     s.execute("select.set", &json!({"ids": [text]})).unwrap();
     let ctx = egui::Context::default();
     let mut app = FigApp::new(s, Box::new(NoServices));
-    let open = Id::new("ty_settings_open");
+    let open = Id::unique("ty_settings_open");
     let mut widths = Vec::new();
     for i in 0..40 {
         if i == 3 {

@@ -1,10 +1,10 @@
 //! View menu, preferences and tools. View state is per document and drivable like everything else.
 
-use figcraft_doc::*;
+use figcraft_doc::NodeId;
 use serde_json::{Value, json};
 
 use super::{CommandSpec, ok};
-use crate::params::*;
+use crate::params::{boolean, get, num, num_or, req_index, req_num, req_string, string};
 use crate::tools::ToolId;
 use crate::{EngineError, Result, Session, ViewState, bad, spec};
 
@@ -373,7 +373,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "pref.uiScale",
             "Interface size",
-            "{scale?: a size from 0.75 to 3 relative to the system's display scale, 1 being the system's own size, so 1.25 is 125 %, not 125 (outside the range it stops at the nearest end; \"auto\" is 1; omit: just read it)} → {scale}: how large the whole interface is drawn; the canvas zoom is separate",
+            "{scale? (a size from 0.75 to 3 relative to the system's display scale: 1 is the system's own size, so 1.25 is 125 %, not 125; outside the range it stops at the nearest end; \"auto\" is 1; omit: just read it)} → {scale}: how large the whole interface is drawn; the canvas zoom is separate",
             false,
             |s, p| {
                 match get(p, "scale") {
@@ -427,7 +427,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "pref.language",
             "Interface language",
-            "{language: system|en|cs|ru|es|es-419|fr|de|pt-BR|ja|ka|ko|zh-Hans|…; else English}",
+            "{language: system|en|cs|ru|es|es-419|fr|de|pt-BR|ja|ka|ko|vi|zh-Hans|…; else English}",
             false,
             |s, p| {
                 let lang = req_string("pref.language", p, "language")?;
@@ -535,6 +535,9 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!("tool.pen", "Pen", "{}", false, |s, _| tool(s, ToolId::Pen)),
         spec!("tool.pencil", "Pencil", "{}", false, |s, _| tool(s, ToolId::Pencil)),
         spec!("tool.text", "Text", "{}", false, |s, _| tool(s, ToolId::Text)),
+        spec!("tool.textOnPath", "Text on a path", "{}  a click on a shape's or vector's path puts new text on it", false, |s, _| {
+            tool(s, ToolId::TextOnPath)
+        }),
         spec!("tool.comment", "Comment", "{}", false, |s, _| tool(s, ToolId::Comment)),
         spec!("tool.shapeBuilder", "Shape builder", "{}", false, |s, _| tool(s, ToolId::ShapeBuilder)),
         // `apply: false` is for the UI colour picker: the eyedropper only samples (into

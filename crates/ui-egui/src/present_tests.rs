@@ -137,6 +137,28 @@ fn preview_pane_opens_follows_edits_and_the_selection() {
     assert!(u.app.ui.preview.is_none());
 }
 
+/// A controller button pressed while the pane has no frame to show is dropped, and does not play
+/// once the frame comes back.
+#[test]
+fn controller_buttons_pressed_with_no_frame_shown_are_dropped() {
+    let (mut u, a, b, _) = setup();
+    let to_b = json!({"type": "navigate", "dest": b});
+    u.run("proto.interaction.add", json!({"id": a, "trigger": {"type": "keyPress", "key": "Gamepad A"}, "action": to_b}));
+    u.run("proto.preview", json!({"start": a}));
+    u.run("edit.delete", json!({"ids": [a]}));
+    let ctx = u.ctx.clone();
+    crate::control::handle(&mut u.app, &ctx, "ui.input", &json!({"events": [{"gamepad": "A"}]})).unwrap();
+    u.frames(2, Vec::new);
+    u.run("edit.undo", json!({}));
+    u.frames(2, Vec::new);
+    assert_eq!(u.preview()["current"], json!(a), "the button pressed with no frame shown did not play");
+    crate::control::handle(&mut u.app, &ctx, "ui.input", &json!({"events": [{"gamepad": "A"}]})).unwrap();
+    u.frames(2, Vec::new);
+    assert_eq!(u.preview()["current"], json!(b), "a button pressed with the frame shown plays");
+}
+
+/// Asserts the preview's device viewport and scroll range, wheel and drag scrolling, the
+/// end clamp with spring-back, and that navigation resets scroll to the top.
 #[test]
 fn the_frame_scrolls_on_the_device_screen_by_wheel_and_drag() {
     let (mut u, a, b, _) = setup();
@@ -150,6 +172,7 @@ fn the_frame_scrolls_on_the_device_screen_by_wheel_and_drag() {
             Event::PointerMoved(c),
             Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Point,
+                source: egui::MouseWheelSource::Unknown,
                 delta: vec2(0.0, -60.0),
                 phase: egui::TouchPhase::Move,
                 modifiers: Default::default(),
@@ -203,6 +226,7 @@ fn a_top_level_frame_taller_than_the_phone_scrolls_without_an_overflow_setting()
             Event::PointerMoved(c),
             Event::MouseWheel {
                 unit: egui::MouseWheelUnit::Point,
+                source: egui::MouseWheelSource::Unknown,
                 delta: vec2(0.0, -60.0),
                 phase: egui::TouchPhase::Move,
                 modifiers: Default::default(),

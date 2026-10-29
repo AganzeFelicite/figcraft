@@ -16,7 +16,7 @@ that serves static files.
 
 The editor runs entirely on the visitor's device. The web build starts with one new document;
 there is no desktop TCP control server, and native file dialogs aren't wired up yet. A browser
-with WebGPU or WebGL2 is required.
+with WebGPU or WebGL2 and WebAssembly SIMD is required (any current browser; Safari 16.4 or later).
 
 ## Live sessions
 

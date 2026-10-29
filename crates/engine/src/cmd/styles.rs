@@ -3,11 +3,14 @@
 use std::collections::BTreeMap;
 
 use figcraft_color::{Color, Paint, PaintKind};
-use figcraft_doc::*;
+use figcraft_doc::{
+    Collection, CollectionId, Document, Effect, EffectKind, Mode, ModeId, Node, NodeId, NodeKind, Style, StyleId, StyleKind, TextData, TextStyle,
+    Variable, VariableId, VariableType, VariableValue, Variables, trim_num,
+};
 use serde_json::{Value, json};
 
 use super::{CommandSpec, ok};
-use crate::params::*;
+use crate::params::{color_of, f64_of, get, id, num, paints_of, req_string, req_targets, string, targets};
 use crate::{EngineError, Result, Session, bad, spec};
 
 pub fn specs() -> Vec<CommandSpec> {
@@ -161,7 +164,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "variable.create",
             "Create variable",
-            "{collection, name, type: color|number|string|boolean, value (default mode) | values {modeName: value}}",
+            "{collection, name, type: color|number|string|boolean, value (default mode) | values {modeName: value}, description?}",
             true,
             var_create
         ),
@@ -772,13 +775,20 @@ pub fn bind(s: &mut Session, p: &Value) -> Result<Value> {
         Some(v) => Some(doc.variables.get(v).map(|x| x.id.clone()).ok_or_else(|| bad(cmd, "no such variable"))?),
         None => None,
     };
+    bind_variable(cmd, doc, &ids, &field, vid.as_deref())?;
+    ok()
+}
+
+/// Bind an already resolved variable id, or unbind, inside the caller's transaction. Props and
+/// `variable.bind` share type checks and paint alpha handling; normalisation applies the value.
+pub(crate) fn bind_variable(cmd: &str, doc: &mut Document, ids: &[NodeId], field: &str, vid: Option<&str>) -> Result<()> {
     // An instance's component property takes a variable of its type; other fields the types their
     // scopes belong to.
-    if let Some(v) = vid.as_ref().and_then(|v| doc.variables.get(v)) {
-        for i in &ids {
+    if let Some(v) = vid.and_then(|v| doc.variables.get(v)) {
+        for i in ids {
             match field.strip_prefix(crate::components::PROP_BINDING) {
                 Some(name) => super::component::check_prop_binding(doc, *i, name, v.kind).map_err(|e| bad(cmd, e))?,
-                None if !super::variables::field_takes(doc, *i, &field, v.kind) => {
+                None if !super::variables::field_takes(doc, *i, field, v.kind) => {
                     return Err(bad(cmd, format!("`{field}` doesn't take a {} variable", v.kind.id())));
                 }
                 None => {}
@@ -786,22 +796,32 @@ pub fn bind(s: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     for i in ids {
-        let n = doc.get_mut(i)?;
-        match &vid {
+        let n = doc.get_mut(*i)?;
+        match vid {
             Some(v) => {
-                if n.bound.get(&field) != Some(v) {
-                    rebind_paint_alpha(&mut n.fills, &mut n.strokes, &field, true);
+                if n.bound.get(field).map(String::as_str) != Some(v) {
+                    rebind_paint_alpha(&mut n.fills, &mut n.strokes, field, true);
                 }
-                n.bound.insert(field.clone(), v.clone());
+                n.bound.insert(field.to_string(), v.to_string());
             }
             None => {
-                if n.bound.remove(&field).is_some() {
-                    rebind_paint_alpha(&mut n.fills, &mut n.strokes, &field, false);
+                if n.bound.remove(field).is_some() {
+                    rebind_paint_alpha(&mut n.fills, &mut n.strokes, field, false);
                 }
             }
         }
     }
-    ok()
+    Ok(())
+}
+
+/// Remove every binding key of the slot (`fill` and `fills/0/color` name the same one); true when
+/// one was there.
+pub(crate) fn unbind_slot(n: &mut figcraft_doc::Node, fills: bool, index: usize) -> bool {
+    use super::lists::{BoundList, list_binding};
+    let list = if fills { BoundList::Fills } else { BoundList::Strokes };
+    let before = n.bound.len();
+    n.bound.retain(|key, _| list_binding(key).is_none_or(|(l, i, field)| !(l == list && i == index && field == "color")));
+    n.bound.len() != before
 }
 
 /// A colour variable bound to a solid paint owns its whole colour, alpha included. Binding takes the
@@ -1009,8 +1029,8 @@ fn bound_field(n: &Node, field: &str) -> Option<String> {
     let cl = &n.child_layout;
     let pad = |i: usize| layout.and_then(|l| l.padding.get(i).copied());
     Some(match field {
-        "width" => format!("{}", n.width),
-        "height" => format!("{}", n.height),
+        "width" | "w" => format!("{}", n.width),
+        "height" | "h" => format!("{}", n.height),
         "minWidth" => format!("{:?}", cl.min_w),
         "maxWidth" => format!("{:?}", cl.max_w),
         "minHeight" => format!("{:?}", cl.min_h),

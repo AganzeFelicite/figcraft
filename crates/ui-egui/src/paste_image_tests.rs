@@ -29,6 +29,7 @@ const HELD: [Held; 3] = [Held::Ours, Held::Text, Held::Image];
 struct Clip {
     text: Option<String>,
     image: Option<(u32, u32, Vec<u8>)>,
+    png: Option<Vec<u8>>,
 }
 
 /// The desktop clipboard.
@@ -36,13 +37,16 @@ struct Desktop(Rc<RefCell<Clip>>);
 
 impl Services for Desktop {
     fn clipboard_set_text(&mut self, s: &str) {
-        *self.0.borrow_mut() = Clip { text: Some(s.into()), image: None };
+        *self.0.borrow_mut() = Clip { text: Some(s.into()), ..Clip::default() };
     }
     fn clipboard_get_text(&mut self) -> Option<String> {
         self.0.borrow().text.clone()
     }
     fn clipboard_get_image(&mut self) -> Option<(u32, u32, Vec<u8>)> {
         self.0.borrow().image.clone()
+    }
+    fn clipboard_get_png(&mut self) -> Option<Vec<u8>> {
+        self.0.borrow().png.clone()
     }
 }
 
@@ -58,6 +62,7 @@ impl Win {
     fn new() -> Self {
         let mut s = Session::new();
         s.execute("shape.rectangle", &json!({"x": 10, "y": 10, "width": 100, "height": 50})).unwrap();
+        s.execute("select.none", &json!({})).unwrap();
         let ctx = egui::Context::default();
         let clip = Rc::new(RefCell::new(Clip::default()));
         let app = FigApp::new(s, Box::new(Desktop(clip.clone())));
@@ -89,7 +94,7 @@ impl Win {
     }
 
     fn copy_image_elsewhere(&mut self) {
-        *self.clip.borrow_mut() = Clip { text: None, image: Some((2, 2, vec![255; 16])) };
+        *self.clip.borrow_mut() = Clip { image: Some((2, 2, vec![255; 16])), ..Clip::default() };
     }
 
     /// Cmd/Ctrl+V as egui-winit delivers it: the press brings a paste event when the clipboard
@@ -176,8 +181,78 @@ fn cmd_v_pastes_an_image_copied_elsewhere() {
     w.copy_image_elsewhere();
     w.cmd_v(CMD);
     assert_eq!(w.named("Pasted image"), 1, "the image was pasted from the key's release");
+    w.app.session.execute("select.none", &json!({})).unwrap();
     w.cmd_v(CMD);
     assert_eq!(w.named("Pasted image"), 2, "and again");
+}
+
+#[test]
+fn cmd_v_fills_a_selected_oval_without_adding_a_layer() {
+    let mut w = Win::new();
+    let oval =
+        NodeId(w.app.session.execute("shape.ellipse", &json!({"x": 200, "y": 100, "width": 120, "height": 80})).unwrap()["id"].as_u64().unwrap());
+    let before = w.app.session.doc().unwrap().node_count();
+    let original_fill = w.app.session.doc().unwrap().node(oval).unwrap().fills.clone();
+    w.copy_image_elsewhere();
+    w.cmd_v(CMD);
+
+    let doc = w.app.session.doc().unwrap();
+    let node = doc.node(oval).unwrap();
+    assert_eq!(doc.node_count(), before);
+    assert!(matches!(node.kind, figcraft_doc::NodeKind::Ellipse { .. }));
+    // Added on top: the oval's own fill stays under it.
+    assert_eq!(node.fills.len(), original_fill.len() + 1);
+    assert_eq!(node.fills[..original_fill.len()], original_fill[..]);
+    assert!(matches!(node.fills.last().unwrap().kind, figcraft_color::PaintKind::Image(_)));
+    assert_eq!((node.width, node.height), (120.0, 80.0));
+    assert_eq!(w.app.session.selection(), vec![oval]);
+    let png = figcraft_engine::cmd::file::export_bytes(doc, &[oval], figcraft_doc::ExportFormat::Png, 1.0).unwrap();
+    let pixels = image::load_from_memory(&png).unwrap().to_rgba8();
+    assert_eq!(pixels.get_pixel(0, 0)[3], 0, "the picture stays inside the oval");
+    assert_eq!(pixels.get_pixel(60, 40)[3], 255, "the oval contains the picture");
+
+    w.app.session.undo().unwrap();
+    assert_eq!(w.app.session.doc().unwrap().node(oval).unwrap().fills, original_fill);
+}
+
+#[test]
+fn pasting_an_image_keeps_the_other_fills_variables() {
+    let mut w = Win::new();
+    let oval =
+        NodeId(w.app.session.execute("shape.ellipse", &json!({"x": 200, "y": 100, "width": 120, "height": 80})).unwrap()["id"].as_u64().unwrap());
+    w.app.session.execute("variable.createCollection", &json!({"name": "Theme"})).unwrap();
+    w.app.session.execute("variable.create", &json!({"collection": "Theme", "name": "brand", "type": "color", "value": "#FF0000"})).unwrap();
+    w.app.session.execute("variable.bind", &json!({"ids": [oval.0], "field": "fill", "variable": "brand"})).unwrap();
+    assert!(!w.app.session.doc().unwrap().node(oval).unwrap().bound.is_empty());
+
+    w.copy_image_elsewhere();
+    w.cmd_v(CMD);
+    let node = w.app.session.doc().unwrap().node(oval).unwrap();
+    assert!(matches!(node.fills.last().unwrap().kind, figcraft_color::PaintKind::Image(_)));
+    assert!(matches!(node.fills[0].kind, figcraft_color::PaintKind::Solid { .. }));
+    assert!(!node.bound.is_empty(), "the colour fill under the image keeps its variable");
+}
+
+/// An image layer copied in FigCraft pastes as a layer, a selected shape or not.
+#[test]
+fn an_image_layer_copied_in_figcraft_pastes_as_a_layer() {
+    let mut w = Win::new();
+    w.copy_image_elsewhere();
+    w.cmd_v(CMD);
+    let source = w.app.session.selection()[0];
+    crate::menus::invoke(&mut w.app, "edit.copy");
+
+    let oval =
+        NodeId(w.app.session.execute("shape.ellipse", &json!({"x": 200, "y": 100, "width": 120, "height": 80})).unwrap()["id"].as_u64().unwrap());
+    let fills = w.app.session.doc().unwrap().node(oval).unwrap().fills.clone();
+    let before = w.app.session.doc().unwrap().node_count();
+    w.cmd_v(CMD);
+
+    let doc = w.app.session.doc().unwrap();
+    assert_eq!(doc.node_count(), before + 1);
+    assert!(doc.contains(source));
+    assert_eq!(doc.node(oval).unwrap().fills, fills);
+    assert_ne!(w.app.session.selection(), vec![oval]);
 }
 
 #[test]
@@ -191,7 +266,7 @@ fn cmd_released_before_v_still_pastes_the_image() {
 #[test]
 fn text_pastes_once_from_its_paste_event() {
     let mut w = Win::new();
-    *w.clip.borrow_mut() = Clip { text: Some("hello from another app".into()), image: None };
+    *w.clip.borrow_mut() = Clip { text: Some("hello from another app".into()), ..Clip::default() };
     w.cmd_v(CMD);
     assert_eq!(w.texts(), 1, "the paste event pasted the text, the release nothing more");
     assert_eq!(w.rects(), 1);
@@ -200,7 +275,7 @@ fn text_pastes_once_from_its_paste_event() {
 #[test]
 fn text_pastes_once_when_another_key_is_let_go_first() {
     let mut w = Win::new();
-    *w.clip.borrow_mut() = Clip { text: Some("hello".into()), image: None };
+    *w.clip.borrow_mut() = Clip { text: Some("hello".into()), ..Clip::default() };
     // Cmd+A then Cmd+V typed fast: A comes up after V went down.
     w.frame(vec![key(Key::A, true, CMD)]);
     w.frame(vec![Event::Paste("hello".into())]);
@@ -243,10 +318,11 @@ fn v_alone_pastes_nothing() {
 #[test]
 fn a_paste_event_from_another_key_does_not_block_the_next_cmd_v() {
     let mut w = Win::new();
-    *w.clip.borrow_mut() = Clip { text: Some("text".into()), image: None };
+    *w.clip.borrow_mut() = Clip { text: Some("text".into()), ..Clip::default() };
     // Shift+Insert on Windows.
     w.frame(vec![Event::Paste("text".into())]);
     w.frame(vec![key(Key::Insert, false, Modifiers::SHIFT)]);
+    w.app.session.execute("select.none", &json!({})).unwrap();
     w.copy_image_elsewhere();
     w.cmd_v(CMD);
     assert_eq!(w.named("Pasted image"), 1);
@@ -406,4 +482,69 @@ fn cmd_v_after_a_paste_chord_is_a_plain_paste_again() {
     w.chord(CMD);
     assert_eq!(w.texts(), 1, "the text was pasted by the plain Cmd+V");
     assert_eq!(w.rects_besides(b), [(10, 10), (400, 250)], "Shift+Cmd+V pasted over once");
+}
+
+fn crc32(bytes: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            crc = if crc & 1 == 1 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+fn retina_screenshot(width: u32, height: u32) -> Vec<u8> {
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::new(width, height).write_to(&mut png, image::ImageFormat::Png).unwrap();
+    let png = png.into_inner();
+    let after_header = 8 + 8 + 13 + 4;
+    let mut chunk = b"pHYs".to_vec();
+    chunk.extend(5669u32.to_be_bytes());
+    chunk.extend(5669u32.to_be_bytes());
+    chunk.push(1);
+    let mut out = png[..after_header].to_vec();
+    out.extend(9u32.to_be_bytes());
+    out.extend(&chunk);
+    out.extend(crc32(&chunk).to_be_bytes());
+    out.extend(&png[after_header..]);
+    out
+}
+
+#[test]
+fn a_retina_screenshot_on_the_clipboard_pastes_at_its_point_size_centred() {
+    let mut w = Win::new();
+    *w.clip.borrow_mut() = Clip { png: Some(retina_screenshot(800, 600)), image: Some((2, 2, vec![255; 16])), ..Clip::default() };
+    w.cmd_v(CMD);
+    let doc = w.app.session.doc().unwrap();
+    let pasted = doc.nodes().find(|n| n.name == "Pasted image").expect("pasted");
+    assert_eq!((pasted.width, pasted.height), (400.0, 300.0), "points, not the 800 x 600 pixels");
+    let view = &w.app.session.ds().unwrap().view;
+    let at = doc.world_bounds(pasted.id).unwrap();
+    assert_eq!((at.x0, at.y0), ((view.cx - 200.0).round(), (view.cy - 150.0).round()));
+}
+
+#[test]
+fn an_unreadable_png_on_the_clipboard_falls_back_to_the_decoded_image() {
+    let mut w = Win::new();
+    *w.clip.borrow_mut() = Clip { png: Some(b"\x89PNG\r\n\x1a\nnot an image".to_vec()), image: Some((2, 2, vec![255; 16])), ..Clip::default() };
+    w.cmd_v(CMD);
+    let doc = w.app.session.doc().unwrap();
+    let pasted = doc.nodes().find(|n| n.name == "Pasted image").expect("pasted from the decoded image");
+    assert_eq!((pasted.width, pasted.height), (2.0, 2.0));
+}
+
+#[test]
+fn a_clipboard_png_past_the_byte_limit_falls_back_to_the_decoded_image() {
+    let mut w = Win::new();
+    let mut png = std::io::Cursor::new(Vec::new());
+    image::RgbaImage::new(4, 4).write_to(&mut png, image::ImageFormat::Png).unwrap();
+    let mut png = png.into_inner();
+    png.resize(crate::MAX_CLIPBOARD_PNG_BYTES + 1, 0);
+    *w.clip.borrow_mut() = Clip { png: Some(png), image: Some((2, 2, vec![255; 16])), ..Clip::default() };
+    w.cmd_v(CMD);
+    let doc = w.app.session.doc().unwrap();
+    let pasted = doc.nodes().find(|n| n.name == "Pasted image").expect("pasted from the decoded image");
+    assert_eq!((pasted.width, pasted.height), (2.0, 2.0));
 }

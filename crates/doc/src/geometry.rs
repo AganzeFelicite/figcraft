@@ -17,8 +17,10 @@ pub fn shape_path(n: &Node) -> Option<BezPath> {
         | NodeKind::Section { .. } => figcraft_geom::rounded_rect(w, h, c.radii, c.smoothing),
         NodeKind::Slice => figcraft_geom::rounded_rect(w, h, [0.0; 4], 0.0),
         NodeKind::Ellipse { start, sweep, inner } => figcraft_geom::ellipse(w, h, *start, *sweep, *inner),
-        NodeKind::Polygon { count } => figcraft_geom::rounded_polygon(&figcraft_geom::polygon_points(w, h, *count), c.radii[0]),
-        NodeKind::Star { count, inner_ratio } => figcraft_geom::rounded_polygon(&figcraft_geom::star_points(w, h, *count, *inner_ratio), c.radii[0]),
+        NodeKind::Polygon { count } => figcraft_geom::smoothed_polygon(&figcraft_geom::polygon_points(w, h, *count), c.radii[0], c.smoothing),
+        NodeKind::Star { count, inner_ratio } => {
+            figcraft_geom::smoothed_polygon(&figcraft_geom::star_points(w, h, *count, *inner_ratio), c.radii[0], c.smoothing)
+        }
         NodeKind::Line => {
             let mut p = BezPath::new();
             p.move_to((0.0, 0.0));
@@ -71,6 +73,23 @@ fn hits_node_itself(doc: &Document, id: NodeId, n: &Node, pt: Point, tol: f64, o
         }
         NodeKind::Frame | NodeKind::Component { .. } | NodeKind::ComponentSet { .. } | NodeKind::Instance { .. } | NodeKind::Section { .. } => {
             n.local_rect().inflate(tol_l, tol_l).contains(lp)
+        }
+        NodeKind::Vector { network } if network.regions.iter().any(|r| r.fills.is_some() || r.paint_space.is_some()) => {
+            let rounded = network.rounded();
+            let net = rounded.as_ref().unwrap_or(network);
+            if !outline {
+                for (i, region) in net.regions.iter().enumerate().rev() {
+                    let paints = region.fills.as_deref().unwrap_or(&n.fills);
+                    if paints.iter().any(|p| p.visible) && net.region_contains(i, lp) {
+                        return true;
+                    }
+                }
+            }
+            let path = net.stroke_path();
+            let has_fill = net.regions.iter().any(|region| region.fills.as_deref().unwrap_or(&n.fills).iter().any(|paint| paint.visible));
+            let stroke_only = n.has_visible_stroke() && !has_fill;
+            let reach = (n.stroke.max_weight() / 2.0).max(if stroke_only { tol_l * STROKE_REACH } else { tol_l });
+            path.bounding_box().inflate(reach, reach).contains(lp) && near_path(&path, lp, reach)
         }
         _ => shape_path(n).is_some_and(|path| hits_path(n, &path, lp, tol_l, !outline && is_closed(n) && fills_point(n, &path, lp))),
     }
@@ -126,7 +145,7 @@ pub fn hit_leaf(doc: &Document, page: NodeId, pt: Point, tol: f64, result: BoolR
 
 /// Whether child `c` of `parent` is masked at `pt`: a visible mask below it (the nearest mask
 /// below it, a hidden one masks nothing) doesn't cover the point, so nothing of `c` shows there.
-fn masked_out(doc: &Document, parent: &Node, c: NodeId, pt: Point) -> bool {
+pub fn masked_out(doc: &Document, parent: &Node, c: NodeId, pt: Point) -> bool {
     if !doc.has_masks() {
         return false;
     }
