@@ -345,3 +345,31 @@ fn a_reused_or_patched_render_needs_no_steps() {
     let panned = View { origin: (12.0, 0.0), ..v };
     assert!(matches!(r.begin(&s.doc, s.page, &panned, &Options::default(), 40), Some(crate::Begun::Done(_, _, Work::Partial { .. }))));
 }
+
+/// Background blurs stacked on each other (the upper reads the lower's blurred pixels) across the
+/// band boundaries: the bands' overlap, the reach of the largest blur, is enough for the image to
+/// match one drawn in one piece, as it is for the desktop's parallel bands.
+#[test]
+fn stacked_backdrop_blurs_draw_the_same_in_bands() {
+    fonts();
+    let mut d = Document::new("stacked");
+    let page = d.first_page().unwrap();
+    // Stripes to blur, then three translucent blurred panels overlapping each other.
+    for i in 0..40 {
+        let r = d.create(page, NodeKind::Rectangle, "S", 0.0, f64::from(i) * 10.0, 400.0, 5.0).unwrap();
+        solid(d.get_mut(r).unwrap(), if i % 2 == 0 { "E03030" } else { "3070E0" });
+    }
+    for (x, y) in [(40.0, 60.0), (120.0, 120.0), (60.0, 200.0)] {
+        let b = d.create(page, NodeKind::Rectangle, "B", x, y, 220.0, 160.0).unwrap();
+        d.get_mut(b).unwrap().fills = vec![Paint::solid(Color::new(1.0, 1.0, 1.0, 0.25))];
+        d.get_mut(b).unwrap().effects.push(Effect { kind: EffectKind::BackgroundBlur(figcraft_doc::Blur::uniform(24.0)), visible: true });
+    }
+    let doc = Arc::new(d);
+    let v = View { origin: (0.0, 0.0), scale: 1.0, width: 400, height: 400 };
+    for band_h in [64, 100, 200] {
+        let mut r = Retained::default();
+        let (shown, pix, n) = stepped(&mut r, &doc, page, &v, band_h);
+        assert!(n >= 3, "{n} bands of {band_h} rows");
+        assert_same(&pix, &render_view(&doc, page, &shown, &Options::default()).unwrap(), &format!("bands of {band_h} rows"));
+    }
+}

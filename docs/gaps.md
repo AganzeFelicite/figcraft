@@ -274,8 +274,9 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
   page, a zoom after quick renders), a watchdog thread previews any such render still running
   after 12 ms (desktop only; the browser renders inline).
 - **Landed (2026-10-29):** the browser draws a zoom's full render a band at a time (`Retained::begin`,
-  `Steps`; at most eight bands, so the longest frame is about an eighth of the render where it was
-  the whole of it), so input is handled while it draws: a pan or an edit meanwhile is patched into
+  `Steps`; at least a band a frame and at most eight bands, so a frame draws a part of the render
+  where it drew the whole of it: 0.7–1.4 s where the render took 3.7–4.0 s in the measurement of
+  #1496), so input is handled while it draws: a pan or an edit meanwhile is patched into
   the render once drawn (or it is drawn again, the first shown till then), a zoom drops it. Bands
   overlap by what background blurs read, as the desktop's parallel bands do, and the bands together
   take longer than one render (each repeats its overlap and some per-band work).

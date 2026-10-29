@@ -42,9 +42,10 @@ pub const SETTLE_MS: u64 = 120;
 pub const STEP_MS: f64 = 24.0;
 /// Bands are at least this many rows ...
 const MIN_BAND_ROWS: u32 = 64;
-/// ... and a view has at most this many: the longest frame of a render drawn in steps is about a
-/// band's, an eighth of the render plus its overlap (more bands would repeat more of the overlap
-/// and of the per-band work).
+/// ... and a view has at most this many: a frame draws at least one band, so the longest frame of
+/// a render drawn in steps is about a band's time, a part of the render rather than the whole of it
+/// (0.7–1.4 s where the render took 3.7–4.0 s, measured for #1496; more bands would repeat more of
+/// the overlap and of the per-band work).
 const MAX_BANDS: u32 = 8;
 
 #[derive(Clone)]
