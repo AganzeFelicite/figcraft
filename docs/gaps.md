@@ -184,7 +184,7 @@ No alpha blockers: the alpha gate in [`roadmap.md`](roadmap.md#alpha-gate) passe
 ### 5. Localization: English, reviewed Russian and Turkish, plus unreviewed drafts
 - **Missing:** native reviews of the Spanish, French, German, Brazilian Portuguese, Japanese,
   Korean, Simplified Chinese, Indonesian and Czech drafts and the Latin American Spanish
-  overlay, the strings added since each catalog was drafted (1–5% of each), Hindi, Arabic and
+  overlay, the strings added since each catalog was drafted (1–5% of each), the Arabic draft's native review and panel mirroring, Hindi and
   Vietnamese, localized engine messages and number formatting; CJK UI text on the web without the
   craft-fonts CJK build.
 - **Evidence (measured from source):** the layer landed 2026-10-11: catalogs in
