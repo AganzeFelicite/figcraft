@@ -419,7 +419,7 @@ fn transform_box(
 /// bottom likewise (the line is perpendicular to the edge it leaves). A centre constraint draws a
 /// short bar through the layer's middle — a horizontal one, a vertical one, or both (a cross when
 /// the layer is centred on both axes). Auto-layout frames ignore constraints, so no guides are
-/// drawn there.
+/// drawn there, except for a layer that ignores the auto layout (absolute position).
 fn constraint_lines(app: &FigApp, painter: &egui::Painter, doc: &Document, sel: &[NodeId]) {
     let s = stroke(accent(painter), 1.0);
     let line = |a: Pos2, b: Pos2| {
@@ -438,8 +438,9 @@ fn constraint_lines(app: &FigApp, painter: &egui::Painter, doc: &Document, sel: 
         let Some(n) = doc.node(id) else { continue };
         let Some(parent_id) = n.parent else { continue };
         let Some(parent) = doc.node(parent_id) else { continue };
-        // Constraints bind a layer only to a non-auto-layout frame it sits inside.
-        if !parent.kind.is_frame_like() || parent.layout.is_some() {
+        // Constraints bind a layer only to a frame it sits inside: one without auto layout, or one
+        // whose auto layout the layer ignores (absolute position).
+        if !parent.kind.is_frame_like() || (parent.layout.is_some() && !n.child_layout.absolute) {
             continue;
         }
         let nw = doc.world_transform(id);
