@@ -1,7 +1,7 @@
 use super::component::{Entry, Inst, OverrideRow, prop_ref};
 use super::connector::connector_has_saved_label;
 use super::layout::{layout_grid, tracks};
-use super::paint::{effect, export_setting, paint, paint_bound, stroke};
+use super::paint::{effect, export_setting, has_bound_variables, paint, paint_bound, stroke, style_link};
 use super::{
     Affine, BTreeMap, BTreeSet, Kv, MAX_COMMANDS, MAX_DEPTH, Mapper, Obj, Value, View, copy_num, copy_str, generated_record, guid, json, matrix,
     network, num, rows, size,
@@ -649,6 +649,84 @@ impl<'a> Mapper<'a> {
             size.zip(norm).filter(|(s, n)| s.is_finite() && *n > 1e-9).map_or(1.0, |(s, n)| s / n)
         };
         let (sx, sy) = (scale("x"), scale("y"));
+        let vertices: Vec<Value> = net
+            .vertices
+            .iter()
+            .map(|p| {
+                let mut out = json!({"x": p.x * sx, "y": p.y * sy});
+                let st = style(p.style);
+                if let Some(r) = st.and_then(|s| num(s, "cornerRadius")).filter(|r| *r > 0.0) {
+                    out["radius"] = json!(r);
+                }
+                match st.and_then(|s| s.get("handleMirroring")).and_then(Kv::str) {
+                    Some("ANGLE") => out["mirror"] = json!("angle"),
+                    Some("ANGLE_AND_LENGTH") => out["mirror"] = json!("angleAndLength"),
+                    Some("NONE") => out["mirror"] = json!("none"),
+                    _ => {}
+                }
+                if let Some(join @ ("MITER" | "BEVEL" | "ROUND")) = st.and_then(|s| s.get("strokeJoin")).and_then(Kv::str) {
+                    out["join"] = json!(join.to_ascii_lowercase());
+                }
+                out
+            })
+            .collect();
+        let segments: Vec<Value> =
+            net.segments.iter().map(|s| json!({"a": s.a, "b": s.b, "ta": [s.ta.0 * sx, s.ta.1 * sy], "tb": [s.tb.0 * sx, s.tb.1 * sy]})).collect();
+        let regions: Vec<Value> = net
+            .regions
+            .iter()
+            .map(|r| {
+                let mut region = json!({"loops": r.loops, "winding": if r.non_zero { "nonZero" } else { "evenOdd" }});
+                if r.style != 0 {
+                    match style(r.style) {
+                        Some(s) => {
+                            let fills = s.get("fillPaints").and_then(|own_fills| {
+                                if own_fills.list().iter().any(paint_bound) {
+                                    return Some(own_fills);
+                                }
+                                let linked_style = style_link(&View::of(s), "styleIdForFill", "inheritFillStyleID")
+                                    .and_then(|id| self.nodes.get(&id).copied())
+                                    .filter(|style| style.get("styleType").and_then(Kv::str) == Some("FILL"));
+                                match linked_style {
+                                    Some(style) => style.get("fillPaints"),
+                                    None => Some(own_fills),
+                                }
+                            });
+                            if let Some(fills) = fills {
+                                if let Kv::Array(source_paints) = fills {
+                                    let paint_cost = source_paints.iter().fold(source_paints.len(), |cost, paint| {
+                                        cost.saturating_add(paint.get("stops").map(Kv::list).unwrap_or_default().len())
+                                    });
+                                    let oversized_stops =
+                                        source_paints.iter().any(|paint| paint.get("stops").map(Kv::list).unwrap_or_default().len() > 256);
+                                    if source_paints.len() > 256 || oversized_stops || self.region_paint_elements.saturating_add(paint_cost) > 200_000
+                                    {
+                                        self.warn("vector region paint data exceeded import limits and was skipped");
+                                        return region;
+                                    }
+                                    self.region_paint_elements += paint_cost;
+                                    let paints: Vec<Value> = source_paints.iter().filter_map(|p| paint(p, &mut |w| self.warn(w))).collect();
+                                    if paints.len() != source_paints.len() {
+                                        self.warn("invalid vector region paints were skipped");
+                                    }
+                                    if paints.iter().any(has_bound_variables) {
+                                        self.warn("variable-bound vector region paints keep resolved appearance; live bindings were left out");
+                                    }
+                                    if s.get("styleIdForFill").is_some() {
+                                        self.warn("linked vector region fill styles keep resolved appearance; live style links were left out");
+                                    }
+                                    region["_figRegionFills"] = Value::Array(paints);
+                                } else {
+                                    self.warn("invalid vector region fill paint list; layer fill used");
+                                }
+                            }
+                        }
+                        None => self.warn("vector region references a missing fill style; layer fill used"),
+                    }
+                }
+                region
+            })
+            .collect();
         // An absent layer join is the source default.
         let layer_join = v.str("strokeJoin").unwrap_or("MITER");
         let point_join = |p: &network::Vertex| style(p.style).and_then(|s| s.get("strokeJoin"));
@@ -656,9 +734,6 @@ impl<'a> Mapper<'a> {
         let unresolved_style = net.vertices.iter().any(|p| p.style != 0 && style(p.style).is_none());
         let unknown_join = net.vertices.iter().any(|p| point_join(p).is_some_and(|j| !j.str().is_some_and(known)));
         let unsupported_join = net.vertices.iter().any(|p| point_join(p).and_then(Kv::str).is_some_and(|j| known(j) && j != layer_join));
-        if net.regions.iter().any(|r| style(r.style).is_some_and(|s| s.get("fillPaints").is_some())) {
-            self.warn("filled areas of a vector with their own fill use the layer's fill");
-        }
         if unresolved_style {
             self.warn("some vector points refer to point settings missing from the file; they use the layer's joins and plain corners");
         }
@@ -687,42 +762,18 @@ impl<'a> Mapper<'a> {
             o.insert("strokeCapEnd".into(), json!(cap_name(last.unwrap_or(node))));
         }
         // Every instance of a main shows the same network: it is written once and shared.
+        let mut entry = json!({});
+        entry["vertices"] = Value::Array(vertices);
+        entry["segments"] = Value::Array(segments);
+        entry["regions"] = Value::Array(regions.clone());
+        if regions.iter().any(|r| r.get("_figRegionFills").is_some()) {
+            o.insert("vectorNetwork".into(), entry);
+            return true;
+        }
         let key = (blob_id, sx.to_bits(), sy.to_bits(), std::ptr::from_ref(vd) as usize);
         let id = match self.network_ids.get(&key) {
             Some(id) => *id,
             None => {
-                let vertices: Vec<Value> = net
-                    .vertices
-                    .iter()
-                    .map(|p| {
-                        let mut out = json!({"x": p.x * sx, "y": p.y * sy});
-                        let st = style(p.style);
-                        if let Some(r) = st.and_then(|s| num(s, "cornerRadius")).filter(|r| *r > 0.0) {
-                            out["radius"] = json!(r);
-                        }
-                        match st.and_then(|s| s.get("handleMirroring")).and_then(Kv::str) {
-                            Some("ANGLE") => out["mirror"] = json!("angle"),
-                            Some("ANGLE_AND_LENGTH") => out["mirror"] = json!("angleAndLength"),
-                            Some("NONE") => out["mirror"] = json!("none"),
-                            _ => {}
-                        }
-                        if let Some(join @ ("MITER" | "BEVEL" | "ROUND")) = st.and_then(|s| s.get("strokeJoin")).and_then(Kv::str) {
-                            out["join"] = json!(join.to_ascii_lowercase());
-                        }
-                        out
-                    })
-                    .collect();
-                let segments: Vec<Value> = net
-                    .segments
-                    .iter()
-                    .map(|s| json!({"a": s.a, "b": s.b, "ta": [s.ta.0 * sx, s.ta.1 * sy], "tb": [s.tb.0 * sx, s.tb.1 * sy]}))
-                    .collect();
-                let regions: Vec<Value> =
-                    net.regions.iter().map(|r| json!({"loops": r.loops, "winding": if r.non_zero { "nonZero" } else { "evenOdd" }})).collect();
-                let mut entry = json!({});
-                entry["vertices"] = Value::Array(vertices);
-                entry["segments"] = Value::Array(segments);
-                entry["regions"] = Value::Array(regions);
                 self.networks.push(crate::rest::network(&entry));
                 self.network_ids.insert(key, self.networks.len() - 1);
                 self.networks.len() - 1
