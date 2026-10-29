@@ -141,7 +141,9 @@ Runs commands in a headless session (a new document, or `--in`), printing one JS
 ```
 
 The whole script is **one undo step**, and it is **all-or-nothing**, exactly like running the same
-commands through `command.batch` (the MCP tool `batch`, the control channel, plugins). A step named
+commands through `command.batch` (the MCP tool `batch`, the control channel, plugins). A step key
+other than `command`, `params` and `as`, or a parameter the command's doc (`figcraft-cli commands`)
+doesn't list, fails the script with an error naming it (`ids` and `id` are always taken). A step named
 with `"as"` can be used by later steps: `{"$ref": "name"}` in a step's params is the `id` in that
 step's result (`{"$step": n}` does the same by zero-based position), and `"field"` takes another key
 or a slash path such as `ids/0`. So a step can target a layer an earlier step of the same script
