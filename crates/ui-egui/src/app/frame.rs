@@ -34,12 +34,19 @@ impl FigApp {
 
     /// Clicking the control that opened the colour picker closes it again; clicking another opens
     /// the picker for that one.
-    pub fn toggle_picker(&mut self, target: crate::colorpicker::PickerTarget, _top: Option<f32>) {
+    pub fn toggle_picker(&mut self, target: crate::colorpicker::PickerTarget, button: Option<egui::Rect>) {
         if self.ui.picker.as_ref() == Some(&target) {
             crate::colorpicker::close(self);
         } else {
-            self.ui.picker = Some(target);
+            self.open_picker(target, button);
         }
+    }
+
+    /// Start a fresh picker beside its control, committing edits to the previous target first.
+    pub fn open_picker(&mut self, target: crate::colorpicker::PickerTarget, button: Option<egui::Rect>) {
+        crate::colorpicker::close(self);
+        self.ui.picker = Some(target);
+        self.ui.picker_button = button;
     }
 
     /// Leaving Design ends a pen path as Escape does and goes back to Move: Prototype and Inspect

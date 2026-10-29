@@ -335,7 +335,7 @@ fn fx_color(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, e: &Effect,
     let Some(c) = e.color(secondary) else { return };
     let sw = widgets::swatch(ui, &Paint::solid(c), 16.0);
     if sw.clicked() {
-        app.toggle_picker(crate::colorpicker::PickerTarget::Effect { ids: ids.to_vec(), index: i, secondary }, Some(sw.rect.min.y));
+        app.toggle_picker(crate::colorpicker::PickerTarget::Effect { ids: ids.to_vec(), index: i, secondary }, Some(sw.rect));
     }
     if let Some(h) = widgets::text_field(ui, Id::unique(("fx_c", i, secondary)), &c.to_hex(), 80.0, "")
         && let Some(nc) = figcraft_color::Color::from_hex_or_name(&h)

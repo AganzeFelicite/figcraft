@@ -317,7 +317,7 @@ fn page_section(app: &mut FigApp, ui: &mut Ui, doc: &Document) {
         let sw = widgets::swatch(ui, &p, 16.0);
         if sw.clicked() {
             open_picker = true;
-            swatch_top = Some(sw.rect.min.y);
+            swatch_top = Some(sw.rect);
         }
         if let Some(h) = widgets::text_field(ui, Id::unique("pagebg"), &bg.to_hex(), 96.0, "") {
             new_hex = Some(h);

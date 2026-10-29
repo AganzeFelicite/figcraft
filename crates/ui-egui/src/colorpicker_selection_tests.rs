@@ -58,16 +58,16 @@ fn clicking_the_swatch_again_closes_the_picker() {
     let (mut u, a, _) = two();
     u.app.run("fill.add", json!({"ids": [a], "color": "#00FF00"}));
     let target = PickerTarget::Paint { fills: true, index: 0, ids: vec![a] };
-    u.app.toggle_picker(target.clone(), Some(200.0));
+    u.app.toggle_picker(target.clone(), Some(egui::Rect::from_min_size(egui::pos2(1250.0, 200.0), egui::vec2(16.0, 16.0))));
     u.frame(vec![]);
     u.frame(vec![]);
     assert_eq!(u.app.ui.picker, Some(target.clone()), "the swatch opens the picker");
-    u.app.toggle_picker(target.clone(), Some(200.0));
+    u.app.toggle_picker(target.clone(), Some(egui::Rect::from_min_size(egui::pos2(1250.0, 200.0), egui::vec2(16.0, 16.0))));
     u.frame(vec![]);
     assert!(u.app.ui.picker.is_none(), "the same swatch toggles it shut");
     // Another paint of the same layer opens the picker for that one.
     let second = PickerTarget::Paint { fills: true, index: 1, ids: vec![a] };
-    u.app.toggle_picker(second.clone(), Some(200.0));
+    u.app.toggle_picker(second.clone(), Some(egui::Rect::from_min_size(egui::pos2(1250.0, 200.0), egui::vec2(16.0, 16.0))));
     u.frame(vec![]);
     assert_eq!(u.app.ui.picker, Some(second), "another paint opens the picker for it");
 }

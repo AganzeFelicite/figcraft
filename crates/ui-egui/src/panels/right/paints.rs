@@ -255,7 +255,7 @@ fn range_fill(app: &mut FigApp, ui: &mut Ui, doc: &Document, id: NodeId, start: 
                 widgets::paint_swatch(ui.painter(), sw, p);
                 let range_swatch = ui.interact(sw.expand(2.0), Id::unique("range_swatch"), Sense::click());
                 if range_swatch.clicked() {
-                    app.toggle_picker(crate::colorpicker::PickerTarget::TextRange { id, start, end }, Some(range_swatch.rect.min.y));
+                    app.toggle_picker(crate::colorpicker::PickerTarget::TextRange { id, start, end }, Some(range_swatch.rect));
                 }
                 if let Some(c) = p.solid_color() {
                     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(text_r));
@@ -272,7 +272,7 @@ fn range_fill(app: &mut FigApp, ui: &mut Ui, doc: &Document, id: NodeId, start: 
             None => {
                 ui.painter().text(pos2(text_r.min.x, r.center().y), Align2::LEFT_CENTER, tr("Mixed"), regular(11.0), t.text_secondary);
                 if ui.interact(r, Id::unique("range_mixed"), Sense::click()).clicked() {
-                    app.ui.picker = Some(crate::colorpicker::PickerTarget::TextRange { id, start, end });
+                    app.open_picker(crate::colorpicker::PickerTarget::TextRange { id, start, end }, Some(r));
                 }
             }
         }
@@ -314,7 +314,7 @@ pub(super) fn paints(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[NodeI
             if app.run(if fills { "fill.add" } else { "stroke.add" }, json!({"ids": ids})).is_some()
                 && let Some(l) = &list
             {
-                app.ui.picker = Some(crate::colorpicker::PickerTarget::Paint { fills, index: l.len(), ids: ids.clone() });
+                app.open_picker(crate::colorpicker::PickerTarget::Paint { fills, index: l.len(), ids: ids.clone() }, Some(header.rect));
             }
         } else {
             style_picker::open(app, ui, &ids, slot);
@@ -464,7 +464,7 @@ fn paint_row(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, p: &Paint,
             app.ui.picker_button = Some(sresp.rect);
         }
         if sresp.clicked() {
-            app.toggle_picker(crate::colorpicker::PickerTarget::Paint { fills, index: i, ids: ids.clone() }, Some(sresp.rect.min.y));
+            app.toggle_picker(crate::colorpicker::PickerTarget::Paint { fills, index: i, ids: ids.clone() }, Some(sresp.rect));
         }
         let text_r = Rect::from_min_max(pos2(sw.max.x + 8.0, r.min.y), pos2(r.max.x - 52.0, r.max.y));
         let mut child = ui.new_child(egui::UiBuilder::new().max_rect(text_r));

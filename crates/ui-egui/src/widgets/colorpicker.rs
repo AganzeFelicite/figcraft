@@ -864,7 +864,10 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
         PickerTarget::PluginField { plugin, .. } => crate::plugins_ui::field_window(app, ctx, plugin).map(|r| pos2(r.min.x - 248.0, r.min.y)),
         _ => None,
     };
-    let pos = beside.unwrap_or(pos2(screen.max.x - app.ui.right_width - 260.0, 140.0));
+    let open = beside.map(Open::At).unwrap_or_else(|| {
+        let top = app.ui.picker_button.map_or(140.0, |r| r.min.y);
+        Open::Anchor(pos2(screen.max.x - app.ui.right_width - 8.0, top))
+    });
     // The colour picker's own header — title 16 in, the X 8 in from the right — is the shared
     // popover's chrome now; the picker keeps its body. Its area id is [`window_id`], the one the
     // style picker looks up to tell a press in here from one outside.
@@ -873,13 +876,9 @@ pub fn show(app: &mut FigApp, ctx: &egui::Context) {
     // colour it just sampled — is the press, not a press outside: neither may close the picker.
     let picking = app.session.tool.pick_only || app.session.tool.picked.is_some();
     pop = pop.close_on_outside(!picking);
-    // Closing is the shared widget's: the X, Escape and a press outside it. Presses in the panel
-    // beside it keep it (swatches and fields there switch the colour it edits); the control that
-    // opened it is held too, so pressing it again reaches its own toggle.
-    let panel = Rect::from_min_max(pos2(screen.max.x - app.ui.right_width, screen.min.y), screen.max);
-    let mut held: Vec<Rect> = vec![panel];
-    held.extend(app.ui.picker_button);
-    let closed = pop.show(ctx, Open::At(pos), Hold { rects: &held, escape: false }, |ui| {
+    // Only the opening control is held out: any other sidebar or canvas press dismisses it.
+    let held: Vec<Rect> = app.ui.picker_button.into_iter().collect();
+    let closed = pop.show(ctx, open, Hold { rects: &held, escape: false }, |ui| {
         ui.spacing_mut().item_spacing = vec2(8.0, 8.0);
         // The eyedropper's colour goes to this picker's paint (a stroke, an effect, a gradient stop...).
         if let Some(c) = app.session.tool.picked.take() {

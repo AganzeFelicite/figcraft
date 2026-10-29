@@ -47,7 +47,7 @@ fn colors(ui: &Ui, document: u64, doc: &Arc<Document>, ids: &[NodeId], interacti
     colors
 }
 
-pub(crate) fn toggle(app: &mut FigApp, targets: Vec<PaintTarget>, top: Option<f32>) {
+pub(crate) fn toggle(app: &mut FigApp, targets: Vec<PaintTarget>, top: Option<egui::Rect>) {
     let Ok(ds) = app.session.ds() else { return };
     app.toggle_picker(PickerTarget::SelectionColor { targets, selection: ds.selection.clone(), document: ds.uid }, top);
 }
@@ -72,7 +72,7 @@ pub fn section(app: &mut FigApp, ui: &mut Ui, doc: &Arc<Document>, ids: &[NodeId
                     crate::right::row(ui, 32.0, |ui| {
                         let swatch = widgets::swatch(ui, &group.paint, 24.0).tip(tr("Edit colour"));
                         if swatch.clicked() {
-                            toggle(app, group.targets.clone(), Some(swatch.rect.min.y));
+                            toggle(app, group.targets.clone(), Some(swatch.rect));
                         }
                         let width = (ui.available_width() - 116.0).max(40.0);
                         let linked_name = group
@@ -100,7 +100,7 @@ pub fn section(app: &mut FigApp, ui: &mut Ui, doc: &Arc<Document>, ids: &[NodeId
                         } else {
                             let response = widgets::dropdown(ui, &widgets::paint_name(&group.paint), width, None);
                             if response.clicked() {
-                                toggle(app, group.targets.clone(), Some(response.rect.min.y));
+                                toggle(app, group.targets.clone(), Some(response.rect));
                             }
                         }
                         let alpha = format!("{}%", figcraft_doc::trim_num(f64::from(group.paint.opacity) * 100.0));
