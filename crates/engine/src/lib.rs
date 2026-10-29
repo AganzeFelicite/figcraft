@@ -353,6 +353,8 @@ mod menu_gaps_tests;
 #[cfg(test)]
 mod nested_override_tests;
 #[cfg(test)]
+mod node_find_tests;
+#[cfg(test)]
 mod node_set_refusals_tests;
 #[cfg(test)]
 mod normalize_guard_tests;
@@ -384,6 +386,8 @@ mod pen_end_tests;
 mod pen_overlay_tests;
 #[cfg(test)]
 mod pixel_preview_tests;
+#[cfg(test)]
+mod placed_image_size_tests;
 #[cfg(test)]
 mod playground_tests;
 #[cfg(test)]
@@ -496,6 +500,8 @@ mod theme_pages_tests;
 mod tiff_tests;
 #[cfg(test)]
 mod transform_behaviour_tests;
+#[cfg(test)]
+mod unknown_params_tests;
 #[cfg(test)]
 mod variable_tests;
 #[cfg(test)]
