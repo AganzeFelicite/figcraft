@@ -20,6 +20,13 @@ pub fn f64_of(v: &Value) -> Option<f64> {
     }
 }
 
+/// A 0-1 fraction: a `%` suffix or a number above 1 is a percentage ("1%" is 0.01, 50 is 0.5).
+pub fn fraction_of(v: &Value) -> Option<f64> {
+    let f = f64_of(v)?;
+    let percent = v.as_str().is_some_and(|s| s.trim().ends_with('%'));
+    Some(if percent || f > 1.0 { f / 100.0 } else { f })
+}
+
 pub fn num(p: &Value, key: &str) -> Option<f64> {
     get(p, key).and_then(f64_of)
 }
