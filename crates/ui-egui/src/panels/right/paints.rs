@@ -116,7 +116,7 @@ pub(super) fn appearance(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[N
         let sm = common(doc, sel, |n| (n.corners.smoothing * 100.0).round());
         widgets::sublabels(ui, tr("Corner smoothing"), None);
         row(ui, 32.0, |ui| {
-            let e = widgets::number_field(ui, Id::unique("smoothing"), Lead::None, sm, "%", col, 1.0);
+            let e = widgets::number_field(ui, Id::unique("smoothing"), Lead::Icon(Icon::CornerSmoothing, tr("Corner smoothing")), sm, "%", col, 1.0);
             app.field(&ids, "cornerSmoothing", e, |v| json!((v / 100.0).clamp(0.0, 1.0)));
             if widgets::button(ui, tr("iOS"), false, true).on_hover_text(tr("Set corner smoothing to 60%")).clicked() {
                 app.set_props(&ids, json!({"cornerSmoothing": 0.6}));
