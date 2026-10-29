@@ -108,6 +108,7 @@ pub use derived::{changed_nodes, normalize};
 pub use doc_state::{DocState, History, HistoryEntry, Interaction, PREVIEW_READ_ONLY, Preedit, TextEdit, VersionPreview};
 pub use error::{EngineError, Result, bad};
 pub use prefs::{Clipboard, MAX_RECENT_ACTIONS, Prefs, UI_SCALE_MAX, UI_SCALE_MIN, UiRequest, clamp_ui_scale};
+pub use session::Forward;
 pub use view_state::ViewState;
 
 /// The editing session: open documents, the current tool, clipboard and prefs.
@@ -148,6 +149,9 @@ pub struct Session {
     pub events: Arc<events::EventLog>,
     /// Events recorded inside a group: (kind, document, path, data).
     pending_events: Vec<(String, String, Option<String>, Value)>,
+    /// The AI agent the running command is for ([`Session::execute_as`]), as comments are signed
+    /// (`"Claude (agent)"`); `None` for the user.
+    pub agent: Option<String>,
 }
 
 impl Default for Session {
@@ -218,6 +222,8 @@ mod collab_live_tests;
 mod collab_tests;
 #[cfg(test)]
 mod collab_undo_tests;
+#[cfg(test)]
+mod comment_agent_tests;
 #[cfg(test)]
 mod comments_polish_tests;
 #[cfg(test)]
