@@ -51,7 +51,14 @@ impl Session {
             .and_then(|v| self.check_instance_structure(id, &before).map(|()| v))
             .and_then(|v| self.check_preview(id, &before).map(|()| v))
             .and_then(|v| self.check_live_access(id, &before).map(|()| v))
-            .and_then(|v| self.check_finite_geometry(id, &before).map(|()| v));
+            .and_then(|v| self.check_finite_geometry(id, &before).map(|()| v))
+            // Normalising is part of the command: a panic in it rolls the edit back too (#1085).
+            .and_then(|v| {
+                guard::run(id, || {
+                    self.normalize_edit(spec, &before);
+                    Ok(v)
+                })
+            });
         match &result {
             Ok(_) => {
                 self.after_command(spec, before);
@@ -141,7 +148,19 @@ impl Session {
             .map_err(|m| EngineError::Disabled(id.to_string(), m))
     }
 
-    /// Bookkeeping after a successful command: normalise what changed, push undo, bump revision.
+    /// Normalise what a command changed in the document it ran on (text boxes, groups, instances,
+    /// auto layout…).
+    fn normalize_edit(&mut self, spec: &CommandSpec, before: &Option<(Arc<Document>, Vec<NodeId>, NodeId, u64)>) {
+        let Some((bdoc, _, _, uid)) = before else { return };
+        let Some(ds) = self.docs.iter_mut().find(|d| d.uid == *uid) else { return };
+        // Saving may adopt the chosen filename as the document title. The encoded snapshot is
+        // already final; normalising it again would detach it from the saved baseline.
+        if !Arc::ptr_eq(&ds.doc, bdoc) && !matches!(spec.id, "file.save" | "file.saveAs") {
+            normalize(ds.doc_mut(), bdoc);
+        }
+    }
+
+    /// Bookkeeping after a successful command (normalised already): push undo, bump revision.
     fn after_command(&mut self, spec: &CommandSpec, before: Option<(Arc<Document>, Vec<NodeId>, NodeId, u64)>) {
         let Some((bdoc, bsel, bpage, uid)) = before else {
             if let Ok(ds) = self.ds_mut() {
@@ -150,13 +169,7 @@ impl Session {
             return;
         };
         let Some(ds) = self.docs.iter_mut().find(|d| d.uid == uid) else { return };
-        let changed = !Arc::ptr_eq(&ds.doc, &bdoc);
-        // Saving may adopt the chosen filename as the document title. The encoded snapshot is
-        // already final; normalising it again would detach it from the saved baseline.
-        if changed && !matches!(spec.id, "file.save" | "file.saveAs") {
-            normalize(ds.doc_mut(), &bdoc);
-        }
-        let edit = changed && ds.interaction.is_none();
+        let edit = !Arc::ptr_eq(&ds.doc, &bdoc) && ds.interaction.is_none();
         ds.clean_selection();
         ds.revision += 1;
         if edit {
