@@ -105,6 +105,10 @@ impl FigApp {
 /// menu, then route the scroll area to comments, frame presets, design, prototype or inspect.
 pub fn right_panel(app: &mut FigApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
+    // The panel's edge, drawn here: the frame has no stroke (a stroke counts as margin and would
+    // take 1 pt off each side of the panel (240 pt by default)).
+    let edge = ui.max_rect();
+    ui.painter().line_segment([edge.left_top(), edge.left_bottom()], Stroke::new(1.0, t.border));
     let w = ui.available_width();
     // Top bar: people (you and the others in a live session), present, share.
     let (top, _) = ui.allocate_exact_size(vec2(w, 48.0), Sense::hover());

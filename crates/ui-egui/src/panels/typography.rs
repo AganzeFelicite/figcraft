@@ -19,7 +19,7 @@ use crate::i18n::{tr, tr_noop, trf};
 use crate::icons::{self, Icon};
 use crate::right::{common, menu_item, menu_popup, row};
 use crate::theme::{Tokens, regular, semibold};
-use crate::widgets::{self, FIELD_H, FieldEdit, Lead, PAD};
+use crate::widgets::{self, FIELD_H, FieldEdit, Lead};
 
 mod axes;
 mod fields;
