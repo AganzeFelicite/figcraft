@@ -165,33 +165,25 @@ struct ImageValue {
     bytes: String,
 }
 
-/// Largest decoded image an entry may carry: 32 MiB, mirroring `MAX_IMAGE_FILE_BYTES` in
-/// `figcraft_format::thumbnail` (collab sits below the format crate and can't name it).
-pub(crate) const MAX_IMAGE_BYTES: usize = 32 << 20;
-
 /// Largest image side: JPEG and GIF size fields are 16-bit; PNG can claim more, but no
 /// image this app realistically opens reaches it — an entry claiming a bigger side is
 /// refused rather than trusted. Zero is allowed: the format crate stores 0×0 for bytes it
 /// couldn't probe (`image_data`).
 pub(crate) const MAX_IMAGE_SIDE: u32 = 65_535;
 
-/// Whether `key` has the shape of a content hash: 64 hex chars, what `image_hash` in
-/// `figcraft_format` (sha256) produces — which writes it lowercase, so a match is exact:
-/// an uppercase look-alike claims a content address it doesn't have, and storing bytes
-/// there would file a second copy under a name no honest lookup reaches. Other key
-/// shapes exist and stay valid (the svg importer's FNV-128 keys, the REST importer's
-/// placeholder under the imageRef itself); they claim no content address, so only the
-/// key-name rule and the size bounds apply to them. One untestable edge: a REST imageRef of exactly 64 hex
-/// chars would be hash-shaped — Figma's imageRefs are 40 hex, so it doesn't occur.
-fn is_content_hash(key: &str) -> bool {
-    key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())
-}
-
 /// Lowercase sha256 hex, the same form `figcraft_format::image_hash` produces.
 fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// `changes` without the image entries [`image_of`] refuses. For history written before those
+/// checks (a saved snapshot, a server's log): the rest of it still applies, where refusing the
+/// whole would leave a document that can't open or drop every edit after the image.
+pub(crate) fn without_refused_images(changes: &[Change]) -> Vec<Change> {
+    changes.iter().filter(|c| !matches!(c, Change::Put { entry: Entry::Image(k), value } if image_of(k, value).is_err())).cloned().collect()
+}
+
+/// The JSON value an image entry carries: its size and its encoded bytes in base64.
 fn image_json(img: &ImageData) -> Result<Json, Error> {
     Json::of(&ImageValue { width: img.width, height: img.height, bytes: base64::engine::general_purpose::STANDARD.encode(img.bytes.as_slice()) })
 }
@@ -199,11 +191,19 @@ fn image_json(img: &ImageData) -> Result<Json, Error> {
 /// The image a change carries, validated as a collaborator's claim (an invalid entry
 /// rejects its batch, leaving every replica's store clean): a key that can name an archive
 /// member ([`ImageData::is_valid_key`]: a saved file writes it as `images/<key>`), dimensions within
-/// [`MAX_IMAGE_SIDE`], decoded bytes within [`MAX_IMAGE_BYTES`] (the encoded length is
-/// capped before decoding so hostile text can't force a large allocation), and a key with
-/// the shape of a content hash must be that hash of these bytes — a poisoned
-/// content-addressed store would show the wrong image everywhere at once (#1086).
+/// [`MAX_IMAGE_SIDE`], decoded bytes within [`ImageData::MAX_BYTES`] (what the importers read;
+/// the encoded length is capped before decoding so hostile text can't force a large
+/// allocation), and a key that claims a content hash ([`ImageData::claims_content_hash`]) must
+/// be exactly the lowercase sha256 of these bytes, the form `figcraft_format::image_hash`
+/// writes — a poisoned content-addressed store would show the wrong image everywhere at once
+/// (#1086). Other keys (the svg importer's FNV-128 keys, the REST importer's placeholders)
+/// claim no content address, so only the name and size rules apply to them.
 fn image_of(key: &str, value: &Json) -> Result<ImageData, Error> {
+    image_within(key, value, ImageData::MAX_BYTES)
+}
+
+/// [`image_of`] with `max_bytes` for the decoded size.
+pub(crate) fn image_within(key: &str, value: &Json, max_bytes: u64) -> Result<ImageData, Error> {
     if !ImageData::is_valid_key(key) {
         return Err(Error::Invalid(format!("image: {key:?} can't name an image (1–128 letters, digits, - or _)")));
     }
@@ -211,15 +211,15 @@ fn image_of(key: &str, value: &Json) -> Result<ImageData, Error> {
     if v.width > MAX_IMAGE_SIDE || v.height > MAX_IMAGE_SIDE {
         return Err(Error::Invalid(format!("image: {}×{} passes the {} a side may be", v.width, v.height, MAX_IMAGE_SIDE)));
     }
-    let max_encoded = (MAX_IMAGE_BYTES / 3) * 4 + 4;
-    if v.bytes.len() > max_encoded {
-        return Err(Error::Invalid(format!("image: base64 text longer than {max_encoded} bytes for {MAX_IMAGE_BYTES} of bytes")));
+    let max_encoded = (max_bytes / 3).saturating_mul(4).saturating_add(4);
+    if u64::try_from(v.bytes.len()).unwrap_or(u64::MAX) > max_encoded {
+        return Err(Error::Invalid(format!("image: base64 text longer than {max_encoded} bytes for {max_bytes} of bytes")));
     }
     let bytes = base64::engine::general_purpose::STANDARD.decode(v.bytes.as_bytes()).map_err(|e| Error::Invalid(format!("image: {e}")))?;
-    if bytes.len() > MAX_IMAGE_BYTES {
-        return Err(Error::Invalid(format!("image: {} bytes pass the {MAX_IMAGE_BYTES} an image may be", bytes.len())));
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_bytes {
+        return Err(Error::Invalid(format!("image: {} bytes pass the {max_bytes} an image may be", bytes.len())));
     }
-    if is_content_hash(key) && key != sha256_hex(&bytes) {
+    if ImageData::claims_content_hash(key) && key != sha256_hex(&bytes) {
         return Err(Error::Invalid(format!("image: the bytes aren't what their key {key} hashes to")));
     }
     Ok(ImageData { bytes: Arc::new(bytes), width: v.width, height: v.height })
@@ -338,6 +338,12 @@ pub(crate) fn apply(doc: &mut Document, change: &Change) -> Result<bool, Error> 
             }
             Entry::Image(k) => {
                 let img = image_of(k, value)?;
+                // A key always names the same bytes (producers key images by their bytes; the REST
+                // importer's placeholder keys always hold the same grey picture), so nobody can
+                // swap the picture under a key someone else added.
+                if doc.images.get(k).is_some_and(|old| old.bytes != img.bytes) {
+                    return Err(Error::Invalid(format!("image: {k} already holds other bytes")));
+                }
                 doc.images.insert(k.clone(), img);
             }
             Entry::Ballot(k) => {

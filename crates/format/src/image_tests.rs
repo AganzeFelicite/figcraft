@@ -145,3 +145,18 @@ fn an_image_keyed_with_dashes_comes_back_after_a_save() {
     let loaded = load_bytes_with_versions(&save_bytes(&d, None).unwrap()).unwrap();
     assert!(loaded.doc.images.contains_key("rest-image-missing"), "{:?}", loaded.issues);
 }
+
+/// An unresolved `imageRef` shaped like a content hash would claim the placeholder's bytes hash
+/// to it, which they don't: a live session would refuse that image. It shares the placeholder
+/// instead.
+#[test]
+fn a_hash_shaped_rest_image_ref_never_names_its_placeholder() {
+    for image_ref in ["ab".repeat(32), "A".repeat(64)] {
+        let rect = json!({"id": "X", "name": "X", "type": "RECTANGLE", "relativeTransform": [[1, 0, 0], [0, 1, 0]], "size": {"x": 10, "y": 10},
+            "fills": [{"type": "IMAGE", "imageRef": image_ref, "scaleMode": "FIT"}]});
+        let file = json!({"name": "F", "schemaVersion": 0, "document": {"id": "0:0", "name": "Document", "type": "DOCUMENT",
+            "children": [{"id": "0:Page", "name": "Page", "type": "CANVAS", "backgroundColor": {"r": 0.0, "g": 0.0, "b": 0.0, "a": 1.0}, "children": [rect]}]}});
+        let (doc, _) = crate::rest::import(&file, &crate::rest::no_images).unwrap();
+        assert_eq!(doc.images.keys().collect::<Vec<_>>(), ["rest-image-missing"], "{image_ref}");
+    }
+}

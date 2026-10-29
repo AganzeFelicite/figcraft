@@ -155,7 +155,10 @@ As built:
   1–128 ASCII letters, digits, `-` or `_` (a saved file names the image `images/<key>`), a key
   with the shape of a content hash (64 hex chars) must be exactly the lowercase sha256 hex of
   those bytes (as the app writes them); a side is at most 65 535 px and the decoded bytes at
-  most 32 MiB, and base64 that can't decode is refused); a
+  most 256 MiB (`ImageData::MAX_BYTES`, what the importers read), base64 that can't decode is
+  refused, and a key that already holds an image can't be given other bytes; a snapshot or a
+  server log written before these checks opens without the images they refuse, rather than
+  failing, and a file published to a server is kept without them); a
   board's timer and vote (whole values, `DocProp::Timer` and
   `DocProp::Vote`) and the vote's ballots (`Entry::Ballot(voter)`, one per voter, so people voting
   at once write different entries). The timer travels as its end time (or, paused, the time left),

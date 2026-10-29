@@ -73,7 +73,9 @@ impl Replica {
     /// Rebuild a replica from a [`snapshot`](Self::snapshot).
     pub fn from_snapshot(changes: &[Change]) -> Result<Replica, Error> {
         let mut r = Replica { doc: Document::without_pages(""), positions: Positions::new() };
-        r.apply(changes, Mode::Strict)?;
+        // A snapshot saved before the image checks may hold an image they refuse: it opens
+        // without that image (`docprops::without_refused_images`).
+        r.apply(&docprops::without_refused_images(changes), Mode::Strict)?;
         if r.doc.pages.is_empty() {
             return Err(Error::Invalid("a snapshot needs a page".into()));
         }

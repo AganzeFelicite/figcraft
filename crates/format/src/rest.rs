@@ -948,7 +948,9 @@ impl<'a> Ctx<'a> {
 
     /// The document image key for an `imageRef`: its bytes when the resolver has them, else a
     /// grey placeholder stored under the `imageRef` itself when that name can legitimately be an
-    /// archive member (`is_valid_key`); any other name shares the `rest-image-missing` placeholder.
+    /// archive member (`is_valid_key`) and claims no content hash (`claims_content_hash`: the
+    /// placeholder's bytes don't hash to it); any other name shares the `rest-image-missing`
+    /// placeholder.
     pub(crate) fn image_key(&mut self, image_ref: &str) -> String {
         if let Some(k) = self.image_keys.get(image_ref) {
             return k.clone();
@@ -959,9 +961,11 @@ impl<'a> Ctx<'a> {
             None => {
                 self.missing_images += 1;
                 // An `imageRef` arrives from an untrusted file, and keys become archive member
-                // names on save: a name that can't legitimately be one must not reach the map.
+                // names on save: a name that can't legitimately be one must not reach the map,
+                // nor one claiming a content hash the placeholder's bytes don't have.
                 let candidate = if image_ref.is_empty() { MISSING_IMAGE } else { clip_str(image_ref) };
-                let key = if ImageData::is_valid_key(candidate) { candidate } else { MISSING_IMAGE };
+                let named = ImageData::is_valid_key(candidate) && !ImageData::claims_content_hash(candidate);
+                let key = if named { candidate } else { MISSING_IMAGE };
                 let key = key.to_string();
                 if !self.doc.images.contains_key(&key)
                     && let Some(png) = placeholder_png()

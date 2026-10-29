@@ -198,10 +198,13 @@ impl Server {
                 Ok(())
             }
             Journal::Accepted(acc) if acc.seq <= self.seq => Ok(()),
-            Journal::Accepted(acc) => {
+            Journal::Accepted(mut acc) => {
                 if acc.seq != self.seq + 1 {
                     return Err(Error::Protocol(format!("batch {} after {}", acc.seq, self.seq)));
                 }
+                // A log written before the image checks may hold an image they refuse: the batch
+                // replays without it, so the edits after it aren't dropped with the rest of the log.
+                acc.changes = docprops::without_refused_images(&acc.changes);
                 self.accept(acc.author, self.seq, &acc.changes)?;
                 self.issued.entry(acc.author).or_default().note(acc.batch_id, false);
                 self.next_client = self.next_client.max(acc.author.saturating_add(1));

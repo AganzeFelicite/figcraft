@@ -11,18 +11,17 @@ use sha2::{Digest as _, Sha256};
 
 use crate::change::{Change, Entry, Json};
 use crate::docprops::apply as apply_doc;
-use crate::docprops::{MAX_IMAGE_BYTES, MAX_IMAGE_SIDE};
+use crate::docprops::{MAX_IMAGE_SIDE, image_within};
 
 /// The side bound the implementation enforces.
 const MAX_SIDE: u32 = MAX_IMAGE_SIDE;
-/// The decoded-bytes cap the implementation enforces.
-const MAX_BYTES: usize = MAX_IMAGE_BYTES;
 
 /// sha256 hex, computed here independently of the implementation under test.
 fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// An image entry putting `bytes` (`width` × `height`) under `key`.
 fn put(key: &str, width: u32, height: u32, bytes: &[u8]) -> Change {
     Change::Put {
         entry: Entry::Image(key.into()),
@@ -90,13 +89,19 @@ fn absurd_dimensions_are_refused() {
     }
 }
 
+/// Bytes past the cap are refused, and so is base64 text too long to decode within it (checked
+/// before decoding). The cap is `figcraft_doc::ImageData::MAX_BYTES` (256 MiB); a small one keeps
+/// the test light.
 #[test]
 fn oversized_image_bytes_are_refused() {
-    let bytes = vec![0u8; MAX_BYTES + 1];
-    let key = sha256_hex(&bytes);
-    let mut doc = Document::new("t");
-    apply_doc(&mut doc, &put(&key, 100, 100, &bytes)).err().unwrap_or_else(|| panic!("a {}-byte image must be refused, but it applied", bytes.len()));
-    assert!(doc.images.is_empty());
+    let value = |bytes: &[u8]| json!({"width": 1, "height": 1, "bytes": base64::engine::general_purpose::STANDARD.encode(bytes)});
+    let at = vec![0u8; 1024];
+    image_within(&sha256_hex(&at), &Json(value(&at)), 1024).expect("exactly the cap applies");
+    let past = vec![0u8; 1025];
+    assert!(image_within(&sha256_hex(&past), &Json(value(&past)), 1024).is_err(), "one byte past the cap");
+    let long_text = json!({"width": 1, "height": 1, "bytes": "A".repeat(4096)});
+    let e = image_within("img1", &Json(long_text), 1024).err().map(|e| e.to_string()).unwrap_or_default();
+    assert!(e.contains("base64 text longer"), "refused before decoding: {e:?}");
 }
 
 #[test]
@@ -134,4 +139,54 @@ fn a_key_that_cannot_name_an_archive_member_is_refused() {
         assert!(apply_doc(&mut doc, &put(key, 2, 1, b"placeholder bytes")).is_err(), "key {key:?} must be refused");
         assert!(doc.images.is_empty(), "key {key:?} reached the image store");
     }
+}
+
+/// The cap matches what the importers read (`figcraft_doc::ImageData::MAX_BYTES`): an image a
+/// document took from a `.fig`, `.sketch` or REST import reaches everyone in a live session.
+#[test]
+fn an_image_as_large_as_an_import_takes_still_applies() {
+    let bytes = vec![0u8; 40 << 20];
+    let mut doc = Document::new("t");
+    apply_doc(&mut doc, &put(&sha256_hex(&bytes), 0, 0, &bytes)).expect("a 40 MiB image is within what imports read");
+    assert_eq!(doc.images.len(), 1);
+}
+
+/// An image key is content-derived by every producer, so its bytes never change: a collaborator
+/// can't swap the picture under a key another one added.
+#[test]
+fn an_image_cannot_be_replaced_under_its_key() {
+    let mut doc = Document::new("t");
+    apply_doc(&mut doc, &put("img1", 2, 1, b"the first bytes")).unwrap();
+    assert!(apply_doc(&mut doc, &put("img1", 2, 1, b"other bytes")).is_err(), "replaced under the same key");
+    assert_eq!(doc.images.get("img1").map(|i| i.bytes.as_slice()), Some(b"the first bytes".as_slice()));
+    apply_doc(&mut doc, &put("img1", 2, 1, b"the first bytes")).expect("the same image again is fine (undo, redo)");
+}
+
+/// A snapshot written before these checks may hold an image they refuse: the session still
+/// opens, without that image, instead of not opening at all.
+#[test]
+fn a_snapshot_holding_an_image_the_checks_refuse_still_opens_without_it() {
+    let mut snapshot = crate::Replica::new(crate::sim_tests::base()).snapshot().unwrap();
+    let (key, bytes) = forged();
+    snapshot.push(put(&key, 2, 1, bytes));
+    let r = crate::Replica::from_snapshot(&snapshot).expect("the snapshot opens");
+    assert!(!r.document().images.contains_key(&key));
+}
+
+/// A server's log written before these checks may hold an image they refuse: a restart replays
+/// the edits after it instead of dropping them with the rest of the log.
+#[test]
+fn a_restart_keeps_the_edits_after_an_image_the_checks_refuse() {
+    let s = crate::Server::new(crate::sim_tests::base(), "", crate::Limits::default());
+    let mut r = crate::Server::restore(s.state().unwrap(), "", crate::Limits::default()).unwrap();
+    let (key, bytes) = forged();
+    let good = b"an honest image after it".as_slice();
+    let accepted = |seq, changes| crate::Journal::Accepted(crate::message::Accepted { seq, author: 1, batch_id: seq, changes });
+    for j in [crate::Journal::Issued { client: 1 }, accepted(1, vec![put(&key, 2, 1, bytes)]), accepted(2, vec![put(&sha256_hex(good), 2, 1, good)])]
+    {
+        r.replay(j).expect("the log replays");
+    }
+    assert_eq!(r.seq(), 2, "both batches count");
+    assert!(!r.document().images.contains_key(&key), "the refused image is left out");
+    assert!(r.document().images.contains_key(&sha256_hex(good)), "the edit after it is kept");
 }

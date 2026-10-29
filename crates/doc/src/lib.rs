@@ -162,6 +162,16 @@ pub struct ImageData {
 }
 
 impl ImageData {
+    /// Largest encoded image a document takes from outside: an image member of a `.fig` or
+    /// `.sketch` file, an image file a REST import reads, an image entry from a live session.
+    pub const MAX_BYTES: u64 = 256 * 1024 * 1024;
+
+    /// Whether `key` claims to be a content hash: 64 hex digits, the shape of the sha256 hex
+    /// `figcraft_format::image_hash` makes. Bytes stored under such a key must hash to it.
+    pub fn claims_content_hash(key: &str) -> bool {
+        key.len() == 64 && key.bytes().all(|b| b.is_ascii_hexdigit())
+    }
+
     /// Whether `key` can name an image: 1–128 ASCII letters, digits, `-` and `_` (content hashes,
     /// the svg importer's FNV keys, the REST importer's `rest-image-missing` placeholder). A key
     /// becomes an archive member name (`images/<key>`) when the file is saved, so only these are
