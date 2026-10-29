@@ -371,6 +371,11 @@ fn a_continue_batch_keeps_successful_steps_as_one_undo_entry() {
     let error = results[1]["error"].as_str().unwrap();
     assert!(error.contains("step 1:") && error.contains("is not text"), "{error}");
     assert!(results[1].get("result").is_none());
+    undo_and_redo_the_continued_batch(&mut s, frame, text, &name, undo);
+}
+
+/// The successful steps of the batch above undo and redo as one step.
+fn undo_and_redo_the_continued_batch(s: &mut Session, frame: figcraft_doc::NodeId, text: figcraft_doc::NodeId, name: &str, undo: usize) {
     assert!(matches!(&s.doc().unwrap().node(text).unwrap().kind, figcraft_doc::NodeKind::Text(t) if t.characters == "novo"));
     assert_eq!(s.doc().unwrap().node(s.page().unwrap()).unwrap().name, "Depois do erro");
     assert_eq!(s.undo_depth(), (undo + 1, 0));
