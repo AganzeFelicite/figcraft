@@ -247,12 +247,12 @@ pub(crate) fn print_options(ui: &mut Ui, id: Id, p: &PrintSettings) -> Option<Pr
 }
 
 /// Print options as command params (`bleed`, `cropMarks`, `bleedMarks`, `cmyk`).
-fn print_params(p: &PrintSettings) -> Value {
+pub(crate) fn print_params(p: &PrintSettings) -> Value {
     json!({"bleed": p.bleed(), "cropMarks": p.crop_marks, "bleedMarks": p.bleed_marks, "cmyk": p.cmyk})
 }
 
 /// `file.export` params for `setting`: its size, format and options (PDF: its print options).
-fn setting_params(setting: &ExportSetting) -> Value {
+pub(crate) fn setting_params(setting: &ExportSetting) -> Value {
     let mut params = serde_json::to_value(setting).unwrap_or_else(|_| json!({}));
     if let Value::Object(m) = &mut params {
         m.remove("print");

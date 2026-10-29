@@ -164,7 +164,7 @@ pub fn specs() -> Vec<CommandSpec> {
         spec!(
             "variable.create",
             "Create variable",
-            "{collection, name, type: color|number|string|boolean, value (default mode) | values {modeName: value}}",
+            "{collection, name, type: color|number|string|boolean, value (default mode) | values {modeName: value}, description?}",
             true,
             var_create
         ),

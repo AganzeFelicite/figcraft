@@ -329,8 +329,9 @@ fn tweaked(e: &Effect, f: impl FnOnce(&mut EffectKind)) -> Effect {
 /// duo noise's second colour), in the current row; `edit` applies a new one.
 fn fx_color(app: &mut FigApp, ui: &mut Ui, ids: &[NodeId], i: usize, e: &Effect, secondary: bool, edit: &ColorEdit<'_>) {
     let Some(c) = e.color(secondary) else { return };
-    if widgets::swatch(ui, &Paint::solid(c), 16.0).clicked() {
-        app.ui.picker = Some(crate::colorpicker::PickerTarget::Effect { ids: ids.to_vec(), index: i, secondary });
+    let sw = widgets::swatch(ui, &Paint::solid(c), 16.0);
+    if sw.clicked() {
+        app.toggle_picker(crate::colorpicker::PickerTarget::Effect { ids: ids.to_vec(), index: i, secondary }, Some(sw.rect.min.y));
     }
     if let Some(h) = widgets::text_field(ui, Id::unique(("fx_c", i, secondary)), &c.to_hex(), 80.0, "")
         && let Some(nc) = figcraft_color::Color::from_hex_or_name(&h)
