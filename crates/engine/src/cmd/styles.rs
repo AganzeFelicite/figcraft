@@ -1253,7 +1253,14 @@ pub(crate) fn set_paint_color(list: &mut Vec<Paint>, i: usize, stop: Option<usiz
             }
         }
         (Some(p), None) => p.kind = PaintKind::Solid { color: c },
-        (None, None) if i == 0 => list.push(Paint::solid(c)),
+        (None, None) if i == 0 => {
+            // A bound colour owns its alpha, so the new paint keeps it out of the opacity.
+            let mut p = Paint::solid(c);
+            p.kind = PaintKind::Solid { color: c };
+            p.opacity = 1.0;
+            p.color_alpha = 1.0;
+            list.push(p);
+        }
         (None, _) => {}
     }
 }
