@@ -1,6 +1,10 @@
-use super::menu::{blend_menu, context_popup, menu_check, menu_item, menu_popup, row, row_context_menu, row_rect};
+use super::menu::{blend_menu, context_popup, menu_check, menu_item, menu_popup, preview_blend, row, row_context_menu, row_rect};
 use super::stroke::stroke_settings;
-use super::*;
+use super::{
+    Align2, BlendMode, CornerRadius, Document, FIELD_H, FieldEdit, FigApp, Icon, Id, Lead, ListDrag, MaskType, Node, NodeId, NodeKind, Paint,
+    PaintKind, Rect, Sense, Stroke, StrokeAlign, StyleSlot, Tip, Tokens, Ui, Value, VariableType, common, icons, json, moved_index, pos2, regular,
+    removed_index, style_picker, tr, trf, vec2, widgets,
+};
 
 /// Draw visibility/blend/mask, opacity, uniform or per-corner radius, corner smoothing and
 /// the blend-mode row.
@@ -128,7 +132,8 @@ pub(super) fn appearance(app: &mut FigApp, ui: &mut Ui, doc: &Document, sel: &[N
             let label = blend.map(|b| tr(b.label())).unwrap_or(tr("Mixed"));
             let resp = widgets::dropdown(ui, label, col * 2.0 + 8.0, Some(Icon::Blend));
             menu_popup(&resp).width(200.0).show(|ui| {
-                if let Some(b) = blend_menu(ui, true) {
+                let ctx = ui.ctx().clone();
+                if let Some(b) = blend_menu(ui, true, |b| preview_blend(app, &ctx, &ids, b)) {
                     app.set_props(&ids, json!({"blend": b.label()}));
                 }
             });
