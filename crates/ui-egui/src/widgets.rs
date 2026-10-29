@@ -893,7 +893,7 @@ pub fn section_header_resp(ui: &mut Ui, title: &str, buttons: &[(Icon, &str)], d
         pos2(rect.min.x + PAD, rect.center().y),
         Align2::LEFT_CENTER,
         title,
-        regular(11.0),
+        semibold(11.0),
         if dim { t.text_secondary } else { t.text },
     );
     let mut out = None;
