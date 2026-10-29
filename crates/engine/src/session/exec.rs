@@ -85,16 +85,9 @@ impl Session {
             .and_then(|v| self.check_live_access(id, &before).map(|()| v))
             .and_then(|v| self.check_finite_geometry(id, &before).map(|()| v));
         match &result {
-            Ok(v) => {
+            Ok(_) => {
                 self.after_command(spec, before);
                 self.apply_view_prefs();
-                if let Some(kind) = events::comment_event_kind(id) {
-                    let comment_id = v.get("id").and_then(Value::as_u64).or_else(|| params.get("id").and_then(params::id_of).map(|n| n.0));
-                    self.record_event(
-                        kind,
-                        serde_json::json!({"command": id, "commentId": comment_id, "reply": v.get("reply").cloned().unwrap_or(Value::Null)}),
-                    );
-                }
                 if spec.history && id != "edit.repeat" {
                     self.last_command = Some((id.to_string(), params.clone()));
                 }
@@ -108,11 +101,6 @@ impl Session {
                 }
             }
             Err(_) => {
-                // A panic caught by the guard can leave a group's event buffer open; restore the
-                // depth and buffer it had when this command started, not the whole session's.
-                if matches!(&result, Err(EngineError::Internal { .. })) {
-                    self.restore_after_internal_error(group_depth_before, pending_events_before);
-                }
                 // Roll back any partial edit — also during an interaction, where `before` is the
                 // interaction's last valid preview: restore it and leave the gesture itself (its
                 // own snapshot) alone.
@@ -126,7 +114,27 @@ impl Session {
                 self.clipboard = clipboard_before;
             }
         }
+        self.after_comment_command(id, params, &result, group_depth_before, pending_events_before);
         result
+    }
+
+    /// Record the live event a successful mutating `comment.*` command makes. A panic caught by the
+    /// guard can leave a group's event buffer open: restore the depth and buffer it had when the
+    /// command started (`group_depth`, `pending_events`), not the whole session's.
+    fn after_comment_command(&mut self, id: &str, params: &Value, result: &Result<Value>, group_depth: usize, pending_events: usize) {
+        match result {
+            Ok(v) => {
+                if let Some(kind) = events::comment_event_kind(id) {
+                    let comment_id = v.get("id").and_then(Value::as_u64).or_else(|| params.get("id").and_then(params::id_of).map(|n| n.0));
+                    self.record_event(
+                        kind,
+                        serde_json::json!({"command": id, "commentId": comment_id, "reply": v.get("reply").cloned().unwrap_or(Value::Null)}),
+                    );
+                }
+            }
+            Err(EngineError::Internal { .. }) => self.restore_after_internal_error(group_depth, pending_events),
+            Err(_) => {}
+        }
     }
 
     /// A version shown in place of the document is read-only: refuse an edit (it is rolled back).

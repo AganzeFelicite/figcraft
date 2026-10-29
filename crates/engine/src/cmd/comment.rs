@@ -429,6 +429,46 @@ fn quote_text(out: &mut String, text: &str) {
     }
 }
 
+/// One thread's section of the `comment.prompt` brief, and whether its replies were cut. It is
+/// built apart so one with thousands of replies stops adding them once it reaches `room` instead of
+/// overshooting the byte limit before the next thread's check.
+fn thread_section(doc: &Document, c: &Comment, room: usize) -> (String, bool) {
+    let (x, y) = c.position(doc);
+    let page = doc.node(c.page).map(|n| single_line(&n.name)).unwrap_or_else(|| "?".into());
+    let frame = frame_of(doc, c);
+    let frame_name = frame.and_then(|f| doc.node(f)).map(|n| single_line(&n.name));
+    let anchor_name = c.anchor.and_then(|a| doc.node(a)).map(|n| single_line(&n.name));
+    let mut section = String::new();
+    let _ = writeln!(section, "## Comment {} — {}\n", c.id, frame_name.as_deref().unwrap_or("Page"));
+    let _ = writeln!(section, "- Page: {page} (page {})", c.page.0);
+    if let Some(f) = frame {
+        let _ = writeln!(section, "- Frame: {} (node {})", frame_name.as_deref().unwrap_or("?"), f.0);
+    }
+    if let Some(a) = c.anchor {
+        let _ = writeln!(section, "- Anchor: node {} ({})", a.0, anchor_name.as_deref().unwrap_or("?"));
+    } else {
+        let _ = writeln!(section, "- Anchor: page point");
+    }
+    let _ = writeln!(section, "- Point: x {x:.1}, y {y:.1} (page units)");
+    let _ = writeln!(section, "- Author: {}", single_line(&c.first.author));
+    let _ = writeln!(section, "- Link: {}", link(c.id));
+    let _ = writeln!(section, "- Status: {}\n", if c.resolved { "resolved" } else { "open" });
+    quote_text(&mut section, &clip_chars(&c.first.text, PROMPT_MAX_MESSAGE));
+    let mut cut = false;
+    if !c.replies.is_empty() {
+        let _ = writeln!(section, "\nReplies:");
+        for r in &c.replies {
+            if section.len() >= room {
+                cut = true;
+                break;
+            }
+            let text = single_line(&clip_chars(&r.text, PROMPT_MAX_MESSAGE));
+            let _ = writeln!(section, "- {}: {text}", single_line(&r.author));
+        }
+    }
+    (section, cut)
+}
+
 /// The Markdown brief `comment.prompt` returns: the document, what to do, and one section per
 /// thread with its page, frame, anchor, point, messages and link. Bounded so a file with thousands
 /// of comments cannot make one unbounded reply.
@@ -470,40 +510,8 @@ fn prompt_text(doc: &Document, path: Option<&str>, comments: &[&Comment]) -> (St
             break;
         }
         let room = body_limit.saturating_sub(out.len());
-        let (x, y) = c.position(doc);
-        let page = doc.node(c.page).map(|n| single_line(&n.name)).unwrap_or_else(|| "?".into());
-        let frame = frame_of(doc, c);
-        let frame_name = frame.and_then(|f| doc.node(f)).map(|n| single_line(&n.name));
-        let anchor_name = c.anchor.and_then(|a| doc.node(a)).map(|n| single_line(&n.name));
-        // A thread is built apart so one with thousands of replies is cut at `room` instead of
-        // overshooting the byte limit before the next thread's check.
-        let mut section = String::new();
-        let _ = writeln!(section, "## Comment {} — {}\n", c.id, frame_name.as_deref().unwrap_or("Page"));
-        let _ = writeln!(section, "- Page: {page} (page {})", c.page.0);
-        if let Some(f) = frame {
-            let _ = writeln!(section, "- Frame: {} (node {})", frame_name.as_deref().unwrap_or("?"), f.0);
-        }
-        if let Some(a) = c.anchor {
-            let _ = writeln!(section, "- Anchor: node {} ({})", a.0, anchor_name.as_deref().unwrap_or("?"));
-        } else {
-            let _ = writeln!(section, "- Anchor: page point");
-        }
-        let _ = writeln!(section, "- Point: x {x:.1}, y {y:.1} (page units)");
-        let _ = writeln!(section, "- Author: {}", single_line(&c.first.author));
-        let _ = writeln!(section, "- Link: {}", link(c.id));
-        let _ = writeln!(section, "- Status: {}\n", if c.resolved { "resolved" } else { "open" });
-        quote_text(&mut section, &clip_chars(&c.first.text, PROMPT_MAX_MESSAGE));
-        if !c.replies.is_empty() {
-            let _ = writeln!(section, "\nReplies:");
-            for r in &c.replies {
-                if section.len() >= room {
-                    truncated = true;
-                    break;
-                }
-                let text = single_line(&clip_chars(&r.text, PROMPT_MAX_MESSAGE));
-                let _ = writeln!(section, "- {}: {text}", single_line(&r.author));
-            }
-        }
+        let (section, replies_cut) = thread_section(doc, c, room);
+        truncated |= replies_cut;
         if section.len() > room {
             let mut cut = room.min(section.len());
             while cut > 0 && !section.is_char_boundary(cut) {

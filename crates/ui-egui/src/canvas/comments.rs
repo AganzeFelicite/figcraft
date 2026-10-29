@@ -1045,10 +1045,6 @@ pub fn panel(app: &mut FigApp, ui: &mut Ui) {
         ui.label(egui::RichText::new(tr("Comments")).font(semibold(12.0)).color(t.text));
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             ui.add_space(8.0);
-            let copy = icons::button(ui, Icon::Code, 24.0, false, tr("Copy comments for AI"));
-            if copy.clicked() {
-                copy_for_ai(app, None);
-            }
             let menu = icons::button(ui, Icon::Adjust, 24.0, app.ui.comments.filter != Filter::Open, tr("Filter and sort"));
             crate::right::menu_popup(&menu).width(200.0).show(|ui| {
                 for f in Filter::ALL {
