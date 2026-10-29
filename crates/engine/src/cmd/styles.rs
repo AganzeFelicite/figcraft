@@ -784,7 +784,7 @@ pub fn bind(s: &mut Session, p: &Value) -> Result<Value> {
 pub(crate) fn bind_variable(cmd: &str, doc: &mut Document, ids: &[NodeId], field: &str, vid: Option<&str>) -> Result<()> {
     // An instance's component property takes a variable of its type; other fields the types their
     // scopes belong to.
-    if let Some(v) = vid.and_then(|v| doc.variables.get(v)) {
+    if let Some(v) = vid.and_then(|v| doc.variables.get_by_id(v)) {
         for i in ids {
             match field.strip_prefix(crate::components::PROP_BINDING) {
                 Some(name) => super::component::check_prop_binding(doc, *i, name, v.kind).map_err(|e| bad(cmd, e))?,
