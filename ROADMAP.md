@@ -2,7 +2,7 @@
 
 **Stage: alpha** · next: beta, ~26 points and ~162–292 h away (one Opus 5.5 agent; ~33–67 h wall-clock with 5 agents)
 
-> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-28 · **Change:** minor (scaled instances keep their scale when their main is rebuilt (#922); .fig embedded images are copied once per blob, not once per hash (#1059); page ruler guides survive save and reopen (#1476); colour picker LCH and OKLCH models; non-ASCII layer names transliterate in code export (#1235); branches in live sessions and branch history entries, gap 17; plugin widgets take text input and a property menu (plugin API 4); boards: templates and tables; boards: a shared timer and voting sessions; boards: the dot grid, connector ends dragged to re-attach, curved connectors; Installed weights of an embedded font family (#1246); `.sketch` import, best effort (Sketch 48 and newer); CJK line breaking: JIS X 4051's line-start and line-end sets completed with the halfwidth small kana, the halfwidth and spacing (semi-)voiced sound marks, the iteration marks 〱–〵 and the halfwidth parentheses, with behaviour cases for each; Adobe Fonts found on macOS (#298); egui 0.37 hidden-capture deadline contract; Dev Mode measurements kept on the canvas and a read-only layers panel; boards: a board area row and progress entry; community fixes in #507, #510, #529 and #530: auto-save, a text box by dragging, batch step references, removing someone from a live session, Russian and Turkish catalogs reviewed, Czech and Indonesian drafts, the Japanese draft completed, zoom previews, the web clipboard, Alt-drag snapping and Cmd+D repeat, recovery copies, crash and rollback fixes, colour emoji, `.fig` import fixes; earlier changes are in the revision history below) · **Target:** Figma Design (desktop app 126.10.7)
+> **Last reviewed:** 2026-10-10 · **Last updated:** 2026-10-28 · **Change:** minor (Arabic draft catalog; scaled instances keep their scale when their main is rebuilt (#922); .fig embedded images are copied once per blob, not once per hash (#1059); page ruler guides survive save and reopen (#1476); colour picker LCH and OKLCH models; non-ASCII layer names transliterate in code export (#1235); branches in live sessions and branch history entries, gap 17; plugin widgets take text input and a property menu (plugin API 4); boards: templates and tables; boards: a shared timer and voting sessions; boards: the dot grid, connector ends dragged to re-attach, curved connectors; Installed weights of an embedded font family (#1246); `.sketch` import, best effort (Sketch 48 and newer); CJK line breaking: JIS X 4051's line-start and line-end sets completed with the halfwidth small kana, the halfwidth and spacing (semi-)voiced sound marks, the iteration marks 〱–〵 and the halfwidth parentheses, with behaviour cases for each; Adobe Fonts found on macOS (#298); egui 0.37 hidden-capture deadline contract; Dev Mode measurements kept on the canvas and a read-only layers panel; boards: a board area row and progress entry; community fixes in #507, #510, #529 and #530: auto-save, a text box by dragging, batch step references, removing someone from a live session, Russian and Turkish catalogs reviewed, Czech and Indonesian drafts, the Japanese draft completed, zoom previews, the web clipboard, Alt-drag snapping and Cmd+D repeat, recovery copies, crash and rollback fixes, colour emoji, `.fig` import fixes; earlier changes are in the revision history below) · **Target:** Figma Design (desktop app 126.10.7)
 
 FigCraft is a clean-room, open-source, pure-Rust reimplementation of the Figma design workflow,
 native on macOS, Windows, Linux and FreeBSD and in the browser, fully drivable by agents through
@@ -63,7 +63,7 @@ native speakers' reviews of the nine language drafts need people.
 | Stability | 55% | 20–40 | [gaps](docs/gaps.md) |
 | Performance | 60% | 30–60 | [hardware-parity](docs/hardware-parity.md) |
 | Hardware | 60% | 10–21 | [hardware-parity](docs/hardware-parity.md) |
-| Localization | 39% (layer; English; Russian and Turkish reviewed by native speakers; Spanish with a Latin American overlay, French, German, Brazilian Portuguese, Japanese, Korean, Simplified Chinese, Indonesian and Czech drafts; CJK UI fonts) | 29–51 | [localization-parity](docs/localization-parity.md) |
+| Localization | 39% (layer; English; Russian and Turkish reviewed by native speakers; Spanish with a Latin American overlay, French, German, Brazilian Portuguese, Japanese, Korean, Simplified Chinese, Indonesian and Czech drafts; CJK UI fonts); Arabic draft: 2,508 entries, native review and panel mirroring pending | 29–51 | [localization-parity](docs/localization-parity.md) |
 | Platforms | 75% | 10–20 | [hardware-parity](docs/hardware-parity.md) |
 | Ecosystem / plugins | 40% (own WASM plugins with panels, settings and widgets that take clicks, text and a property menu; a self-hosted plugin directory) | 6–22 | [gaps](docs/gaps.md) |
 | AI features | 0% | 30–60 | [gaps](docs/gaps.md) |
@@ -103,7 +103,7 @@ native speakers' reviews of the nine language drafts need people.
 | Simplified Chinese | zh-Hans | 95% | draft (needs native review) |
 | Spanish | es, es-419 | 100% (es-419: an overlay of 101 entries) | draft (needs native review) |
 | Hindi | hi | 0% | none |
-| Arabic | ar | 0% | none |
+| Arabic | ar | 2,508 / 2,508 entries (100%, counted 2026-10-28) | draft; native review and panel mirroring pending |
 | French | fr | 95% | draft (needs native review) |
 | Portuguese (Brazil) | pt-BR | 95% | draft (needs native review) |
 | Indonesian | id | 99% | draft (needs native review) |
@@ -114,7 +114,7 @@ native speakers' reviews of the nine language drafts need people.
 
 Percentages measured 2026-10-17 over 2,272 entries (strings added since a draft show English). Also shipped: Russian (`ru`, 99%, reviewed by VanTan), Swedish (`sv`, 99.6%, command labels since 2026-10-17; native review welcome), Turkish (`tr`, 99%) and Czech (`cs`, 99%, draft). Figma ships English, Japanese, Korean, French, German, Spanish and Portuguese
 (Brazil); FigCraft has the localization layer, English and Spanish (Spain and Latin America),
-French, German, Brazilian Portuguese, Japanese, Korean, Simplified Chinese, Indonesian and Vietnamese drafts (Preferences ▸
+French, German, Brazilian Portuguese, Japanese, Korean, Simplified Chinese, Indonesian, Vietnamese and Arabic drafts (Preferences ▸
 Language; Traditional Chinese has no catalog; CJK UI
 text uses an installed CJK font, loaded only when needed; adding a language:
 [`docs/translating.md`](docs/translating.md)). Document text in any script (bidi, Arabic shaping,
@@ -127,7 +127,7 @@ Ranked; detail and milestones in [`docs/roadmap.md`](docs/roadmap.md).
 1. `.fig` import's tail: fixes from real files, connector labels, table cells, filled areas with their own fills (the best-effort import, editable vector networks, the other layer kinds and variable prototype actions landed 2026-10-11): 5–10 h; then checking the rest of the experimental `.fig` export (landed 2026-10-12; written files open and draw in other software) on effects, images, prototypes and real files: 5–15 h.
 2. Real-file corpus and measured fidelity: 15–30 h.
 3. Tool-by-tool interaction pass against Figma: 40–60 h.
-4. Languages: native reviews of the es (with es-419), fr, de, pt-BR, ja, ko, zh-Hans, id and cs drafts (people), the entries added since each catalog was written, then Hindi, Vietnamese and Arabic ([localization-parity](docs/localization-parity.md)).
+4. Languages: native reviews of the es (with es-419), fr, de, pt-BR, ja, ko, zh-Hans, id and cs drafts (people), the entries added since each catalog was written, then Hindi and Vietnamese; Arabic native review and panel mirroring ([localization-parity](docs/localization-parity.md)).
 5. Multiplayer (M9): accounts and teams on top of the live sessions and the standalone server (transport, hosting, invite links that open the app, document sync, presence with remote text carets, cursor chat and spotlight, per-user undo, reconnect with offline edits, collision-free ids for styles, variables and comments, the browser client, `figcraft-server` with persistence and share links to edit or view, team libraries on the server landed): 42–84 h.
 
 ## Progress log
@@ -351,6 +351,7 @@ Ranked; detail and milestones in [`docs/roadmap.md`](docs/roadmap.md).
 
 | Date | Change | Summary |
 |---|---|---|
+| 2026-10-28 | minor | Arabic draft: 1,857 UI strings, 620 command labels, 31 menu wordings; count-neutral plurals and web font gate. Native review and panel mirroring remain open; grade and estimates unchanged. Evidence: `crates/ui-egui/locales/ar.toml`, i18n catalog tests and [translation notes](docs/translating.md#arabic-draft) |
 | 2026-10-28 | minor | M3, #922: instances scaled with the Scale tool keep their layers' scaled size and points when their main is rebuilt (`size`/`position` overrides recorded on scale). Numbers unchanged. |
 | 2026-10-28 | minor | M6, #1059: `.fig` import copies embedded image blobs once per blob, not once per hash naming them. Numbers unchanged. |
 | 2026-10-28 | minor | M1, #1476: page ruler guides survive save and reopen; files written with a page's `guides` key twice open again with both lists. Numbers unchanged. |
