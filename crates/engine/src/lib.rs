@@ -108,6 +108,7 @@ pub use derived::{changed_nodes, normalize};
 pub use doc_state::{DocState, History, HistoryEntry, Interaction, PREVIEW_READ_ONLY, Preedit, TextEdit, VersionPreview};
 pub use error::{EngineError, Result, bad};
 pub use prefs::{Clipboard, MAX_RECENT_ACTIONS, Prefs, UI_SCALE_MAX, UI_SCALE_MIN, UiRequest, clamp_ui_scale};
+pub use session::Forward;
 pub use view_state::ViewState;
 
 /// The editing session: open documents, the current tool, clipboard and prefs.
@@ -224,9 +225,13 @@ mod collab_undo_tests;
 #[cfg(test)]
 mod comment_agent_tests;
 #[cfg(test)]
+mod comment_mentions_tests;
+#[cfg(test)]
 mod comments_polish_tests;
 #[cfg(test)]
 mod component_codegen_tests;
+#[cfg(test)]
+mod component_cycle_tests;
 #[cfg(test)]
 mod components_behaviour_tests;
 #[cfg(test)]
@@ -261,6 +266,8 @@ mod doc_urls_tests;
 mod double_click_tests;
 #[cfg(test)]
 mod draw_tools_tests;
+#[cfg(test)]
+mod duplicate_map_tests;
 #[cfg(test)]
 mod duplicate_spacing_tests;
 #[cfg(test)]
