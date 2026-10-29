@@ -269,7 +269,7 @@ impl FigApp {
         let right_open = (self.right_panel_shown(hidden) && !narrow) || mobile == Some(MobilePanel::Right);
         if !hidden && (!narrow || mobile == Some(MobilePanel::Left)) {
             egui::Panel::left("left_rail")
-                .exact_size(56.0)
+                .exact_size(layers::RAIL_WIDTH)
                 .resizable(false)
                 .frame(egui::Frame::NONE.fill(t.panel).stroke(egui::Stroke::new(1.0, t.border)))
                 .show(ui, |ui| {
