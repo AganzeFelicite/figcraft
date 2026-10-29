@@ -1,4 +1,7 @@
-use super::*;
+use super::{
+    Arc, BatchScope, BatchStep, DocState, Document, EngineError, HistoryEntry, Interaction, NodeId, PREVIEW_READ_ONLY, Result, Session, UiRequest,
+    Value, cmd, figcraft_collab, json, normalize, textpreview,
+};
 
 struct GroupDocCheckpoint {
     uid: u64,
@@ -14,6 +17,8 @@ struct GroupCheckpoint {
     docs: Vec<GroupDocCheckpoint>,
     active: usize,
     journal_len: usize,
+    /// Live events buffered before the group: a failed one drops only its own.
+    pending_events: usize,
     last_command: Option<(String, Value)>,
 }
 
@@ -255,6 +260,7 @@ impl Session {
         let before = self.group_checkpoint();
         let result = f(self);
         self.group_depth -= 1;
+        let at_root = self.group_depth == 0;
         for ds in &before.docs {
             self.live_hold(ds.uid, false);
         }
@@ -279,8 +285,9 @@ impl Session {
                 }
             }
         }
-        if self.group_depth == 0 {
+        if at_root {
             self.closed_in_group.clear();
+            self.flush_pending_events();
         }
         result
     }
@@ -300,7 +307,13 @@ impl Session {
                 limit: ds.history.limit,
             })
             .collect();
-        let before = GroupCheckpoint { docs, active: self.active, journal_len: self.journal.len(), last_command: self.last_command.clone() };
+        let before = GroupCheckpoint {
+            docs,
+            active: self.active,
+            journal_len: self.journal.len(),
+            pending_events: self.pending_events.len(),
+            last_command: self.last_command.clone(),
+        };
         // The steps inside are dropped again below, so they mustn't push the oldest ones out.
         for ds in &mut self.docs {
             ds.history.limit = usize::MAX;
@@ -334,6 +347,7 @@ impl Session {
         }
         self.active = before.active;
         self.journal.truncate(before.journal_len);
+        self.pending_events.truncate(before.pending_events);
         if restore_last_command {
             self.last_command = before.last_command;
         }
