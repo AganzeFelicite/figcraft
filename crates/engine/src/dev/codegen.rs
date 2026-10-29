@@ -609,6 +609,20 @@ mod tests {
     }
 
     #[test]
+    fn flutter_keeps_a_capped_layers_name_on_its_comment_line() {
+        let mut s = Session::new();
+        let root = id_of(&s.execute("frame.create", &json!({"x": 0, "y": 0, "width": 50, "height": 50})).unwrap()["id"]).unwrap();
+        let mut parent = root;
+        for _ in 0..20 {
+            let p = json!({"x": 1, "y": 1, "width": 40, "height": 40, "parent": parent, "name": "deep\nvoid main() {}"});
+            parent = id_of(&s.execute("frame.create", &p).unwrap()["id"]).unwrap();
+        }
+        let dart = code_for(s.doc().unwrap(), root, CodeLang::Flutter);
+        assert!(dart.contains("…"), "the depth is capped: {dart}");
+        assert!(!dart.lines().any(|l| l.trim_start().starts_with("void main()")), "a name never leaves its comment: {dart}");
+    }
+
+    #[test]
     fn flutter_expands_and_stretches_fill_children() {
         let mut s = Session::new();
         let row = id_of(&s.execute("frame.create", &json!({"x": 0, "y": 0, "width": 200, "height": 40})).unwrap()["id"]).unwrap();

@@ -1,4 +1,10 @@
-use super::*;
+use figcraft_doc::AutoLayout;
+
+use super::swift::one_line;
+use super::{
+    CodeLang, CrossAlign, Ctx, LayoutMode, LetterSpacing, LineHeight, MainAlign, Node, NodeId, NodeKind, Param, Sizing, TextAlignH, TextDecoration,
+    drop_shadow, first_fill, kotlin_color, literal, num, radius, stroke_color,
+};
 
 // ------------------------------------------------------------------ Flutter (Dart)
 
@@ -118,7 +124,7 @@ pub(crate) fn flutter(ctx: &Ctx, id: NodeId, depth: usize, out: &mut String, pla
 fn flutter_placed(ctx: &Ctx, n: &Node, depth: usize, out: &mut String, place: Place) {
     if ctx.too_deep(depth) {
         let pad = flutter_indent(depth);
-        out.push_str(&format!("{pad}// {} …\n{pad}const SizedBox()", n.name));
+        out.push_str(&format!("{pad}// {} …\n{pad}const SizedBox()", one_line(&n.name)));
         return;
     }
     let mut depth = depth;

@@ -224,10 +224,6 @@ fn variant_sets_share_one_definition() {
     let kt = code(&mut s, set, "compose");
     assert!(kt.contains("enum class ButtonState { Default, Hover }"), "{kt}");
     assert!(kt.contains("    state: ButtonState = ButtonState.Default,"), "{kt}");
-    let dart = code(&mut s, set, "flutter");
-    assert!(dart.contains("enum ButtonState { defaultValue, hover }\n"), "{dart}");
-    assert!(dart.contains("    this.state = ButtonState.defaultValue,\n"), "{dart}");
-    assert!(dart.contains("  final ButtonState state;\n"), "{dart}");
     let ark = code(&mut s, set, "arkui");
     assert!(ark.contains("export enum ButtonState { Default, Hover }"), "{ark}");
     assert!(ark.contains("    @Prop state: ButtonState = ButtonState.Default"), "{ark}");
@@ -247,9 +243,21 @@ fn variant_sets_share_one_definition() {
     assert_eq!(component_code(&mut s, i, "react")["usage"], "<Button state=\"Hover\" />\n");
     assert_eq!(component_code(&mut s, i, "swiftui")["usage"], "Button(state: .hover)\n");
     assert_eq!(component_code(&mut s, i, "compose")["usage"], "Button(state = ButtonState.Hover)\n");
-    assert_eq!(component_code(&mut s, i, "flutter")["usage"], "Button(state: ButtonState.hover)\n");
     assert_eq!(component_code(&mut s, i, "arkui")["usage"], "Button({ state: ButtonState.Hover })\n");
     assert_eq!(component_code(&mut s, i, "leptos")["usage"], "<Button state=ButtonState::Hover />\n");
+}
+
+#[test]
+fn flutter_variant_sets_share_one_enum() {
+    let mut s = Session::new();
+    let (set, _, _) = button_set(&mut s);
+    let dart = code(&mut s, set, "flutter");
+    assert!(dart.contains("enum ButtonState { defaultValue, hover }\n"), "{dart}");
+    assert!(dart.contains("    this.state = ButtonState.defaultValue,\n"), "{dart}");
+    assert!(dart.contains("  final ButtonState state;\n"), "{dart}");
+    let i = idv(&ex(&mut s, "instance.create", json!({"component": set, "x": 0, "y": 600})));
+    ex(&mut s, "instance.setProperties", json!({"ids": [i], "properties": {"State": "Hover"}}));
+    assert_eq!(component_code(&mut s, i, "flutter")["usage"], "Button(state: ButtonState.hover)\n");
 }
 
 #[test]
