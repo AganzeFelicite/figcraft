@@ -23,7 +23,8 @@ enum GuideDrag {
     /// Dragging a new guide out of a ruler.
     New { vertical: bool, frame: Option<NodeId> },
     /// Moving guide `index` of `owner` (a page or frame); `copy` (Alt at the press) drops a new one.
-    Move { owner: NodeId, index: usize, vertical: bool, copy: bool, frame: Option<NodeId> },
+    /// `from` is where it was pressed, so a click without movement only selects it.
+    Move { owner: NodeId, index: usize, vertical: bool, copy: bool, frame: Option<NodeId>, from: Pos2 },
 }
 
 impl GuideDrag {
@@ -204,7 +205,11 @@ pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2) -> bool {
             app.session.ds().map(|d| (d.view.snap_pixel, (d.view.snap_objects && !suspend).then_some(d.view.zoom))).unwrap_or((true, None));
         let at = match drag {
             GuideDrag::New { vertical, .. } => drop_target(app, p, vertical, pixel, object_zoom),
-            GuideDrag::Move { owner, index, vertical, .. } => through(app, owner, index, vertical, p, pixel, object_zoom),
+            // A click only selects the guide: object snapping starts once the pointer moves.
+            GuideDrag::Move { owner, index, vertical, from, .. } => {
+                let moved = (pos - from).length() > 0.5;
+                through(app, owner, index, vertical, p, pixel, if moved { object_zoom } else { None })
+            }
         };
         // Alt: distances from the guide to the layers in the frame it crosses.
         let frame = drag.frame().or_else(|| at.map(|g| g.owner).filter(|o| app.session.ds().is_ok_and(|d| d.page != *o)));
@@ -283,7 +288,7 @@ pub fn input(app: &mut FigApp, ctx: &egui::Context, pos: Pos2) -> bool {
                 app.ui.context_menu_shown = false;
             } else {
                 ctx.data_mut(|d| {
-                    d.insert_temp(drag_id(), GuideDrag::Move { owner: g.owner, index: g.index, vertical: g.vertical, copy: alt, frame })
+                    d.insert_temp(drag_id(), GuideDrag::Move { owner: g.owner, index: g.index, vertical: g.vertical, copy: alt, frame, from: pos })
                 });
             }
         }

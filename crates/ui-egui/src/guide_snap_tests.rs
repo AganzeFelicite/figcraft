@@ -86,6 +86,19 @@ fn with_snap_to_objects_off_the_guide_keeps_its_pixel_rounding() {
 }
 
 #[test]
+fn a_click_on_a_guide_only_selects_it() {
+    let mut s = Session::new();
+    s.execute("node.create", &json!({"type": "rectangle", "x": 100, "y": 100, "width": 120, "height": 80})).unwrap();
+    s.execute("guide.add", &json!({"vertical": false, "offset": 102})).unwrap();
+    let mut u = rulers(s);
+    // Two pixels above the rectangle's top edge, but a click without movement leaves it there.
+    let at = u.app.to_screen(500.0, 102.0);
+    u.button(at, true);
+    u.button(at, false);
+    assert_eq!(guides(&u, page(&u)), vec![(false, 102.0)], "a click must not snap it to the edge at 100");
+}
+
+#[test]
 fn cmd_or_ctrl_suspends_guide_snapping() {
     let mut s = Session::new();
     s.execute("node.create", &json!({"type": "rectangle", "x": 100, "y": 100, "width": 120, "height": 80})).unwrap();

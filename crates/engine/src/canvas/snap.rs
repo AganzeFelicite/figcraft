@@ -159,13 +159,21 @@ impl Targets {
                 t.ys.push((y, b.x0, b.x1));
             }
         }
-        // Everything in the frame. Nested layers count, so a guide over a group reaches its parts.
-        for id in doc.subtree(owner).into_iter().skip(1) {
-            if doc.node(id).is_some_and(|n| n.visible)
-                && let Some(b) = bbox(id)
-            {
+        // Everything in the frame. Nested layers count, so a guide over a group reaches its parts; a
+        // hidden layer hides its whole branch, so a visible child of a hidden group isn't a target.
+        let mut stack: Vec<(NodeId, bool)> = doc.node(owner).map(|n| n.children.iter().rev().map(|c| (*c, true)).collect()).unwrap_or_default();
+        let mut seen = 0;
+        while let Some((id, visible)) = stack.pop() {
+            seen += 1;
+            if seen > 5_000_000 {
+                break;
+            }
+            let Some(n) = doc.node(id) else { continue };
+            let visible = visible && n.visible;
+            if visible && let Some(b) = bbox(id) {
                 t.add_box(b);
             }
+            stack.extend(n.children.iter().rev().map(|c| (*c, visible)));
         }
         t
     }
@@ -402,7 +410,11 @@ impl Targets {
 /// its own axis, within `SNAP_PX` screen pixels at `zoom`. Returns the new offset in `owner`'s
 /// coordinates, or `None` when nothing is in reach.
 pub fn snap_guide(doc: &Document, page: NodeId, owner: NodeId, vertical: bool, offset: f64, zoom: f64) -> Option<f64> {
-    let threshold = SNAP_PX / zoom.max(1e-6);
+    // The guide moves along the owner's own axis (x for a vertical guide, y for a horizontal one),
+    // which the owner's transform may scale: convert the screen-pixel reach into owner units.
+    let [a, b, c, d, _, _] = doc.world_transform(owner).as_coeffs();
+    let axis = if vertical { a.hypot(b) } else { c.hypot(d) };
+    let threshold = SNAP_PX / (zoom.max(1e-6) * axis.max(1e-6));
     Targets::gather_for_guide(doc, page, owner).snap_axis(vertical, offset, threshold).map(|d| offset + d).filter(|v| v.is_finite())
 }
 

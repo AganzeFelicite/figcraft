@@ -89,6 +89,41 @@ fn a_frame_guide_snaps_along_the_frames_own_axes_when_it_is_turned() {
 }
 
 #[test]
+fn a_hidden_container_hides_its_children_from_snapping() {
+    let mut s = Session::new();
+    let frame = id(s.execute("node.create", &json!({"type": "frame", "x": 100, "y": 50, "width": 300, "height": 200})).unwrap());
+    let inner = id(s.execute("node.create", &json!({"type": "frame", "parent": frame, "x": 10, "y": 10, "width": 60, "height": 60})).unwrap());
+    let child = id(s.execute("node.create", &json!({"type": "rectangle", "parent": inner, "x": 20, "y": 20, "width": 20, "height": 20})).unwrap());
+    let page = s.page().unwrap();
+    let snap = |s: &Session, offset: f64| snap_guide(s.doc().unwrap(), page, frame, true, offset, 1.0);
+    // The inner frame's left edge is 10 in the frame; the nested rectangle's is 30.
+    assert_eq!(snap(&s, 11.0), Some(10.0));
+    assert_eq!(snap(&s, 31.0), Some(30.0));
+    // Hiding the inner frame hides its branch: the child's own flag stays true, but its edge is
+    // not a target any more (nor is the hidden frame's).
+    s.execute("node.set", &json!({"ids": [inner], "props": {"visible": false}})).unwrap();
+    assert!(s.doc().unwrap().node(child).unwrap().visible);
+    assert_eq!(snap(&s, 11.0), None);
+    assert_eq!(snap(&s, 31.0), None);
+}
+
+#[test]
+fn the_reach_is_five_screen_pixels_across_a_scaled_frame() {
+    let mut s = Session::new();
+    let frame = id(s.execute("node.create", &json!({"type": "frame", "x": 100, "y": 50, "width": 300, "height": 200})).unwrap());
+    s.execute("node.create", &json!({"type": "rectangle", "parent": frame, "x": 100, "y": 10, "width": 20, "height": 20})).unwrap();
+    // The frame is drawn at twice its own size, so an owner unit is two screen pixels at zoom 1.
+    s.doc_mut().unwrap().node_mut(frame).unwrap().transform = Affine::scale(2.0);
+    let page = s.page().unwrap();
+    let snap = |s: &Session, offset: f64, zoom: f64| snap_guide(s.doc().unwrap(), page, frame, true, offset, zoom);
+    // Five screen pixels are 2.5 frame units: two snaps to the edge at 100, three doesn't.
+    assert_eq!(snap(&s, 102.0, 1.0), Some(100.0));
+    assert_eq!(snap(&s, 103.0, 1.0), None);
+    // Zooming in halves the owner-space reach again (1.25 frame units at 2x zoom).
+    assert_eq!(snap(&s, 102.0, 2.0), None);
+}
+
+#[test]
 fn a_guide_with_nothing_near_stays_where_it_is() {
     let s = Session::new();
     let page = s.page().unwrap();
