@@ -237,7 +237,7 @@ fn the_server_key_shows_as_dots_while_shown_and_typed() {
     let (mut h, _) = harness();
     let shapes = open(&mut h);
     click(&mut h, &shapes, "Advanced");
-    h.app.ui.live.share_key = "s3cret-key".into();
+    h.app.ui.live.share_key = Some(("wss://share.example/".to_string(), "s3cret-key".to_string()));
     let shapes = h.frames(2);
     let dots = "•".repeat(10);
     assert!(has_text(&shapes, &dots) && !has_text(&shapes, "s3cret-key"));
@@ -503,6 +503,22 @@ fn the_server_preference_resets_and_turns_online_sharing_off() {
     click(&mut h, &shapes, "Start sharing");
     let s = script.lock().unwrap();
     assert!(s.published.is_empty() && s.hosted.len() == 1, "shared on the local network");
+}
+
+#[test]
+fn a_key_typed_for_one_server_is_not_sent_to_another() {
+    // The Server key field remembers the server it was typed for: it goes out only to that
+    // server. Changing the server in Preferences must not send the old server's key to the new
+    // one. (The key is set as the field editor would, bound to the server it was typed for.)
+    let (mut h, script) = harness();
+    h.app.ui.live.share_key = Some(("wss://share.example/".to_string(), "KeyKeyKeyKeyKeyKeyKey0".to_string()));
+    h.frames(2);
+    // Change the server in Preferences to another one, then share: the old key must not go to it.
+    h.app.session.execute("pref.publishServer", &json!({"url": "wss://other.example/"})).unwrap();
+    h.frames(2);
+    let shapes = open(&mut h);
+    click(&mut h, &shapes, "Start sharing");
+    assert_eq!(script.lock().unwrap().published.last().unwrap().key, None, "the old server's key is not sent to the new server");
 }
 
 #[test]

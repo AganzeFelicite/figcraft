@@ -163,6 +163,44 @@ fn resizing_auto_width_auto_height_fixed_and_truncate() {
 }
 
 #[test]
+fn truncation_fills_the_last_line_before_the_ellipsis() {
+    // #1375: as with CSS `text-overflow: ellipsis`, the last line shown takes as much of the word
+    // wrapped after it as fits before the ellipsis ("Lorem consec…", not "Lorem…").
+    if face().is_none() {
+        return;
+    }
+    let s = "Lorem consectetur";
+    let full = layout(&text(s, TextAutoResize::WidthAndHeight), None, None);
+    let lorem = layout(&text("Lorem", TextAutoResize::WidthAndHeight), None, None).width;
+    // Room for "Lorem" and most of the next word, not all of it.
+    let w = lorem + (full.width - lorem) * 0.75;
+    let line_h = full.lines[0].height;
+    let mut max_one = text(s, TextAutoResize::Truncate);
+    max_one.max_lines = 1;
+    let mut hug_one = text(s, TextAutoResize::Height);
+    hug_one.max_lines = 1;
+    for (l, why) in [
+        (layout(&text(s, TextAutoResize::Truncate), Some(w), Some(line_h + 1.0)), "cut by the box height"),
+        (layout(&max_one, Some(w), Some(1000.0)), "cut by max lines"),
+        (layout(&hug_one, Some(w), None), "auto height with max lines"),
+    ] {
+        assert!(l.truncated && l.lines.len() == 1, "{why}");
+        let last = l.glyphs.last().unwrap();
+        assert_eq!(last.char_start, last.char_end, "{why}: the ellipsis ends the line");
+        assert!(l.glyphs.iter().any(|g| g.char_start == 6), "{why}: the wrapped word starts on the line");
+        assert!(l.glyphs.iter().all(|g| g.x + g.advance <= w + EPS), "{why}: within the box");
+        assert!((l.height - line_h).abs() < EPS, "{why}: one line tall");
+        let g7 = l.glyphs.iter().find(|g| g.char_start == 7).unwrap();
+        assert_eq!(l.caret(7), (g7.x, 0), "{why}: a caret reaches the chars taken from the next line");
+    }
+    // A line that ends its paragraph keeps its words; the ellipsis follows them.
+    let mut para = text("Lorem\nconsectetur", TextAutoResize::Truncate);
+    para.max_lines = 1;
+    let l = layout(&para, Some(w), Some(1000.0));
+    assert!(l.truncated && l.glyphs.iter().all(|g| g.char_start < 5 || g.char_start == g.char_end));
+}
+
+#[test]
 fn vertical_trim_cap_height_to_baseline() {
     let Some(f) = face() else { return };
     let k = 20.0 / f.upem;
@@ -294,6 +332,56 @@ fn thai_comes_from_a_thai_font_when_one_is_installed() {
     let drawn: std::collections::BTreeSet<usize> = glyphs.iter().flat_map(|g| g.char_start..g.char_end).collect();
     let want: std::collections::BTreeSet<usize> = (3..chars.len()).filter(|i| chars[*i] != ' ').collect();
     assert_eq!(drawn, want, "every Thai char is in a drawn cluster");
+}
+
+#[test]
+fn thai_emergency_break_can_back_up_to_the_first_letter() {
+    // #1219: in "กเม" the overflow lands between the leading vowel and its consonant; the only
+    // safe break is right after the first letter, so the vowel moves down with "ม".
+    let s = "กเม";
+    let thai = ["Noto Sans Thai", "Noto Sans Thai UI", "Leelawadee UI", "Thonburi", "Tahoma"];
+    if face().is_none() || !thai.iter().any(|t| find_face(t, "Regular").is_some_and(|t| s.chars().all(|c| t.has_char(c)))) {
+        return;
+    }
+    let mut t = text(s, TextAutoResize::Height);
+    t.style.font_size = 16.0;
+    let two = layout(&t, None, None).caret(2).0;
+    let lines = layout(&t, Some(two + 0.5), None).lines;
+    assert_eq!(lines.get(1).map(|l| l.char_start), Some(1), "the leading vowel stays with its consonant");
+}
+
+#[test]
+fn thai_emergency_breaks_keep_marks_and_leading_vowels_with_their_letter() {
+    // #1219: Thai writes no spaces between words, so a paragraph is one run with no break
+    // opportunity and wraps where it overflows. Even that emergency break must not start a line
+    // with a mark (it belongs to the letter before it) or end one with a leading vowel (it is
+    // written before the consonant it is read with). Skips without a Thai face.
+    let s = "ระบบช่วยให้ทีมพัฒนาซอฟต์แวร์จัดทำเอกสารที่มีโครงสร้างได้ในที่เดียว";
+    let chars: Vec<char> = s.chars().collect();
+    let thai = ["Noto Sans Thai", "Noto Sans Thai UI", "Leelawadee UI", "Thonburi", "Tahoma"];
+    if face().is_none() {
+        return;
+    }
+    if !thai.iter().any(|t| find_face(t, "Regular").is_some_and(|t| chars.iter().all(|c| t.has_char(*c)))) {
+        return;
+    }
+    let mut t = text(s, TextAutoResize::Height);
+    t.style.font_size = 16.0;
+    let total = layout(&t, None, None).caret(chars.len()).0;
+    let is_mark = |c: char| matches!(c, '\u{0E31}' | '\u{0E34}'..='\u{0E3A}' | '\u{0E47}'..='\u{0E4E}');
+    let is_leading_vowel = |c: char| ('\u{0E40}'..='\u{0E44}').contains(&c);
+    let mut breaks = 0;
+    for k in 1..40 {
+        let width = total * f64::from(k) / 40.0;
+        for line in layout(&t, Some(width), None).lines.iter().skip(1) {
+            let (Some(start), Some(&first)) = (line.char_start.checked_sub(1), chars.get(line.char_start)) else { continue };
+            let Some(&before) = chars.get(start) else { continue };
+            assert!(!is_mark(first), "at {width:.1} px a line starts with U+{:04X}: {s}", first as u32);
+            assert!(!is_leading_vowel(before), "at {width:.1} px a line ends with {before:?} before {first:?}: {s}");
+            breaks += 1;
+        }
+    }
+    assert!(breaks > 0, "the sentence wraps at least once across these widths");
 }
 
 #[test]

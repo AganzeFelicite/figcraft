@@ -25,6 +25,12 @@ On Linux and other Unix systems except macOS, user fonts are read from
 `$XDG_DATA_HOME/fonts`, or `$HOME/.local/share/fonts` when `XDG_DATA_HOME` is unset,
 empty or relative. The legacy `$HOME/.fonts` directory is also scanned.
 
+On macOS the font folders (`/System/Library/Fonts`, `/Library/Fonts`, `~/Library/Fonts` and the
+system's downloadable fonts) are read, and so is every other font file Core Text lists as
+available: fonts a font manager such as RightFont, FontBase or Typeface activates from its own
+library, without copying them into a font folder. Fonts activated while the app runs are found by
+`text.rescanFonts`, like newly installed ones.
+
 On macOS, fonts activated through Adobe Fonts are read where Creative Cloud keeps them
 (`~/Library/Application Support/Adobe/CoreSync/plugins/livetype`), so they're available while
 they're active there. Files without an extension are read when they start like a font file.
@@ -58,7 +64,7 @@ page 1 "Screens": 380 nodes, 4 top-level
   …
 ```
 
-### `export <file> -o <out> [--format png|jpg|svg|webp|pdf|fig] [--scale N] [--page NAME] [--node ID|NAME] [--bleed LENGTH] [--crop-marks] [--bleed-marks] [--cmyk]`
+### `export <file> -o <out> [--format png|jpg|svg|webp|pdf|xml|fig] [--scale N] [--page NAME] [--node ID|NAME] [--bleed LENGTH] [--crop-marks] [--bleed-marks] [--cmyk] [--vd-compat bestEffort|exact|ignore]`
 
 - `<out>` is a directory: one file per top-level frame of the page (default the first page), named
   after the frame (`Home.png`, `Settings.png`…); with no frames, one file per top-level layer.
@@ -74,9 +80,15 @@ page 1 "Screens": 380 nodes, 4 top-level
   documents and small test files, in other software; other apps may not open every file. What was
   left out (comments, Dev Mode data, some bindings and settings…) is printed as `note:` lines;
   `docs/file-format-parity.md` lists what was checked and what is unchecked.
+- `--format xml` (or an `<out>` ending in `.xml`) writes an Android Vector Drawable, e.g.
+  `figcraft-cli export app.figcraft --node Icon -o ic_icon.xml`. What the format can't draw is
+  printed as `note:` lines; `--vd-compat` picks how it's handled: `bestEffort` (default:
+  approximated), `exact` (left out) or `ignore` (no notes: overlapping layer opacity is dropped,
+  even-odd fills keep `fillType="evenOdd"`, diamond gradients are left out). See
+  `docs/file-format-parity.md`.
 - The format comes from `--format`, else `<out>`'s extension, else png. `--scale` (default 1, max 64)
   applies to raster formats.
-- SVG/PDF exports with visible descendants more than 256 levels below an exported root fail with
+- SVG/PDF/XML exports with visible descendants more than 256 levels below an exported root fail with
   an error instead of writing an incomplete file. Select an inner layer with `--node` or reduce
   nesting. An existing destination file is kept on this failure.
 - A `.pdf` `<out>` without `--node` holds the page's top-level frames, one PDF page each in reading

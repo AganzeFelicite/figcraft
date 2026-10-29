@@ -102,6 +102,7 @@ pub const TOOL_NAMES: &[&str] = &[
     "key",
     "type_text",
     "inspect_ui",
+    "wait_for_changes",
 ];
 
 /// All tools, in `tools/list` order.
@@ -213,11 +214,11 @@ pub fn tool_definitions() -> Vec<Value> {
         tool(
             "export",
             "Export",
-            "Export layers (default: the selection, else every top-level layer of the current page) as png, jpg, svg, webp or pdf at `scale`, or the whole file as `fig` (experimental: written from public format knowledge, with `warnings` for what was left out; other apps may not open every file) (PDF: with `bleed`, `cropMarks`, `bleedMarks` and `cmyk` for print; options `contentsOnly`, `includeBoundingBox`, and for SVG `svgOutlineText`, `svgIdAttribute`, `svgSimplifyStroke`). With `path` the file is written there (absolute path recommended) and the result says where. Without `path`: png/jpg/webp come back as an image content block, svg as text, other formats as base64 `data`.",
+            "Export layers (default: the selection, else every top-level layer of the current page) as png, jpg, svg, webp, pdf or xml (an Android Vector Drawable, with `warnings` for what it changed or left out, per `vdCompat`) at `scale`, or the whole file as `fig` (experimental: written from public format knowledge, with `warnings` for what was left out; other apps may not open every file) (PDF: with `bleed`, `cropMarks`, `bleedMarks` and `cmyk` for print; options `contentsOnly`, `includeBoundingBox`, and for SVG `svgOutlineText`, `svgIdAttribute`, `svgSimplifyStroke`; for XML `svgIdAttribute` and `vdCompat`). With `path` the file is written there (absolute path recommended) and the result says where. Without `path`: png/jpg/webp come back as an image content block, svg as text, xml as text followed by `{format, warnings}`, other formats as base64 `data`.",
             obj(
                 json!({
                     "ids": ids_schema("Layers to export (several are composited into one image)"),
-                    "format": {"type": "string", "enum": ["png", "jpg", "svg", "webp", "pdf", "fig"], "description": "Format (default png, or from the path's extension)"},
+                    "format": {"type": "string", "enum": ["png", "jpg", "svg", "webp", "pdf", "xml", "fig"], "description": "Format (default png, or from the path's extension)"},
                     "scale": num("Pixel scale for raster formats (default 1, max 64)"),
                     "size": string("Instead of `scale`: `2x`, or a width or height in pixels like `512w` / `512h`"),
                     "path": string("Output file path"),
@@ -230,6 +231,7 @@ pub fn tool_definitions() -> Vec<Value> {
                     "svgOutlineText": boolean("SVG: text as outlines (default true); false keeps `<text>` elements"),
                     "svgIdAttribute": boolean("SVG: layer names as unique `id` attributes (default false)"),
                     "svgSimplifyStroke": boolean("SVG: strokes as `stroke` attributes where exact (default true); false writes outlines"),
+                    "vdCompat": {"type": "string", "enum": ["bestEffort", "exact", "ignore"], "description": "XML: what a Vector Drawable can't draw exactly is approximated with a warning (bestEffort, default), left out with a warning (exact), or written as far as it maps without warnings (ignore: overlapping layer opacity dropped, even-odd fills kept as fillType=evenOdd, diamond gradients left out)"},
                 }),
                 &[],
             ),
@@ -318,6 +320,21 @@ pub fn tool_definitions() -> Vec<Value> {
             empty(),
             true,
         ),
+        tool(
+            "wait_for_changes",
+            "Wait for changes",
+            "Wait for new comment events in the attached FigCraft app. Returns pending events immediately; otherwise waits up to `timeoutMs` (default 20000, max 25000). Call it again with the returned `cursor` to keep watching. Headless returns immediately (no other writer). Events carry a sequence number, kind, document and a small payload (for comments, the thread id).",
+            obj(
+                json!({
+                    "after": int("Return events after this cursor (default 0)"),
+                    "timeoutMs": int("Longest wait in milliseconds (default 20000, max 25000)"),
+                    "topics": {"type": "array", "items": {"type": "string", "enum": ["comments", "document", "all"]}, "description": "Event topics (default [\"comments\"]; document events are not emitted yet)"},
+                    "limit": int("Most events to return (default 100, max 1000)")
+                }),
+                &[],
+            ),
+            true,
+        ),
     ]
 }
 
@@ -325,6 +342,10 @@ pub fn tool_definitions() -> Vec<Value> {
 
 fn exec(b: &mut dyn Backend, cmd: &str, params: Value) -> Result<Value, String> {
     b.call("engine.execute", json!({"command": cmd, "params": params}))
+}
+
+fn wait_for_changes(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, String> {
+    b.call("events.poll", Value::Object(a.clone())).map(|v| ToolResult::json(&v))
 }
 
 fn args_obj(args: &Value) -> Result<Map<String, Value>, String> {
@@ -438,6 +459,7 @@ pub fn call_tool(b: &mut dyn Backend, name: &str, args: &Value) -> ToolResult {
         "key" => key(b, &a),
         "type_text" => type_text(b, &a),
         "inspect_ui" => b.call("ui.inspect", json!({})).map(|v| ToolResult::json(&v)),
+        "wait_for_changes" => wait_for_changes(b, &a),
         other => Err(format!("unknown tool `{other}` (tools/list has: {})", TOOL_NAMES.join(", "))),
     };
     r.unwrap_or_else(ToolResult::error)
@@ -879,8 +901,8 @@ fn export(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, Str
     }
     let format = s_arg(a, "format")?.map(str::to_ascii_lowercase);
     if let Some(f) = &format {
-        if !["png", "jpg", "jpeg", "svg", "webp", "pdf", "fig"].contains(&f.as_str()) {
-            return Err(format!("unknown format `{f}` (png|jpg|svg|webp|pdf|fig)"));
+        if !["png", "jpg", "jpeg", "svg", "webp", "pdf", "xml", "fig"].contains(&f.as_str()) {
+            return Err(format!("unknown format `{f}` (png|jpg|svg|webp|pdf|xml|fig)"));
         }
         params.insert("format".into(), json!(f));
     }
@@ -894,9 +916,18 @@ fn export(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, Str
         params.insert("size".into(), json!(s));
     }
     // PDF print options and the export options, checked by the command.
-    for k in
-        ["bleed", "cropMarks", "bleedMarks", "cmyk", "contentsOnly", "includeBoundingBox", "svgOutlineText", "svgIdAttribute", "svgSimplifyStroke"]
-    {
+    for k in [
+        "bleed",
+        "cropMarks",
+        "bleedMarks",
+        "cmyk",
+        "contentsOnly",
+        "includeBoundingBox",
+        "svgOutlineText",
+        "svgIdAttribute",
+        "svgSimplifyStroke",
+        "vdCompat",
+    ] {
         if let Some(v) = a.get(k).filter(|v| !v.is_null()) {
             params.insert(k.into(), v.clone());
         }
@@ -916,6 +947,12 @@ fn export(b: &mut dyn Backend, a: &Map<String, Value>) -> Result<ToolResult, Str
         "jpg" | "jpeg" => Ok(ToolResult::image(&bytes, "image/jpeg", &json!({"format": "jpg", "bytes": bytes.len()}))),
         "webp" => Ok(ToolResult::image(&bytes, "image/webp", &json!({"format": "webp", "bytes": bytes.len()}))),
         "svg" => Ok(ToolResult::text(String::from_utf8_lossy(&bytes).into_owned())),
+        "xml" => {
+            let info = json!({"format": "xml", "bytes": bytes.len(), "warnings": r.get("warnings").cloned().unwrap_or_else(|| json!([]))});
+            let mut out = ToolResult::text(String::from_utf8_lossy(&bytes).into_owned());
+            out.content.extend(ToolResult::json(&info).content);
+            Ok(out)
+        }
         other => {
             let mut out = json!({"format": other, "bytes": bytes.len(), "data": base64::engine::general_purpose::STANDARD.encode(&bytes)});
             if let Some(w) = r.get("warnings") {

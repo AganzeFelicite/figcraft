@@ -440,3 +440,54 @@ fn every_platform_has_a_thai_font_in_the_fallbacks() {
         assert!(at(thai).is_some_and(|i| i > latin), "{thai}");
     }
 }
+
+// The paths are Unix absolute paths (font managers are a macOS thing): on Windows they aren't absolute.
+#[cfg(unix)]
+#[test]
+fn font_manager_files_outside_the_font_folders_are_indexed_once() {
+    let folders = [std::path::PathBuf::from("/Library/Fonts"), std::path::PathBuf::from("/Users/a/Library/Fonts")];
+    let library = std::path::PathBuf::from("/Users/a/Fonts.rightfontlibrary/fonts/I/Inter/InterVariable.ttf");
+    let files = vec![
+        std::path::PathBuf::from("/Library/Fonts/Arial.ttf"),
+        std::path::PathBuf::from("/Users/a/Library/Fonts/Sub/Brand.otf"),
+        library.clone(),
+        library.clone(),
+        std::path::PathBuf::from("relative/Font.ttf"),
+        std::path::PathBuf::from("/Library/FontsElsewhere/Mono.ttf"),
+    ];
+    let outside: Vec<_> = files_outside_dirs(files, &folders).into_iter().collect();
+    assert_eq!(outside, [std::path::PathBuf::from("/Library/FontsElsewhere/Mono.ttf"), library]);
+}
+
+#[test]
+fn a_font_file_outside_the_font_folders_is_indexed_from_its_path() {
+    struct TempDir(std::path::PathBuf);
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let installed = system_font_dirs()
+        .into_iter()
+        .find_map(|d| std::fs::read_dir(d).into_iter().flatten().flatten().map(|e| e.path()).find(|p| p.extension().is_some_and(|x| x == "ttf")));
+    let Some(font) = installed else { return };
+    let tmp = TempDir(std::env::temp_dir().join(format!("figcraft-font-manager-{}", std::process::id())));
+    std::fs::create_dir_all(&tmp.0).unwrap();
+    let copy = tmp.0.join("Activated.ttf");
+    std::fs::copy(&font, &copy).unwrap();
+    let mut pending = BTreeMap::new();
+    index_font_file(&copy, &std::fs::metadata(&copy).unwrap(), &mut pending);
+    let paths: Vec<_> = pending.values().flat_map(|(_, p)| p.iter().map(|p| p.path.clone())).collect();
+    assert!(!paths.is_empty() && paths.iter().all(|p| *p == copy), "{paths:?}");
+    let mut none = BTreeMap::new();
+    index_font_file(&tmp.0, &std::fs::metadata(&tmp.0).unwrap(), &mut none);
+    assert!(none.is_empty());
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn core_text_lists_the_installed_font_files() {
+    let files = font_manager_files();
+    assert!(files.iter().any(|f| f.starts_with("/System/Library/Fonts")), "{} files", files.len());
+    assert!(files.iter().all(|f| f.is_absolute()));
+}

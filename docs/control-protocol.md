@@ -123,6 +123,26 @@ it and duplicate it:
 
 Every command: `[{id, label, params, menu, shortcut, undoable}]`.
 
+### `events.poll {after?, timeoutMs?, topics?, limit?}`
+
+Wait for live changes: the app's in-memory event log records `comment.added`, `comment.replied`,
+`comment.edited`, `comment.reacted`, `comment.resolved`, `comment.moved` and `comment.deleted`
+(`topics`: `comments` (default), `document`, `all`). Only comment events are emitted today;
+`document` and `all` are accepted for forward compatibility. Returns pending events after `after`
+at once, otherwise waits up to `timeoutMs` (default 20 000, max 25 000; 0 = no wait):
+
+```json
+{"id":1,"method":"events.poll","params":{"after":41,"timeoutMs":20000}}
+{"id":1,"ok":true,"result":{"events":[{"seq":42,"kind":"comment.added","document":"Checkout","path":"…","data":{"commentId":12}}],"cursor":42,"reset":false,"dropped":0}}
+```
+
+`cursor` is the sequence to pass next; `reset: true` means `after` is ahead of the log (the app
+restarted) and the caller should re-read the comments; `dropped` counts events lost because `after`
+is older than the retained window (1024 events). The method is answered by the control worker
+against the shared log, not by the UI thread, so it does not freeze the app, use a request slot, or
+need a drawn frame: it works while the window is minimised. Other requests on the same connection
+wait until the poll finishes (at most 25 s); use a separate connection to keep editing meanwhile.
+
 ### `document.inspect {depth?, allPages?}`
 
 The active document as JSON: name, path, dirty, currentPage, selection, pages (the current page's
@@ -377,3 +397,24 @@ read -r reply <&3; echo "$reply"
 
 For agents, prefer the MCP server (`figcraft-cli mcp --attach 7979`, see `docs/mcp.md`): it wraps
 these methods in documented tools and returns images inline.
+
+## In the browser: `window.figcraft`
+
+The web build has no TCP server (a page can't listen on a socket), so it offers the same methods to the
+page itself, as promises on `window.figcraft` (`apps/figcraft-web/src/api.rs`). An agent driving FigCraft in a
+browser tab, or a host app showing it in an `<iframe>`, uses the commands it would send to the desktop
+app. It is opt-in: the page installs `window.figcraft` only when its URL has a `control` query entry
+(`index.html?control`, which can be combined with other flags: `?webgl&control`).
+
+| Call | |
+|---|---|
+| `figcraft.request(method, params)` | any control method of this document → its `result` |
+| `figcraft.execute(command, params)` | `engine.execute` |
+| `figcraft.commands()` / `figcraft.inspect()` | `engine.commands` / the inspect method |
+| `figcraft.screenshot(params)` | `ui.screenshot` (no `path`: the PNG comes back inline) |
+| `figcraft.openFile(name, bytes)` | runs `file.open` with the bytes as `data` and resolves with its result |
+| `figcraft.captureDownloads(on)` | while on, a save or export is kept in the page instead of downloaded |
+| `figcraft.files()` / `figcraft.readFile(name)` | the kept files (`{path, size}`) / one of them as a `Uint8Array` |
+
+Errors reject with an `Error` carrying the method's message. Requests run on the UI's next frame, so a
+hidden tab (whose frames the browser pauses) answers when it is shown again.
