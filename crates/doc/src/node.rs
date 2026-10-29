@@ -1,7 +1,10 @@
 //! Nodes: one struct with the properties every node can have, and a kind with per-type data.
 
 use crate::NodeId;
-use crate::props::*;
+use crate::props::{
+    AutoLayout, ChildLayout, Constraints, Corners, Effect, EffectKind, ExportSetting, LayoutGrid, SPREAD_MITER_LIMIT, StrokeAlign, StrokeCap,
+    StrokeProps,
+};
 use crate::proto::{Interaction, Overflow, ScrollPosition};
 use crate::styles::{CollectionId, ModeId, StyleRefs, VariableId};
 use crate::text::TextData;

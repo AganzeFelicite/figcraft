@@ -1,4 +1,17 @@
-use super::*;
+use super::{
+    Action, Document, Easing, FrameTex, NodeId, NodeKind, OverlayAnchor, OverlayPosition, OverlayState, Presenter, Rect, ScrollAnim, Temp,
+    Transition, Trigger, Waiting,
+};
+
+#[derive(Clone, Copy)]
+struct ActionTiming {
+    transition: Transition,
+    duration: f64,
+    easing: Easing,
+    rect: Option<Rect>,
+    now: f64,
+    depth: usize,
+}
 
 impl Presenter {
     /// A mouse enter, leave, down or up on `node` (shown on `root`) met its interaction `k`: its
@@ -68,12 +81,12 @@ impl Presenter {
     }
 
     pub(crate) fn perform(&mut self, a: &Action, node: NodeId, tr: Transition, dur: f64, easing: Easing, rect: Option<Rect>, now: f64) -> bool {
-        self.perform_at(a, node, tr, dur, easing, rect, now, 0)
+        self.perform_at(a, node, ActionTiming { transition: tr, duration: dur, easing, rect, now, depth: 0 })
     }
 
     /// One action; `depth` counts the conditional actions it is inside.
-    #[allow(clippy::too_many_arguments)]
-    fn perform_at(&mut self, a: &Action, node: NodeId, tr: Transition, dur: f64, easing: Easing, rect: Option<Rect>, now: f64, depth: usize) -> bool {
+    fn perform_at(&mut self, a: &Action, node: NodeId, timing: ActionTiming) -> bool {
+        let ActionTiming { transition: tr, duration: dur, easing, rect, now, depth } = timing;
         let Some(doc) = self.doc.clone() else { return false };
         match a {
             Action::Navigate { dest, preserve_scroll } => {
@@ -213,7 +226,7 @@ impl Presenter {
                 // Evaluated now: earlier actions of the interaction may have changed variables.
                 let mut did = false;
                 for inner in figcraft_engine::proto_run::branch(&doc, node, blocks) {
-                    did |= self.perform_at(&inner, node, tr, dur, easing, rect, now, depth + 1);
+                    did |= self.perform_at(&inner, node, ActionTiming { depth: depth + 1, ..timing });
                 }
                 did
             }
