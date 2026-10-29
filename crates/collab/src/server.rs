@@ -158,7 +158,12 @@ impl Server {
         server.deleted = state.deleted;
         server.removed = state.removed;
         let contiguous = state.log.windows(2).all(|w| matches!(w, [a, b] if a.seq + 1 == b.seq));
-        if contiguous && state.log.last().is_none_or(|a| a.seq == state.seq) {
+        // A log saved before the image checks may hold an image entry a resuming client would
+        // refuse — an invalid image, or other bytes under a key it already holds, which this
+        // state can't tell apart from a new image. A log that puts images is dropped, so clients
+        // catch up with the (checked) snapshot instead.
+        let puts_images = state.log.iter().flat_map(|a| &a.changes).any(|c| matches!(c, Change::Put { entry: Entry::Image(_), .. }));
+        if contiguous && !puts_images && state.log.last().is_none_or(|a| a.seq == state.seq) {
             for a in state.log {
                 server.remember(a);
             }
@@ -204,7 +209,7 @@ impl Server {
                 }
                 // A log written before the image checks may hold an image they refuse: the batch
                 // replays without it, so the edits after it aren't dropped with the rest of the log.
-                acc.changes = docprops::without_refused_images(&acc.changes);
+                acc.changes = docprops::without_refused_images(self.state.document(), &acc.changes);
                 self.accept(acc.author, self.seq, &acc.changes)?;
                 self.issued.entry(acc.author).or_default().note(acc.batch_id, false);
                 self.next_client = self.next_client.max(acc.author.saturating_add(1));

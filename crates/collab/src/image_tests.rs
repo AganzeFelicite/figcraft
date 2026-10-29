@@ -17,12 +17,12 @@ use crate::docprops::{MAX_IMAGE_SIDE, image_within};
 const MAX_SIDE: u32 = MAX_IMAGE_SIDE;
 
 /// sha256 hex, computed here independently of the implementation under test.
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// An image entry putting `bytes` (`width` × `height`) under `key`.
-fn put(key: &str, width: u32, height: u32, bytes: &[u8]) -> Change {
+pub(crate) fn put(key: &str, width: u32, height: u32, bytes: &[u8]) -> Change {
     Change::Put {
         entry: Entry::Image(key.into()),
         value: Json(json!({
@@ -34,7 +34,7 @@ fn put(key: &str, width: u32, height: u32, bytes: &[u8]) -> Change {
 }
 
 /// Bytes a collaborator hashed into the key, and different bytes they send under it.
-fn forged() -> (String, &'static [u8]) {
+pub(crate) fn forged() -> (String, &'static [u8]) {
     (sha256_hex(b"the image the key actually names"), b"someone else's bytes")
 }
 
@@ -188,5 +188,28 @@ fn a_restart_keeps_the_edits_after_an_image_the_checks_refuse() {
     }
     assert_eq!(r.seq(), 2, "both batches count");
     assert!(!r.document().images.contains_key(&key), "the refused image is left out");
+    assert!(r.document().images.contains_key(&sha256_hex(good)), "the edit after it is kept");
+}
+
+/// A server's log written before these checks may give an image other bytes under its key (the
+/// apply step allowed it then): a restart replays past that batch, keeping the first bytes and
+/// every edit after it, instead of stopping there and dropping the rest of the log.
+#[test]
+fn a_restart_replays_past_a_logged_image_replacement() {
+    let s = crate::Server::new(crate::sim_tests::base(), "", crate::Limits::default());
+    let mut r = crate::Server::restore(s.state().unwrap(), "", crate::Limits::default()).unwrap();
+    let good = b"an honest image after it".as_slice();
+    let accepted = |seq, changes| crate::Journal::Accepted(crate::message::Accepted { seq, author: 1, batch_id: seq, changes });
+    let journal = [
+        crate::Journal::Issued { client: 1 },
+        accepted(1, vec![put("img1", 2, 1, b"the first bytes")]),
+        accepted(2, vec![put("img1", 2, 1, b"other bytes")]),
+        accepted(3, vec![put(&sha256_hex(good), 2, 1, good)]),
+    ];
+    for j in journal {
+        r.replay(j).expect("the log replays");
+    }
+    assert_eq!(r.seq(), 3, "every batch counts");
+    assert_eq!(r.document().images.get("img1").map(|i| i.bytes.as_slice()), Some(b"the first bytes".as_slice()), "the replacement is left out");
     assert!(r.document().images.contains_key(&sha256_hex(good)), "the edit after it is kept");
 }

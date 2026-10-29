@@ -174,3 +174,49 @@ fn a_journal_with_a_gap_is_refused() {
     assert_eq!(errors.len(), 1, "the batch after the gap");
     assert_eq!(r.seq(), 0);
 }
+
+/// Restores `state` with one more batch from another client in its log (and in its snapshot,
+/// `in_snapshot`, as a server that accepted it saved it), then has `a` resume into it.
+fn resume_past(s: &Server, a: &mut Client, batch: Vec<crate::Change>, in_snapshot: bool) -> Server {
+    let mut state = s.state().unwrap();
+    if in_snapshot {
+        state.snapshot.retain(|c| {
+            !batch.iter().any(|b| matches!((b, c), (crate::Change::Put { entry: x, .. }, crate::Change::Put { entry: y, .. }) if x == y))
+        });
+        state.snapshot.extend(batch.iter().cloned());
+    }
+    state.seq += 1;
+    state.log.push(message::Accepted { seq: state.seq, author: a.id() + 1, batch_id: 1, changes: batch });
+    let mut r = Server::restore(state, "", Limits::default()).unwrap();
+    a.disconnect();
+    let ClientMsg::Hello(h) = a.reconnect(hello()) else { panic!("not a hello") };
+    let (_, out) = r.join(h).unwrap();
+    deliver(a, &out);
+    r
+}
+
+/// A saved log may hold an image a newer server refuses: a client resuming from before it still
+/// catches up, without that image (#1086).
+#[test]
+fn a_client_resuming_past_a_refused_image_in_the_saved_log_catches_up() {
+    let mut s = Server::new(base(), "", Limits::default());
+    let mut a = join_as(&mut s, Access::Edit);
+    let (key, bytes) = crate::image_tests::forged();
+    let r = resume_past(&s, &mut a, vec![crate::image_tests::put(&key, 2, 1, bytes)], false);
+    assert!(!a.view().document().images.contains_key(&key));
+    assert_eq!(a.view(), r.replica());
+}
+
+/// A saved log may give an image other bytes under a key the resuming client already holds (an
+/// older server allowed it): the client still catches up, to what the server holds (#1086).
+#[test]
+fn a_client_resuming_past_a_replaced_image_in_the_saved_log_catches_up() {
+    let mut s = Server::new(base(), "", Limits::default());
+    let mut a = join_as(&mut s, Access::Edit);
+    let m = edit(&mut a, |d| {
+        d.images.insert("img1".into(), figcraft_doc::ImageData { bytes: std::sync::Arc::new(b"the first bytes".to_vec()), width: 2, height: 1 });
+    });
+    send(&mut s, a.id(), m, &mut [&mut a]);
+    let r = resume_past(&s, &mut a, vec![crate::image_tests::put("img1", 2, 1, b"other bytes")], true);
+    assert_eq!(a.view(), r.replica());
+}
