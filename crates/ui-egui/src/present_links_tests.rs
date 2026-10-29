@@ -404,3 +404,63 @@ fn the_prototype_takes_no_clicks_while_the_notice_shows() {
     u.frames(5, Vec::new);
     assert_eq!(u.app.inspect()["presenter"]["current"], json!(b), "with the notice gone the same click navigates");
 }
+
+/// While a notice shows nothing else opens, even a link the viewer fired with the notice skipped:
+/// a press that opened one link and put the next behind the notice then releases over a
+/// mouse-up link, which is dropped with the notice up (#1096).
+#[test]
+fn nothing_opens_while_a_notice_shows_with_the_notice_skipped() {
+    let mut s = Session::new();
+    s.prefs.link_notice_skipped = true;
+    let f = id(&ex(&mut s, "frame.create", json!({"x": 0, "y": 0, "width": 300, "height": 400, "name": "A"})));
+    let open = |u: &str| json!({"type": "openUrl", "url": u});
+    ex(
+        &mut s,
+        "proto.interaction.add",
+        json!({"id": f, "trigger": {"type": "mouseDown"}, "actions": [open("https://example.com/1"), open("https://example.com/2")], "transition": {"type": "instant"}}),
+    );
+    ex(
+        &mut s,
+        "proto.interaction.add",
+        json!({"id": f, "trigger": {"type": "mouseUp"}, "actions": [open("https://example.com/3")], "transition": {"type": "instant"}}),
+    );
+    let (mut u, seen) = present("proto.present", s, f);
+    let at = egui::pos2(700.0, 290.0);
+    u.button(at, true);
+    u.frames(2, Vec::new);
+    assert_eq!(opened(&seen), ["https://example.com/1"]);
+    assert_eq!(notice(&u), "https://example.com/2");
+    u.button(at, false);
+    u.frames(3, Vec::new);
+    assert_eq!(opened(&seen), ["https://example.com/1"], "the release opened a link with the notice up");
+    assert_eq!(notice(&u), "https://example.com/2");
+}
+
+/// The prototype takes no input while a notice shows, including the release of a press that
+/// began before it: a mouse-up that navigates doesn't run behind the notice (#1096).
+#[test]
+fn a_press_that_raised_a_notice_doesnt_release_behind_it() {
+    let mut s = Session::new();
+    s.prefs.link_notice_skipped = true;
+    let a = id(&ex(&mut s, "frame.create", json!({"x": 0, "y": 0, "width": 300, "height": 400, "name": "A"})));
+    let b = id(&ex(&mut s, "frame.create", json!({"x": 400, "y": 0, "width": 300, "height": 400, "name": "B"})));
+    let open = |u: &str| json!({"type": "openUrl", "url": u});
+    ex(
+        &mut s,
+        "proto.interaction.add",
+        json!({"id": a, "trigger": {"type": "mouseDown"}, "actions": [open("https://example.com/1"), open("https://example.com/2")], "transition": {"type": "instant"}}),
+    );
+    ex(
+        &mut s,
+        "proto.interaction.add",
+        json!({"id": a, "trigger": {"type": "mouseUp"}, "action": {"type": "navigate", "dest": b}, "transition": {"type": "instant"}}),
+    );
+    let (mut u, _) = present("proto.present", s, a);
+    let at = egui::pos2(700.0, 290.0);
+    u.button(at, true);
+    u.frames(2, Vec::new);
+    assert_eq!(notice(&u), "https://example.com/2");
+    u.button(at, false);
+    u.frames(3, Vec::new);
+    assert_eq!(u.app.inspect()["presenter"]["current"], json!(a), "the release navigated behind the notice");
+}

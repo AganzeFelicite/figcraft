@@ -241,18 +241,21 @@ fn poll_pads(app: &mut FigApp, p: &mut Presenter, ctx: &egui::Context) {
 
 /// After a player's frame: the links it opens and the widget clicks it took. Every link waits in
 /// [`link_notice`] — to a website or to the mail app (#1096). Skipping the notice opens at once
-/// only a link the viewer's own click, press, drag or key fired, one per frame: a delay or the
-/// pointer passing over a layer never opens anything unasked. A further link that fires while the
-/// notice shows is dropped.
+/// only a link the viewer's own click, press, drag or key fired, one per frame, and never while a
+/// notice shows: a delay or the pointer passing over a layer never opens anything unasked. A
+/// further link that fires while the notice shows is dropped, whatever fired it.
 fn finish(app: &mut FigApp, p: &mut Presenter) {
     let skipped = app.session.prefs.link_notice_skipped;
     let mut opened = false;
     for (u, asked) in p.urls.drain(..) {
-        if skipped && asked && !opened {
+        if skipped && asked && !opened && p.link_notice.is_none() {
             app.services.open_url(&u);
             opened = true;
         } else if p.link_notice.is_none() {
             p.link_notice = Some((u, (asked && !skipped).then_some(false)));
+            // A press under way ends here: its release would otherwise reach the prototype
+            // behind the notice, which takes no input while it shows.
+            p.press = None;
         }
     }
     if let Some(e) = p.click_widgets(&app.session) {
@@ -278,7 +281,7 @@ fn link_notice(app: &mut FigApp, p: &mut Presenter, ctx: &egui::Context, id: Id)
         let what = if goes_to_a_website(url) {
             tr("This link opens a website outside the prototype:")
         } else {
-            tr("This link sends a mail message through your mail app:")
+            tr("This link opens your mail app to write a message:")
         };
         widgets::label(ui, what, t.text);
         ui.add(egui::Label::new(egui::RichText::new(url.as_str()).font(regular(11.0)).color(t.text_secondary)).wrap());
