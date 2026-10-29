@@ -8,6 +8,11 @@ pub use crate::field_math::{Rel, Typed, eval, parse, stepped};
 use crate::i18n::tr;
 use crate::icons::{self, Icon};
 use crate::theme::{Tokens, regular, semibold};
+pub(crate) mod board_picker;
+pub mod colorpicker;
+pub mod field_math;
+pub mod font_preview;
+pub mod style_picker;
 
 pub const ROW_H: f32 = 32.0;
 pub const FIELD_H: f32 = 24.0;

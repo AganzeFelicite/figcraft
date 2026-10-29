@@ -4,7 +4,7 @@
 
 Design systems are why teams adopt Figma. **Components: breadth ~96%, ready ~72%. Styles and
 variables: breadth ~95%, ready ~76% (estimated).** QA'd with a synthetic design system of ~300
-components used 2,000 times (`crates/engine/src/synthetic_ds.rs`, `components_scale_tests.rs`);
+components used 2,000 times (`crates/engine/src/content/synthetic_ds.rs`, `components_scale_tests.rs`);
 not with real libraries. Remaining: 4–10 h here, plus team libraries' tail (4–8 h, partly after
 accounts).
 
