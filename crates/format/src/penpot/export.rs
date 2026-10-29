@@ -591,8 +591,8 @@ impl<'a> Exporter<'a> {
     fn page_json(&self, page: NodeId, page_id: &str, index: usize, background: Color) -> Value {
         let mut page_json = json!({"id": page_id, "name": self.node(page).map(|n| n.name.clone()).unwrap_or_default(), "index": index, "background": hex(background)});
         let Some(node) = self.node(page) else { return page_json };
-        let NodeKind::Page { flows, guides, .. } = &node.kind else { return page_json };
-        let guides = if guides.is_empty() { &node.guides } else { guides };
+        let NodeKind::Page { flows, .. } = &node.kind else { return page_json };
+        let guides = &node.guides;
         let mut flow_map = Map::new();
         for (i, flow) in flows.iter().enumerate() {
             let Some(start) = self.ids.get(&flow.start) else { continue };

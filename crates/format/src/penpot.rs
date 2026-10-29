@@ -487,10 +487,8 @@ pub fn import(bytes: &[u8]) -> Result<(Document, Vec<String>), FormatError> {
                 }
                 library_refs_attached = true;
             }
-            if let Some(node) = doc.node_mut(page)
-                && let NodeKind::Page { guides: page_guides, .. } = &mut node.kind
-            {
-                *page_guides = guides;
+            if let Some(node) = doc.node_mut(page) {
+                node.guides = guides;
             }
             if let Some(bg) = bg
                 && let Some(node) = doc.node_mut(page)
@@ -4680,7 +4678,7 @@ mod tests {
         assert_eq!(doc.document_colors.len(), 1);
         assert!((doc.document_colors[0].a - 0.5).abs() < 0.01);
         let page = doc.node(doc.pages[0]).unwrap();
-        assert!(matches!(&page.kind, NodeKind::Page { guides, .. } if guides == &vec![Guide {vertical: true, offset:100.0}]));
+        assert_eq!(page.guides, vec![Guide { vertical: true, offset: 100.0 }]);
         assert!(doc.validate().is_empty());
     }
 

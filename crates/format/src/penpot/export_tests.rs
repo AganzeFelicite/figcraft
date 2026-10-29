@@ -714,9 +714,7 @@ fn a_coloured_run_does_not_recolour_the_rest_of_the_text() {
 fn display_grids_and_guides_round_trip() {
     let mut doc = Document::new("Grids");
     let p = page(&doc);
-    if let NodeKind::Page { guides, .. } = &mut doc.node_mut(p).unwrap().kind {
-        guides.push(figcraft_doc::Guide { vertical: true, offset: 64.0 });
-    }
+    doc.node_mut(p).unwrap().guides.push(figcraft_doc::Guide { vertical: true, offset: 64.0 });
     let frame = add(&mut doc, p, NodeKind::Frame, "Board", 100.0, 50.0, 400.0, 300.0);
     {
         let n = doc.node_mut(frame).unwrap();
@@ -738,7 +736,7 @@ fn display_grids_and_guides_round_trip() {
     let n = back.node(named(&back, "Board")).unwrap();
     assert_eq!((n.grids[0].count, n.grids[0].gutter, n.grids[0].offset), (12, 16.0, 24.0));
     assert_eq!(n.grids[1].size, 8.0);
-    let NodeKind::Page { guides, .. } = &back.node(back.pages[0]).unwrap().kind else { panic!() };
+    let guides = &back.node(back.pages[0]).unwrap().guides;
     assert!(guides.iter().any(|g| g.vertical && g.offset == 64.0));
 }
 

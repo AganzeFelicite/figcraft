@@ -1,5 +1,6 @@
-use super::*;
 use std::collections::{BTreeMap, BTreeSet};
+
+use super::{DocState, Document, EngineError, LineHeight, NodeId, NodeKind, Result, StyleKind, TextStyle, Value, bad, get, json};
 
 /// The recovery copy at `path` as a document with unsaved changes and no path.
 pub(crate) fn recovered(path: &str) -> Result<DocState> {
@@ -608,7 +609,7 @@ fn link_instances(doc: &mut Document) {
 
 /// Largest image file read for a REST API file JSON import.
 #[cfg(not(target_arch = "wasm32"))]
-const MAX_IMAGE_FILE: u64 = 256 * 1024 * 1024;
+const MAX_IMAGE_FILE: u64 = figcraft_doc::ImageData::MAX_BYTES;
 
 /// Image bytes for a REST API file JSON's `imageRef`: `images/<imageRef>[.png|.jpg|…]` next to
 /// the file.
@@ -675,6 +676,7 @@ pub(crate) fn variables_param(cmd: &str, p: &Value) -> Result<Option<Value>> {
 #[cfg(test)]
 mod penpot_font_warning_tests {
     use super::*;
+    use figcraft_doc::{StyleRun, TextData};
 
     #[test]
     fn font_report_explains_custom_and_google_provenance() {
@@ -732,6 +734,7 @@ mod penpot_font_warning_tests {
 #[cfg(test)]
 mod penpot_svg_v10_tests {
     use super::*;
+    use figcraft_doc::TextData;
 
     #[test]
     fn expands_inline_svg_into_editable_shapes_without_discarding_source() {
