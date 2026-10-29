@@ -107,7 +107,7 @@ fit FigCraft's architecture:
   back with their ids (the server accepts re-creating deleted ids). Merging a branch whose new
   layers, styles, variables or comments lie in another id space (one made offline or in an earlier
   session) is refused by the app before anything is sent, since the server would refuse it (see
-  `crates/engine/src/branches.rs`).
+  `crates/engine/src/sharing/branches.rs`).
 - Objects inside an entry are not separate objects: modes are part of their collection, a
   variable's values per mode part of the variable and replies part of their comment thread. Two
   people adding a mode to the same collection, editing different modes of one variable, or replying

@@ -160,5 +160,4 @@ pub fn specs() -> Vec<CommandSpec> {
 }
 
 #[cfg(test)]
-#[path = "fonts_tests.rs"]
 mod tests;
