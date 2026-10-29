@@ -521,3 +521,37 @@ fn a_quit_with_unsaved_changes_waits_for_the_answer() {
     let sent = frame(&ctx, &mut app, false);
     assert!(app.ui.quit && sent.contains(&egui::ViewportCommand::Close), "Don't Save quits: {sent:?}");
 }
+
+/// A quit while the main window is hidden reaches only the app's logic, which runs without the
+/// frame that acts on it; a second quit before the window draws again must not count twice. The
+/// main window has no unsaved changes and another window has: one quit lets the main window take
+/// that window over (its files keep their changes), and a doubled one must not then quit the app
+/// as if those files had been answered for.
+#[test]
+fn quitting_twice_before_the_window_draws_closes_it_once() {
+    let mut s = Session::empty();
+    for n in ["A", "B"] {
+        s.execute("file.new", &json!({"name": n})).unwrap();
+    }
+    let ctx = egui::Context::default();
+    ctx.set_embed_viewports(false);
+    let mut app = FigApp::new(s, Box::new(NoServices));
+    frame(&ctx, &mut app, false);
+    crate::control::handle(&mut app, &ctx, "window.new", &json!({"index": 0})).unwrap();
+    frame(&ctx, &mut app, false);
+    // A, in the other window, has unsaved changes; B, in the main window, has none.
+    let a = app.session.docs.iter().position(|d| d.doc.name == "A").unwrap();
+    app.session.execute("doc.switch", &json!({"index": a})).unwrap();
+    app.session.execute("shape.rectangle", &json!({"x": 0, "y": 0, "width": 10, "height": 10})).unwrap();
+    frame(&ctx, &mut app, false);
+    // Two quits while the main window is hidden: only the logic runs.
+    for _ in 0..2 {
+        let mut input = RawInput::default();
+        input.viewports.insert(ViewportId::ROOT, ViewportInfo { events: vec![ViewportEvent::Close], occluded: Some(true), ..Default::default() });
+        let _ = ctx.run_logic(&input, |ctx| crate::windows::on_close_request(&mut app, ctx));
+    }
+    frame(&ctx, &mut app, false);
+    frame(&ctx, &mut app, false);
+    assert!(app.session.docs.iter().any(|d| d.doc.name == "A" && d.is_dirty()), "A keeps its changes: {:?}", names(&app));
+    assert!(!app.ui.quit, "the app didn't quit over A's unsaved changes");
+}
