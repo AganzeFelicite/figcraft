@@ -79,7 +79,11 @@ fn region_paints_survive_simplify_offset_and_bucket_normalization() {
         prior_world_frame.as_coeffs().iter().zip(after_world_frame.as_coeffs()).all(|(before, after)| (before - after).abs() < 1e-8),
         "flattening an already framed gradient preserves its source coordinates"
     );
+}
 
+#[test]
+fn explicit_and_inherited_region_paints_survive_refit() {
+    let mut s = Session::new();
     let empty_id = square(&mut s, false);
     ex_to_vector(s.doc_mut().unwrap(), empty_id);
     {
@@ -106,7 +110,11 @@ fn region_paints_survive_simplify_offset_and_bucket_normalization() {
     assert_eq!(inherited.fills, None, "inherited paints remain inherited after offset");
     let inherited_space = inherited.paint_space.expect("offset binds inherited paints to the original frame");
     assert_eq!((inherited_space.width, inherited_space.height), (100.0, 100.0));
+}
 
+#[test]
+fn flatten_keeps_inherited_region_paints_inherited() {
+    let mut s = Session::new();
     let inherited_flatten = square(&mut s, false);
     let inherited_fills = s.doc().unwrap().get(inherited_flatten).unwrap().fills.clone();
     ex_to_vector(s.doc_mut().unwrap(), inherited_flatten);
@@ -142,7 +150,11 @@ fn region_paints_survive_simplify_offset_and_bucket_normalization() {
     s.doc_mut().unwrap().get_mut(group).unwrap().fills.clear();
     let flattened = id_of(&ex(&mut s, "vector.flatten", json!({"ids": [group]}))["id"]).unwrap();
     assert_eq!(net(&s, flattened).regions[0].fills, Some(source_fills), "flatten retains paints that differ from output node fills");
+}
 
+#[test]
+fn legacy_offset_preserves_the_gradients_world_paint_frame() {
+    let mut s = Session::new();
     let legacy_gradient = square(&mut s, false);
     let mut gradient = figcraft_color::Gradient::default_for(figcraft_color::GradientKind::Linear, figcraft_color::Color::BLACK);
     gradient.from = (0.2, 0.1);
@@ -164,7 +176,11 @@ fn region_paints_survive_simplify_offset_and_bucket_normalization() {
         before_world.as_coeffs().iter().zip(after_world.as_coeffs()).all(|(before, after)| (before - after).abs() < 1e-8),
         "legacy offset preserves the gradient's world paint frame"
     );
+}
 
+#[test]
+fn bucket_fills_an_explicitly_empty_face_and_leaves_the_other_empty() {
+    let mut s = Session::new();
     let empty_faces =
         id_of(&ex(&mut s, "vector.create", json!({"path": "M0 0 L100 0 L100 100 L0 100 Z M200 0 L300 0 L300 100 L200 100 Z"}))["id"]).unwrap();
     {
