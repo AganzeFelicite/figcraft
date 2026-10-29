@@ -346,6 +346,8 @@ mod nested_override_tests;
 #[cfg(test)]
 mod node_set_refusals_tests;
 #[cfg(test)]
+mod normalize_guard_tests;
+#[cfg(test)]
 mod online_tests;
 #[cfg(test)]
 mod open_issues_tests;
